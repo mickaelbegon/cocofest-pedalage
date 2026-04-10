@@ -1,0 +1,161 @@
+{
+  "task_threshold_nm": 0.2,
+  "high_demand_fraction_for_fatigue": 0.8,
+  "redundancy_regions": {
+    "no_support_intervals_deg": [
+      [
+        95.42015484091262,
+        103.94512222193019
+      ]
+    ],
+    "single_support_intervals_deg": [
+      [
+        75.22530535402117,
+        93.7536851087956
+      ],
+      [
+        105.71048274452552,
+        132.68395707317666
+      ]
+    ],
+    "double_support_intervals_deg": [
+      [
+        318.8124815676323,
+        73.45706606191925
+      ],
+      [
+        135.23852152887545,
+        234.16001866696985
+      ]
+    ],
+    "triple_or_more_support_intervals_deg": [
+      [
+        239.69919280507688,
+        315.27007651950896
+      ]
+    ]
+  },
+  "threshold_regions": {
+    "below_0p20_nm_intervals_deg": [
+      [
+        85.45623785975053,
+        127.84380381561603
+      ]
+    ]
+  },
+  "base_deficit_area_at_threshold": 0.10035800075252427,
+  "muscles": {
+    "Delt_ant": {
+      "max_positive_torque_nm": 0.3557076647215102,
+      "max_negative_torque_nm": -0.22162729634485875,
+      "support_fraction": 0.48760330578512395,
+      "support_intervals_deg": [
+        [
+          270.36998173061767,
+          73.45706606191925
+        ]
+      ],
+      "positive_area": 0.6255935238810104,
+      "shared_contribution_area": 0.2911068748798789,
+      "unique_contribution_area": 0.0,
+      "extra_deficit_area_if_removed": 0.0,
+      "fatigue": {
+        "rho_crit": 0.44049386600558194,
+        "cycles_to_failure_high_demand": 98,
+        "asymptotic_capacity_ratio_at_high_demand": -0.016143337600670327,
+        "fit_r2": {
+          "linear": 0.999194761680124,
+          "quadratic": 0.9999997220847091,
+          "exponential": 1.0
+        }
+      }
+    },
+    "Delt_post": {
+      "max_positive_torque_nm": 0.5672568924836507,
+      "max_negative_torque_nm": -0.4973513685057682,
+      "support_fraction": 0.371900826446281,
+      "support_intervals_deg": [
+        [
+          105.71048274452552,
+          270.36998173061767
+        ]
+      ],
+      "positive_area": 0.9973064564756189,
+      "shared_contribution_area": 0.509027157151038,
+      "unique_contribution_area": 0.05527253828059986,
+      "extra_deficit_area_if_removed": 0.0608240804482735,
+      "fatigue": {
+        "rho_crit": 0.6334532013303656,
+        "cycles_to_failure_high_demand": 194,
+        "asymptotic_capacity_ratio_at_high_demand": 0.5370811319291526,
+        "fit_r2": {
+          "linear": 0.9946999756981815,
+          "quadratic": 0.9999879141312279,
+          "exponential": 1.0
+        }
+      }
+    },
+    "Biceps": {
+      "max_positive_torque_nm": 1.0771108329893382,
+      "max_negative_torque_nm": -1.0949726658811005,
+      "support_fraction": 0.6363636363636364,
+      "support_intervals_deg": [
+        [
+          239.69919280507688,
+          93.7536851087956
+        ]
+      ],
+      "positive_area": 2.2280767446165166,
+      "shared_contribution_area": 0.9834281360572662,
+      "unique_contribution_area": 0.06494599253150984,
+      "extra_deficit_area_if_removed": 0.11477789611705688,
+      "fatigue": {
+        "rho_crit": 0.7767533713674939,
+        "cycles_to_failure_high_demand": 367,
+        "asymptotic_capacity_ratio_at_high_demand": 0.7700720595630248,
+        "fit_r2": {
+          "linear": 0.9366740580032443,
+          "quadratic": 0.9981948267681119,
+          "exponential": 1.0
+        }
+      }
+    },
+    "Triceps": {
+      "max_positive_torque_nm": 3.3033163082570223,
+      "max_negative_torque_nm": -2.253011824858991,
+      "support_fraction": 0.34710743801652894,
+      "support_intervals_deg": [
+        [
+          135.23852152887545,
+          315.27007651950896
+        ]
+      ],
+      "positive_area": 6.338146293102104,
+      "shared_contribution_area": 2.807297683809572,
+      "unique_contribution_area": 0.0,
+      "extra_deficit_area_if_removed": 0.0,
+      "fatigue": {
+        "rho_crit": 0.9359591274760445,
+        "cycles_to_failure_high_demand": null,
+        "asymptotic_capacity_ratio_at_high_demand": 0.94526182125354,
+        "fit_r2": {
+          "linear": 0.37292161178343675,
+          "quadratic": 0.707618134878473,
+          "exponential": 1.0
+        }
+      }
+    }
+  },
+  "candidate_fixed_weights_raw": {
+    "Delt_ant": 0.0007426195787752012,
+    "Delt_post": 0.0012543990103950147,
+    "Biceps": 0.001159621042678156,
+    "Triceps": 7.01824420952393e-05
+  },
+  "candidate_fixed_weights_normalized": {
+    "Delt_ant": 10.581272988013842,
+    "Delt_post": 17.873402135148908,
+    "Biceps": 16.52295087002703,
+    "Triceps": 1.0
+  }
+}

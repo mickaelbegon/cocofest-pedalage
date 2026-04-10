@@ -3,6 +3,7 @@ This example will do an optimal control program of a 100 steps hand cycling moti
 muscle driven / FES driven dynamics and includes a resistive torque at the handle.
 """
 
+import argparse
 from sys import platform
 import numpy as np
 
@@ -39,6 +40,7 @@ from cocofest import (
     OcpFesMsk,
     DingModelPulseWidthFrequency,
 )
+from cost_functions import CustomCostFunctions
 
 
 def set_external_forces(n_shooting: int, torque: int | float) -> tuple[dict, ExternalForceSetTimeSeries]:
@@ -153,7 +155,12 @@ def set_dynamics(
     return dynamics
 
 
-def set_objective_functions(model: BiorbdModel | FesMskModel, dynamics_type: str, init_x) -> ObjectiveList:
+def set_objective_functions(
+    model: BiorbdModel | FesMskModel,
+    dynamics_type: str,
+    init_x,
+    objective_mode: str = "force_production",
+) -> ObjectiveList:
     """
     Configure the objective functions for the optimal control problem.
 
@@ -170,13 +177,22 @@ def set_objective_functions(model: BiorbdModel | FesMskModel, dynamics_type: str
     """
     objective_functions = ObjectiveList()
     if isinstance(model, FesMskModel):
-        objective_functions.add(
-            CustomObjective.minimize_overall_muscle_force_production,
-            custom_type=ObjectiveFcn.Lagrange,
-            node=Node.ALL,
-            weight=10000,
-            quadratic=True,
-        )
+        if objective_mode == "endurance_1500_weighted_fatigue":
+            objective_functions.add(
+                CustomCostFunctions().dict_functions["minimize_endurance_1500_weighted_fatigue"]["function"],
+                custom_type=ObjectiveFcn.Lagrange,
+                node=Node.ALL,
+                weight=10000,
+                quadratic=True,
+            )
+        else:
+            objective_functions.add(
+                CustomObjective.minimize_overall_muscle_force_production,
+                custom_type=ObjectiveFcn.Lagrange,
+                node=Node.ALL,
+                weight=10000,
+                quadratic=True,
+            )
 
     else:
         control_key = "tau" if dynamics_type == "torque_driven" else "muscles"
@@ -416,6 +432,7 @@ def prepare_ocp(
     ode_solver: OdeSolver = OdeSolver.RK4(n_integration_steps=10),
     torque: int | float = -1,
     initial_guess_model_path: str = None,
+    objective_mode: str = "force_production",
 ) -> OptimalControlProgram:
     """
     Prepare the optimal control program (OCP) with the provided configuration.
@@ -479,7 +496,12 @@ def prepare_ocp(
     constraints = set_constraints(model)
 
     # Configure objective functions
-    objective_functions = set_objective_functions(model, dynamics_type, np.array([x_init["q"].init[2][-1]]))
+    objective_functions = set_objective_functions(
+        model,
+        dynamics_type,
+        np.array([x_init["q"].init[2][-1]]),
+        objective_mode=objective_mode,
+    )
 
     # Update the model with external forces and parameters
     model = update_model(model, external_force_set, parameters=ParameterList(use_sx=use_sx))
@@ -506,6 +528,9 @@ def main(
     plot=True,
     model_path: str = "../../msk_models/Wu/Modified_Wu_Shoulder_Model_Cycling.bioMod",
     initial_guess_model_path: str = "../../msk_models/Wu/Modified_Wu_Shoulder_Model_Cycling_for_IK.bioMod",
+    objective_mode: str = "endurance_1500_weighted_fatigue",
+    ipopt_linear_solver: str = "ma57",
+    ipopt_max_iter: int = 6000,
 ):
     """
     Main function to configure and solve the optimal control problem.
@@ -581,18 +606,22 @@ def main(
         # ode_solver=OdeSolver.RK4(n_integration_steps=5)
         torque=-0.3,
         initial_guess_model_path=initial_guess_model_path,
+        objective_mode=objective_mode,
     )
 
     # Add the penalty cost function plot
     ocp.add_plot_penalty(CostType.ALL)
 
     # Solve the optimal control problem
-    linear_solver = "ma57" if platform == "linux" else "mumps"
-    sol = ocp.solve(
-        Solver.IPOPT(
-            show_online_optim=False, _max_iter=10000, show_options=dict(show_bounds=True), _linear_solver=linear_solver
-        )
-    )
+    linear_solver = ipopt_linear_solver if ipopt_linear_solver else ("ma57" if platform == "linux" else "mumps")
+    solver = Solver.IPOPT(show_online_optim=False, _max_iter=ipopt_max_iter, show_options=dict(show_bounds=True))
+    solver.set_linear_solver(linear_solver)
+    if linear_solver.lower() == "ma57":
+        solver.set_option_unsafe("yes", "ma57_automatic_scaling")
+        solver.set_option_unsafe(2.0, "ma57_pre_alloc")
+    solver.set_option_unsafe(1e-6, "acceptable_tol")
+    solver.set_option_unsafe(12, "acceptable_iter")
+    sol = ocp.solve(solver)
     sol.print_cost()
     if plot:
         sol.animate(viewer="pyorerun")
@@ -600,4 +629,26 @@ def main(
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Run the cycling OCP with different driven methods.")
+    parser.add_argument("--plot", action="store_true", help="Display animation and graphs after solving.")
+    parser.add_argument(
+        "--objective-mode",
+        type=str,
+        default="endurance_1500_weighted_fatigue",
+        choices=["force_production", "endurance_1500_weighted_fatigue"],
+        help="Objective used for the FES-driven OCP.",
+    )
+    parser.add_argument(
+        "--linear-solver",
+        type=str,
+        default="ma57",
+        help="IPOPT linear solver to use, e.g. ma57 or mumps.",
+    )
+    parser.add_argument("--max-iter", type=int, default=6000, help="Maximum IPOPT iterations.")
+    args = parser.parse_args()
+    main(
+        plot=args.plot,
+        objective_mode=args.objective_mode,
+        ipopt_linear_solver=args.linear_solver,
+        ipopt_max_iter=args.max_iter,
+    )

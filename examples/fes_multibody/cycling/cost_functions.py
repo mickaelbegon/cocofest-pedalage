@@ -1,9 +1,39 @@
-from casadi import MX, vertcat, sum1, fabs, sign, tanh, if_else, log, exp, DM, dot, mmax, mmin, cos, sin
+from casadi import MX, vertcat, sum1, fabs, sign, tanh, if_else, log, exp, DM, dot, mmax, mmin, cos, sin, sqrt
 from bioptim import PenaltyController
 from cocofest.models.ding2007.ding2007 import DingModelPulseWidthFrequency
 from cocofest.models.hill_coefficients import (muscle_force_length_coefficient,
                                                muscle_force_velocity_coefficient,
                                                muscle_passive_force_coefficient)
+
+ENDURANCE_1500_FIXED_WEIGHTS = {
+    "Delt_ant": 220.0,
+    "Delt_post": 700.0,
+    "Biceps": 180.0,
+    "Triceps": 1.0,
+}
+
+ENDURANCE_1500_A_MIN = {
+    "Delt_ant": 41.0,
+    "Delt_post": 70.0,
+    "Biceps": 379.0,
+    "Triceps": 932.0,
+}
+
+ENDURANCE_RISK_FIXED_CONFIG = {
+    "risk_sharpness": 6.0,
+    "depletion_weight": 1.0,
+    "risk_weight": 0.35,
+    "eps": 1e-8,
+}
+
+ENDURANCE_RISK_ADAPTIVE_CONFIG = {
+    "risk_sharpness": 6.0,
+    "depletion_weight": 1.0,
+    "risk_weight": 0.20,
+    "adaptive_reserve_gain": 1.5,
+    "adaptive_risk_gain": 3.0,
+    "eps": 1e-8,
+}
 
 
 class CustomCostFunctions:
@@ -156,6 +186,27 @@ class CustomCostFunctions:
                 "index": 201,
                 "description": "Minimize fatigue using dynamic reserve/usefulness weights",
                 "power": "2",
+                "state": "A_recovery",
+            },
+            "minimize_endurance_1500_weighted_fatigue": {
+                "function": self.minimize_endurance_1500_weighted_fatigue,
+                "index": 202,
+                "description": "Minimize weighted fatigue for long-horizon cycling endurance with fixed muscle weights",
+                "power": "2",
+                "state": "A_recovery",
+            },
+            "minimize_endurance_fixed_weight_risk_to_failure": {
+                "function": self.minimize_endurance_fixed_weight_risk_to_failure,
+                "index": 203,
+                "description": "Fixed offline weights with a smooth risk-to-failure term",
+                "power": "2 + lse",
+                "state": "A_recovery",
+            },
+            "minimize_endurance_adaptive_weight_risk_to_failure": {
+                "function": self.minimize_endurance_adaptive_weight_risk_to_failure,
+                "index": 204,
+                "description": "Adaptive online weights built from reserve and risk-to-failure proxies",
+                "power": "2 + lse",
                 "state": "A_recovery",
             },
 
@@ -714,6 +765,128 @@ class CustomCostFunctions:
         rms_cost = (sum1(cost) / F.shape[0] + 1e-8) ** (1 / 2)
         return rms_cost
 
+    @staticmethod
+    def minimize_endurance_1500_weighted_fatigue(controller: PenaltyController) -> MX:
+        """
+        Fixed-weight endurance cost tailored for long cycling tasks.
+
+        The weights are computed offline and remain constant during the whole cycle and MHE.
+        The state penalty is normalized by the available reserve (A_rest - A_min) so muscles close
+        to their fatigue limit become increasingly expensive. A second factor penalizes negative dA,
+        which pushes the optimizer away from trajectories that keep depleting fragile muscles.
+        """
+
+        muscle_names, q, qdot, F, A, A_rest, tau_fat, alpha_a, fmax, dA = (
+            CustomCostFunctions.get_muscle_quantities(controller)
+        )
+        dA_normalized = CustomCostFunctions.normalized_dA(dA, A_rest, tau_fat, alpha_a, fmax)
+
+        weight_fatigue = vertcat(*[ENDURANCE_1500_FIXED_WEIGHTS[name] for name in muscle_names])
+        a_min = vertcat(*[ENDURANCE_1500_A_MIN[name] for name in muscle_names])
+
+        reserve = vertcat(*[
+            (A_rest[i] - A[i]) / (A_rest[i] - a_min[i] + 1e-8)
+            for i in range(F.shape[0])
+        ])
+        reserve = vertcat(*[mmax(vertcat(0, reserve[i])) for i in range(F.shape[0])])
+
+        fatigue_pressure = vertcat(*[
+            reserve[i] ** 2 * (1 + tanh(-dA_normalized[i]))
+            for i in range(F.shape[0])
+        ])
+
+        weighted_cost = vertcat(*[
+            weight_fatigue[i] * fatigue_pressure[i]
+            for i in range(F.shape[0])
+        ])
+        rms_cost = (sum1(weighted_cost) / F.shape[0] + 1e-8) ** 0.5
+        return rms_cost
+
+    @staticmethod
+    def minimize_endurance_fixed_weight_risk_to_failure(controller: PenaltyController) -> MX:
+        """
+        Fixed offline weights with a smooth risk-to-failure proxy.
+
+        The risk term is large when a muscle is both close to its fatigue threshold and still
+        depleting (negative dA). A log-sum-exp aggregates the muscle-wise hazards so the
+        bottleneck muscle dominates smoothly without introducing non-differentiable max operators.
+        """
+
+        config = ENDURANCE_RISK_FIXED_CONFIG
+        weight_fatigue, _, depletion, hazard = CustomCostFunctions.endurance_risk_signals(controller)
+
+        weighted_depletion = vertcat(*[
+            weight_fatigue[i] * depletion[i] ** 2
+            for i in range(depletion.shape[0])
+        ])
+        weighted_hazard = vertcat(*[
+            weight_fatigue[i] * hazard[i]
+            for i in range(hazard.shape[0])
+        ])
+
+        rms_depletion = sqrt(sum1(weighted_depletion) / depletion.shape[0] + config["eps"])
+        smooth_bottleneck_risk = CustomCostFunctions.smooth_logsumexp(
+            weighted_hazard,
+            sharpness=config["risk_sharpness"],
+            eps=config["eps"],
+        )
+        return config["depletion_weight"] * rms_depletion + config["risk_weight"] * smooth_bottleneck_risk
+
+    @staticmethod
+    def minimize_endurance_adaptive_weight_risk_to_failure(controller: PenaltyController) -> MX:
+        """
+        Online-adaptive version of the endurance objective.
+
+        A nominal offline weight is preserved, but it is amplified smoothly when a muscle has
+        little reserve left or a high instantaneous risk-to-failure proxy.
+        """
+
+        config = ENDURANCE_RISK_ADAPTIVE_CONFIG
+        weight_fatigue, reserve_to_failure, depletion, hazard = CustomCostFunctions.endurance_risk_signals(controller)
+
+        adaptive_scale = vertcat(*[
+            1
+            + config["adaptive_reserve_gain"] * depletion[i]
+            + config["adaptive_risk_gain"] * hazard[i]
+            for i in range(depletion.shape[0])
+        ])
+        adaptive_weight = vertcat(*[
+            weight_fatigue[i] * adaptive_scale[i]
+            for i in range(weight_fatigue.shape[0])
+        ])
+
+        weighted_depletion = vertcat(*[
+            adaptive_weight[i] * depletion[i] ** 2
+            for i in range(depletion.shape[0])
+        ])
+        weighted_hazard = vertcat(*[
+            adaptive_weight[i] * hazard[i]
+            for i in range(hazard.shape[0])
+        ])
+
+        rms_depletion = sqrt(sum1(weighted_depletion) / depletion.shape[0] + config["eps"])
+        smooth_bottleneck_risk = CustomCostFunctions.smooth_logsumexp(
+            weighted_hazard,
+            sharpness=config["risk_sharpness"],
+            eps=config["eps"],
+        )
+
+        # Mild reserve barrier so the adaptive version does not exploit already exhausted muscles.
+        reserve_barrier = vertcat(*[
+            CustomCostFunctions.smooth_positive(0.05 - reserve_to_failure[i], eps=config["eps"]) ** 2
+            for i in range(reserve_to_failure.shape[0])
+        ])
+        reserve_barrier = sum1(vertcat(*[
+            weight_fatigue[i] * reserve_barrier[i]
+            for i in range(reserve_to_failure.shape[0])
+        ])) / reserve_to_failure.shape[0]
+
+        return (
+            config["depletion_weight"] * rms_depletion
+            + config["risk_weight"] * smooth_bottleneck_risk
+            + 0.10 * reserve_barrier
+        )
+
 
 
 
@@ -898,3 +1071,51 @@ class CustomCostFunctions:
             )
             for i in range(dA.shape[0])
         ])
+
+    @staticmethod
+    def smooth_positive(x, eps=1e-8):
+        return 0.5 * (x + sqrt(x * x + eps))
+
+    @staticmethod
+    def smooth_logsumexp(x, sharpness=6.0, eps=1e-8):
+        return log(sum1(exp(sharpness * x)) + eps) / sharpness
+
+    @staticmethod
+    def endurance_risk_signals(controller: PenaltyController):
+        muscle_names, q, qdot, F, A, A_rest, tau_fat, alpha_a, fmax, dA = (
+            CustomCostFunctions.get_muscle_quantities(controller)
+        )
+        eps = ENDURANCE_RISK_FIXED_CONFIG["eps"]
+        dA_normalized = CustomCostFunctions.normalized_dA(dA, A_rest, tau_fat, alpha_a, fmax)
+
+        weight_fatigue = vertcat(*[ENDURANCE_1500_FIXED_WEIGHTS[name] for name in muscle_names])
+        a_fail = vertcat(*[ENDURANCE_1500_A_MIN[name] for name in muscle_names])
+
+        reserve_to_failure = vertcat(*[
+            (A[i] - a_fail[i]) / (A_rest[i] - a_fail[i] + eps)
+            for i in range(A.shape[0])
+        ])
+        reserve_to_failure = vertcat(*[
+            CustomCostFunctions.smooth_positive(reserve_to_failure[i], eps=eps)
+            for i in range(reserve_to_failure.shape[0])
+        ])
+
+        depletion = vertcat(*[
+            (A_rest[i] - A[i]) / (A_rest[i] - a_fail[i] + eps)
+            for i in range(A.shape[0])
+        ])
+        depletion = vertcat(*[
+            CustomCostFunctions.smooth_positive(depletion[i], eps=eps)
+            for i in range(depletion.shape[0])
+        ])
+
+        fatigue_drive = vertcat(*[
+            CustomCostFunctions.smooth_positive(-dA_normalized[i], eps=eps)
+            for i in range(dA_normalized.shape[0])
+        ])
+        hazard = vertcat(*[
+            fatigue_drive[i] / (reserve_to_failure[i] + eps)
+            for i in range(fatigue_drive.shape[0])
+        ])
+
+        return weight_fatigue, reserve_to_failure, depletion, hazard

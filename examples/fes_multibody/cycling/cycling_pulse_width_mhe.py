@@ -869,6 +869,7 @@ def save_sol_in_pkl(sol, simulation_conditions, nmpc, is_initial_guess=False, to
 
 
     pickle_file_name = simulation_conditions["pickle_file_path"]
+    Path(pickle_file_name).parent.mkdir(parents=True, exist_ok=True)
     # with open(pickle_file_name, "wb") as file:
     #     pickle.dump(dictionary, file)
 
@@ -988,9 +989,17 @@ def run_optim(mhe_info, cycling_info, simulation_conditions, model_path, save_so
     nmpc.add_plot_penalty(CostType.ALL)
 
     # Set solver for the optimal control problem
-    solver = Solver.IPOPT(show_online_optim=False, _max_iter=2000, show_options=dict(show_bounds=True))
-    linear_solver = "ma57" if platform == "linux" else "mumps"
+    max_iter = simulation_conditions.get("ipopt_max_iter", 6000)
+    linear_solver = simulation_conditions.get("ipopt_linear_solver", "ma57")
+    hsllib = simulation_conditions.get("ipopt_hsllib")
+    solver = Solver.IPOPT(show_online_optim=False, _max_iter=max_iter, show_options=dict(show_bounds=True))
     solver.set_linear_solver(linear_solver)
+    if hsllib:
+        solver.set_option_unsafe(hsllib, "hsllib")
+    solver.set_option_unsafe("yes", "ma57_automatic_scaling")
+    solver.set_option_unsafe(2.0, "ma57_pre_alloc")
+    solver.set_option_unsafe(1e-6, "acceptable_tol")
+    solver.set_option_unsafe(12, "acceptable_iter")
 
     # Solve the optimal control problem
     sol = nmpc.solve_fes_nmpc(
@@ -1021,7 +1030,16 @@ def run_optim(mhe_info, cycling_info, simulation_conditions, model_path, save_so
 
 
 def main(
-    stimulation_frequency, n_total_cycle, n_cycles_simultaneous, resistive_torque, cost_fun_dict, init_guess, save
+    stimulation_frequency,
+    n_total_cycle,
+    n_cycles_simultaneous,
+    resistive_torque,
+    cost_fun_dict,
+    init_guess,
+    save,
+    ipopt_linear_solver="ma57",
+    ipopt_max_iter=6000,
+    ipopt_hsllib=None,
 ):
     # --- Simulation configuration --- #
     save_sol = save
@@ -1056,6 +1074,11 @@ def main(
         cost_fun_dict=cost_fun_dict,
         ode_solver=mhe_info["ode_solver"],
     )
+    for simulation_conditions in simulation_conditions_list:
+        simulation_conditions["ipopt_linear_solver"] = ipopt_linear_solver
+        simulation_conditions["ipopt_max_iter"] = ipopt_max_iter
+        if ipopt_hsllib:
+            simulation_conditions["ipopt_hsllib"] = ipopt_hsllib
 
     # --- Run the initial guess optimization --- #
     if get_initial_guess:
