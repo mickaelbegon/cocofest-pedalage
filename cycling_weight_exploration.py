@@ -19,7 +19,7 @@ from cocofest.dynamics.inverse_kinematics_and_dynamics import inverse_kinematics
 
 
 ROOT = Path(__file__).resolve().parent
-COCOFEST_ROOT = ROOT / "cocofest"
+COCOFEST_ROOT = ROOT if (ROOT / "examples").exists() else ROOT / "cocofest"
 OUTPUT_DIR = ROOT / "analysis_outputs"
 
 MODEL_PATH = COCOFEST_ROOT / "examples" / "msk_models" / "Wu" / "Modified_Wu_Shoulder_Model_Cycling.bioMod"
@@ -86,6 +86,14 @@ def hand_jacobian_fd(model, q, eps=1e-7):
 
 def equivalent_hand_force_xy_from_joint_torque(j_hand_xy, tau_q):
     f_xy, *_ = np.linalg.lstsq(j_hand_xy.T, tau_q, rcond=None)
+    return f_xy
+
+
+def gravity_balancing_hand_force_xy(j_hand_xy, tau_q_gravity, arm_dof_indices=(0, 1)):
+    arm_dof_indices = tuple(arm_dof_indices)
+    arm_jacobian_xy = j_hand_xy[:, arm_dof_indices]
+    arm_gravity_torque = np.asarray(tau_q_gravity, dtype=float)[list(arm_dof_indices)]
+    f_xy, *_ = np.linalg.lstsq(arm_jacobian_xy.T, -arm_gravity_torque, rcond=None)
     return f_xy
 
 
@@ -183,7 +191,7 @@ def get_q_trajectory():
     return q_guess, qdot_guess
 
 
-def compute_torque_profiles():
+def compute_torque_profiles(return_gravity_profile: bool = False):
     model = biorbd.Model(str(MODEL_PATH))
     for i, muscle_name in enumerate(MUSCLE_LIST):
         model.muscle(i).setForceIsoMax(PARAMETERS[muscle_name]["Fmax"])
@@ -196,6 +204,7 @@ def compute_torque_profiles():
     qdot_ref = qdot_ref[:, sort_idx]
 
     torque_profiles = np.zeros((len(MUSCLE_LIST), q_ref.shape[1]))
+    gravity_torque_profile = np.zeros(q_ref.shape[1])
 
     for k in range(q_ref.shape[1]):
         qk = q_ref[:, k]
@@ -207,6 +216,10 @@ def compute_torque_profiles():
         center_xy = wheel_center_position(model, qk)
         e_t, radius = useful_tangent_and_radius(hand_xy, center_xy)
         j_hand_xy = hand_jacobian_fd(model, qk)
+        zero = np.zeros_like(qk)
+        tau_q_gravity = to_numpy(model.InverseDynamics(qk, zero, zero))
+        f_xy_gravity = gravity_balancing_hand_force_xy(j_hand_xy, tau_q_gravity, arm_dof_indices=(0, 1))
+        gravity_torque_profile[k] = radius * float(np.dot(f_xy_gravity, e_t))
 
         for i, _ in enumerate(MUSCLE_LIST):
             states = make_states_one_muscle_active(model, i, activation=1.0)
@@ -214,6 +227,8 @@ def compute_torque_profiles():
             f_xy = equivalent_hand_force_xy_from_joint_torque(j_hand_xy, tau_q)
             torque_profiles[i, k] = radius * float(np.dot(f_xy, e_t))
 
+    if return_gravity_profile:
+        return theta, torque_profiles, gravity_torque_profile
     return theta, torque_profiles
 
 

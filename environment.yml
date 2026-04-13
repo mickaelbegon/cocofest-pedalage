@@ -1,9 +1,26 @@
-# create a dev conda environment with: `make create_env` or `conda env create -f environment.yml`
-name: cocofest
+# Create the branch environment with:
+#   conda env create -f environment.yml
+# or update an existing one with:
+#   conda env update -f environment.yml --prune
+#
+# Notes:
+# - This branch uses the local `external/bioptim` checkout through PYTHONPATH.
+# - The current code expects `biorbd_casadi < 1.12.0`, hence the pin below.
+# - `ma57` is optional. If `libhsl.dylib` is available on your machine, point IPOPT to it.
+name: cocofest-run
 channels:
 - conda-forge
 dependencies:
-- biorbd
+- python=3.11
+- numpy
+- scipy
+- matplotlib
+- pytest
+- casadi=3.6.7
+- ipopt=3.14.16
+- mumps-include=5.7.3
+- mumps-seq=5.7.3
+- biorbd=1.11.2
 - bioviz
 - python-graphviz
 - pyqtgraph

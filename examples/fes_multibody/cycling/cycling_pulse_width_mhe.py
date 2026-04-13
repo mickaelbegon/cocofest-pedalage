@@ -4,6 +4,7 @@ This example will perform an optimal control program moving time horizon for a h
 
 import os
 import pickle
+from time import perf_counter
 from sys import platform
 from itertools import product
 from pathlib import Path
@@ -29,6 +30,7 @@ from bioptim import (
     ObjectiveFcn,
     ObjectiveList,
     OdeSolver,
+    OptimalControlProgram,
     PhaseDynamics,
     ParameterObjectiveList,
     SolutionMerge,
@@ -47,6 +49,10 @@ from cocofest import (
     FesNmpcMsk,
 )
 from examples.fes_multibody.cycling.cost_functions import CustomCostFunctions
+
+DEFAULT_SOLVER_CONFIG = "baseline"
+DEFAULT_TWO_STAGE_LM_ITER = 20
+SOLVER_CONFIG_CHOICES = ("baseline", "exact_jit", "lm", "two_stage")
 
 
 class MyCyclicNMPC(FesNmpcMsk):
@@ -291,6 +297,281 @@ class MyCyclicNMPC(FesNmpcMsk):
             plt.show()
 
 
+def _safe_float(value):
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(value):
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _max_abs_constraint(sol: Solution):
+    if sol is None or sol.constraints is None:
+        return None
+    try:
+        return float(np.max(np.abs(np.array(sol.constraints, dtype=float))))
+    except (TypeError, ValueError):
+        return None
+
+
+def _solver_config_file_suffix(config_name: str, n_lm_iter: int) -> str:
+    if config_name == "two_stage":
+        return f"_{config_name}_lm{n_lm_iter}"
+    return f"_{config_name}"
+
+
+def _append_solver_suffix_to_pickle_path(pickle_path: str, config_name: str, n_lm_iter: int) -> str:
+    path = Path(pickle_path)
+    return str(path.with_name(f"{path.stem}{_solver_config_file_suffix(config_name, n_lm_iter)}{path.suffix}"))
+
+
+def configure_casadi_interface_options(nmpc, config_name: str):
+    from bioptim.interfaces.ipopt_interface import IpoptInterface
+
+    if nmpc.ocp_solver is None:
+        nmpc.ocp_solver = IpoptInterface(nmpc)
+
+    for key in ("print_time", "record_time", "jit", "post_expand"):
+        nmpc.ocp_solver.options_common.pop(key, None)
+
+    if config_name in ("exact_jit", "lm", "two_stage"):
+        nmpc.ocp_solver.options_common["print_time"] = True
+        nmpc.ocp_solver.options_common["record_time"] = True
+        nmpc.ocp_solver.options_common["jit"] = True
+        nmpc.ocp_solver.options_common["post_expand"] = True
+
+
+def build_ipopt_solver(
+    config_name: str,
+    simulation_conditions: dict,
+    n_lm_iter: int = DEFAULT_TWO_STAGE_LM_ITER,
+    phase: str | None = None,
+):
+    max_iter = simulation_conditions.get("ipopt_max_iter", 2000)
+    if config_name == "two_stage" and phase == "lm":
+        max_iter = n_lm_iter
+
+    linear_solver = simulation_conditions.get("ipopt_linear_solver") or (
+        "ma57" if platform in ("linux", "darwin") else "mumps"
+    )
+    hsllib = simulation_conditions.get("ipopt_hsllib")
+
+    solver = Solver.IPOPT(show_online_optim=False, _max_iter=max_iter, show_options=dict(show_bounds=True))
+    solver.set_warm_start_init_point("yes")
+    solver.set_mu_init(1e-2)
+    solver.set_tol(1e-6)
+    solver.set_dual_inf_tol(1e-6)
+    solver.set_constr_viol_tol(1e-6)
+    solver.set_linear_solver(linear_solver)
+    solver.set_print_level(5)
+
+    if hsllib:
+        solver.set_option_unsafe(hsllib, "hsllib")
+    if linear_solver == "ma57":
+        solver.set_option_unsafe("yes", "ma57_automatic_scaling")
+        solver.set_option_unsafe(2.0, "ma57_pre_alloc")
+
+    solver.set_option_unsafe("yes", "print_timing_statistics")
+
+    if config_name == "lm" or (config_name == "two_stage" and phase == "lm"):
+        solver.set_hessian_approximation("limited-memory")
+    else:
+        solver.set_hessian_approximation("exact")
+
+    return solver
+
+
+def _make_window_record(sol: Solution, window_idx: int, phase: str = "single") -> dict:
+    return {
+        "window": window_idx,
+        "phase": phase,
+        "status": _safe_int(sol.status),
+        "iterations": _safe_int(sol.iterations),
+        "objective": _safe_float(sol.cost),
+        "solver_time_s": _safe_float(sol.solver_time_to_optimize),
+        "wall_time_s": _safe_float(sol.real_time_to_optimize),
+        "inf_pr": _safe_float(sol.inf_pr),
+        "inf_du": _safe_float(sol.inf_du),
+        "max_abs_constraint": _max_abs_constraint(sol),
+    }
+
+
+def _format_metric(value, fmt=".3f", fallback="n/a"):
+    if value is None:
+        return fallback
+    return format(value, fmt)
+
+
+def summarize_solver_run(config_name: str, result, phase_records: list[dict] | None = None):
+    final_solution = result[0]
+    window_solutions = result[1] if len(result) > 1 else []
+    total_windows = len(window_solutions)
+    converged_windows = sum(1 for sol in window_solutions if sol.status == 0)
+    total_iter = sum((sol.iterations or 0) for sol in window_solutions)
+    objective = _safe_float(final_solution.cost)
+    notes = []
+
+    if phase_records:
+        lm_records = [record for record in phase_records if record["phase"] == "lm"]
+        exact_records = [record for record in phase_records if record["phase"] == "exact"]
+        lm_iter = sum((record["iterations"] or 0) for record in lm_records)
+        exact_iter = sum((record["iterations"] or 0) for record in exact_records)
+        notes.append(f"two-stage per window (LM iter total={lm_iter}, exact iter total={exact_iter})")
+
+    failed_windows = total_windows - converged_windows
+    if failed_windows:
+        notes.append(f"{failed_windows} non-converged window(s)")
+
+    print("\nSolver summary")
+    print("config | converged | total_windows | total_iter | objective | wall_time_s | notes")
+    print(
+        f"{config_name} | {converged_windows == total_windows} | {total_windows} | {total_iter} | "
+        f"{_format_metric(objective, '.6f')} | {_format_metric(final_solution.real_time_to_optimize, '.3f')} | "
+        f"{'; '.join(notes) if notes else '-'}"
+    )
+
+    if total_windows:
+        print("\nPer-window summary")
+        print("window | status | iter | objective | solver_s | wall_s | inf_pr | inf_du | max|g|")
+        for idx, sol in enumerate(window_solutions):
+            record = _make_window_record(sol, idx)
+            print(
+                f"{record['window']} | {record['status']} | {record['iterations']} | "
+                f"{_format_metric(record['objective'], '.6f')} | {_format_metric(record['solver_time_s'], '.3f')} | "
+                f"{_format_metric(record['wall_time_s'], '.3f')} | {_format_metric(record['inf_pr'], '.3e')} | "
+                f"{_format_metric(record['inf_du'], '.3e')} | {_format_metric(record['max_abs_constraint'], '.3e')}"
+            )
+
+    if phase_records:
+        print("\nTwo-stage phase summary")
+        print("window | phase | status | iter | objective | solver_s | wall_s | inf_pr | inf_du | max|g|")
+        for record in phase_records:
+            print(
+                f"{record['window']} | {record['phase']} | {record['status']} | {record['iterations']} | "
+                f"{_format_metric(record['objective'], '.6f')} | {_format_metric(record['solver_time_s'], '.3f')} | "
+                f"{_format_metric(record['wall_time_s'], '.3f')} | {_format_metric(record['inf_pr'], '.3e')} | "
+                f"{_format_metric(record['inf_du'], '.3e')} | {_format_metric(record['max_abs_constraint'], '.3e')}"
+            )
+
+
+def solve_fes_nmpc_two_stage(
+    nmpc,
+    update_functions,
+    total_cycles: int,
+    external_force: dict,
+    cycle_solutions: MultiCyclicCycleSolutions,
+    cyclic_options: dict | None,
+    max_consecutive_failing: int,
+    simulation_conditions: dict,
+    n_lm_iter: int,
+):
+    lm_solver = build_ipopt_solver("two_stage", simulation_conditions, n_lm_iter=n_lm_iter, phase="lm")
+    exact_solver = build_ipopt_solver("two_stage", simulation_conditions, n_lm_iter=n_lm_iter, phase="exact")
+    configure_casadi_interface_options(nmpc, "two_stage")
+
+    if not cyclic_options:
+        cyclic_options = {}
+    nmpc._initialize_state_idx_to_cycle(cyclic_options)
+    nmpc._set_cyclic_bound()
+    if exact_solver.type == Solver.IPOPT().type:
+        nmpc.update_bounds(nmpc.nlp[0].x_bounds)
+
+    export_options = {
+        "frame_to_export": slice(0, (nmpc.time_idx_to_cycle + 1) if nmpc.time_idx_to_cycle >= 0 else None),
+    }
+    nmpc._initialize_frame_to_export(export_options)
+
+    sol = None
+    states = []
+    controls = []
+    parameters = []
+    total_time = 0.0
+    real_time = perf_counter()
+    all_solutions = []
+    consecutive_failing = 0
+    nmpc.total_optimization_run = 0
+    phase_records = []
+
+    while update_functions(nmpc, nmpc.total_optimization_run, sol) and consecutive_failing < max_consecutive_failing:
+        lm_sol = OptimalControlProgram.solve(nmpc, solver=lm_solver)
+        phase_records.append(_make_window_record(lm_sol, nmpc.total_optimization_run, phase="lm"))
+
+        sol = OptimalControlProgram.solve(nmpc, solver=exact_solver, warm_start=lm_sol)
+        phase_records.append(_make_window_record(sol, nmpc.total_optimization_run, phase="exact"))
+
+        consecutive_failing = 0 if sol.status == 0 else consecutive_failing + 1
+        total_time += (lm_sol.real_time_to_optimize or 0.0) + (sol.real_time_to_optimize or 0.0)
+
+        _states, _controls, _parameters = nmpc.export_data(sol)
+        states.append(_states)
+        controls.append(_controls)
+        parameters.append(_parameters)
+        all_solutions.append(sol)
+
+        nmpc.advance_window(sol, n_cycles_simultaneous=nmpc.n_cycles_simultaneous)
+        nmpc.total_optimization_run += 1
+
+    if sol is None:
+        raise RuntimeError("Two-stage NMPC did not execute any optimization window.")
+
+    states.append({key: sol.decision_states()[key][-1] for key in sol.decision_states().keys()})
+    real_time = perf_counter() - real_time
+
+    dt = float(sol.t_span()[0][-1])
+    final_sol = nmpc._initialize_solution(float(dt), states, controls, parameters)
+    final_sol.solver_time_to_optimize = total_time
+    final_sol.real_time_to_optimize = real_time
+
+    result = [final_sol, all_solutions]
+    cycle_solutions_output = []
+    if cycle_solutions in (MultiCyclicCycleSolutions.FIRST_CYCLES, MultiCyclicCycleSolutions.ALL_CYCLES):
+        for iter_sol in all_solutions:
+            _states, _controls, _parameters = nmpc.export_cycles(iter_sol)
+            cycle_dt = float(iter_sol.t_span()[0][-1])
+            cycle_solutions_output.append(nmpc._initialize_one_cycle(cycle_dt, _states, _controls, _parameters))
+
+    if cycle_solutions == MultiCyclicCycleSolutions.ALL_CYCLES and all_solutions:
+        for cycle_number in range(1, nmpc.n_cycles):
+            _states, _controls, _parameters = nmpc.export_cycles(all_solutions[-1], cycle_number=cycle_number)
+            cycle_dt = float(all_solutions[-1].t_span()[0][-1])
+            cycle_solutions_output.append(nmpc._initialize_one_cycle(cycle_dt, _states, _controls, _parameters))
+
+    result.append(cycle_solutions_output)
+
+    model = nmpc.nlp[0].model
+    total_nmpc_duration = nmpc.cycle_duration * total_cycles
+    total_nmpc_shooting_len = nmpc.cycle_len * total_cycles
+
+    external_force_set = ExternalForceSetTimeSeries(nb_frames=total_nmpc_shooting_len)
+    external_force_array = np.array(external_force["torque"])
+    reshape_values_array = np.tile(external_force_array[:, np.newaxis], (1, total_nmpc_shooting_len))
+    external_force_set.add_torque(
+        segment=external_force["Segment_application"], values=reshape_values_array, force_name="resistance_torque"
+    )
+    numerical_time_series = {"external_forces": external_force_set.to_numerical_time_series()}
+
+    if isinstance(model, FesMskModel):
+        all_stim_time = nmpc.get_stim_time_from_all_models()
+        nmpc.nlp[0].model.muscles_dynamics_model[0].stim_time = all_stim_time
+        numerical_data_time_series, _ = model.muscles_dynamics_model[0].get_numerical_data_time_series(
+            total_nmpc_shooting_len, total_nmpc_duration
+        )
+        numerical_time_series.update(numerical_data_time_series)
+
+    result[0].ocp.nlp[0].numerical_data_timeseries = numerical_time_series
+    return tuple(result), phase_records
+
+
 # --------------------#
 #    OCP functions    #
 # --------------------#
@@ -399,7 +680,7 @@ def prepare_nmpc(
         parameter_init=parameters_init,
         parameter_bounds=parameters_bounds,
         parameter_objectives=parameters_objectives,
-        n_threads=48,
+        n_threads=simulation_conditions.get("n_threads", 4),
         use_sx=use_sx,
     )
 
@@ -815,6 +1096,7 @@ def save_sol_in_pkl(sol, simulation_conditions, nmpc, is_initial_guess=False, to
     controls = solution.stepwise_controls(to_merge=[SolutionMerge.NODES])
     stim_time = solution.ocp.nlp[0].model.muscles_dynamics_model[0].stim_time
     solving_time_per_ocp = [sol[1][i].solver_time_to_optimize for i in range(len(sol[1]))]
+    real_time_per_ocp = [sol[1][i].real_time_to_optimize for i in range(len(sol[1]))]
     objective_values_per_ocp = [float(sol[1][i].cost) for i in range(len(sol[1]))]
     objective_values_per_kept_cycle = [float(sol[2][i].cost) for i in range(len(sol[2])-(simulation_conditions["n_cycles_simultaneous"]-1))]
     iter_per_ocp = [sol[1][i].iterations for i in range(len(sol[1]))]
@@ -833,6 +1115,7 @@ def save_sol_in_pkl(sol, simulation_conditions, nmpc, is_initial_guess=False, to
         "time": time,
         "stim_time": stim_time,
         "solving_time_per_ocp": solving_time_per_ocp,
+        "real_time_per_ocp": real_time_per_ocp,
         "objective_values_per_ocp": objective_values_per_ocp,
         "objective_values_per_kept_cycle": objective_values_per_kept_cycle,
         "number_of_turns_before_failing": number_of_turns_before_failing,
@@ -845,7 +1128,11 @@ def save_sol_in_pkl(sol, simulation_conditions, nmpc, is_initial_guess=False, to
         "polynomial_order": solution.ocp.nlp[0].dynamics_type.ode_solver.polynomial_degree,
         "applied_torque": torque,
         "cost_function": cost_function,
+        "solver_config": simulation_conditions.get("solver_config", DEFAULT_SOLVER_CONFIG),
+        "two_stage_lm_iter": simulation_conditions.get("two_stage_lm_iter", DEFAULT_TWO_STAGE_LM_ITER),
     }
+    if "solver_phase_records" in simulation_conditions:
+        dictionary["solver_phase_records"] = np.array(simulation_conditions["solver_phase_records"], dtype=object)
 
     recalculate_objective = False
     if recalculate_objective:
@@ -870,8 +1157,8 @@ def save_sol_in_pkl(sol, simulation_conditions, nmpc, is_initial_guess=False, to
 
     pickle_file_name = simulation_conditions["pickle_file_path"]
     Path(pickle_file_name).parent.mkdir(parents=True, exist_ok=True)
-    # with open(pickle_file_name, "wb") as file:
-    #     pickle.dump(dictionary, file)
+    with open(pickle_file_name, "wb") as file:
+        pickle.dump(dictionary, file)
 
     np.savez_compressed(str(pickle_file_name)[:-4] + ".npz", **dictionary)
     print(simulation_conditions["pickle_file_path"])
@@ -988,30 +1275,45 @@ def run_optim(mhe_info, cycling_info, simulation_conditions, model_path, save_so
     # Add the penalty cost function plot
     nmpc.add_plot_penalty(CostType.ALL)
 
-    # Set solver for the optimal control problem
-    max_iter = simulation_conditions.get("ipopt_max_iter", 6000)
-    linear_solver = simulation_conditions.get("ipopt_linear_solver", "ma57")
-    hsllib = simulation_conditions.get("ipopt_hsllib")
-    solver = Solver.IPOPT(show_online_optim=False, _max_iter=max_iter, show_options=dict(show_bounds=True))
-    solver.set_linear_solver(linear_solver)
-    if hsllib:
-        solver.set_option_unsafe(hsllib, "hsllib")
-    solver.set_option_unsafe("yes", "ma57_automatic_scaling")
-    solver.set_option_unsafe(2.0, "ma57_pre_alloc")
-    solver.set_option_unsafe(1e-6, "acceptable_tol")
-    solver.set_option_unsafe(12, "acceptable_iter")
+    solver_config = simulation_conditions.get("solver_config", DEFAULT_SOLVER_CONFIG)
+    two_stage_lm_iter = simulation_conditions.get("two_stage_lm_iter", DEFAULT_TWO_STAGE_LM_ITER)
+    phase_records = None
 
-    # Solve the optimal control problem
-    sol = nmpc.solve_fes_nmpc(
-        update_functions,
-        solver=solver,
-        total_cycles=mhe_info["n_cycles"],
-        external_force=cycling_info["resistive_torque"],
-        cycle_solutions=MultiCyclicCycleSolutions.ALL_CYCLES,
-        get_all_iterations=True,
-        cyclic_options={"states": {}},
-        max_consecutive_failing=1,
-    )
+    if solver_config == "two_stage":
+        sol, phase_records = solve_fes_nmpc_two_stage(
+            nmpc=nmpc,
+            update_functions=update_functions,
+            total_cycles=mhe_info["n_cycles"],
+            external_force=cycling_info["resistive_torque"],
+            cycle_solutions=MultiCyclicCycleSolutions.ALL_CYCLES,
+            cyclic_options={"states": {}},
+            max_consecutive_failing=1,
+            simulation_conditions=simulation_conditions,
+            n_lm_iter=two_stage_lm_iter,
+        )
+        simulation_conditions["solver_warm_start_level"] = "primal+dual from LM to exact within each window"
+    else:
+        configure_casadi_interface_options(nmpc, solver_config)
+        solver = build_ipopt_solver(
+            config_name=solver_config,
+            simulation_conditions=simulation_conditions,
+            n_lm_iter=two_stage_lm_iter,
+        )
+        sol = nmpc.solve_fes_nmpc(
+            update_functions,
+            solver=solver,
+            total_cycles=mhe_info["n_cycles"],
+            external_force=cycling_info["resistive_torque"],
+            cycle_solutions=MultiCyclicCycleSolutions.ALL_CYCLES,
+            get_all_iterations=True,
+            cyclic_options={"states": {}},
+            max_consecutive_failing=1,
+        )
+        simulation_conditions["solver_warm_start_level"] = "Bioptim window-to-window initial guess update only"
+
+    if phase_records:
+        simulation_conditions["solver_phase_records"] = phase_records
+    summarize_solver_run(solver_config, sol, phase_records=phase_records)
 
     result_show = False
     if result_show:
@@ -1037,9 +1339,12 @@ def main(
     cost_fun_dict,
     init_guess,
     save,
-    ipopt_linear_solver="ma57",
-    ipopt_max_iter=6000,
+    n_threads=4,
+    ipopt_linear_solver=None,
+    ipopt_max_iter=2000,
     ipopt_hsllib=None,
+    solver_config=DEFAULT_SOLVER_CONFIG,
+    two_stage_lm_iter=DEFAULT_TWO_STAGE_LM_ITER,
 ):
     # --- Simulation configuration --- #
     save_sol = save
@@ -1075,10 +1380,17 @@ def main(
         ode_solver=mhe_info["ode_solver"],
     )
     for simulation_conditions in simulation_conditions_list:
-        simulation_conditions["ipopt_linear_solver"] = ipopt_linear_solver
+        simulation_conditions["n_threads"] = n_threads
+        simulation_conditions["solver_config"] = solver_config
+        simulation_conditions["two_stage_lm_iter"] = two_stage_lm_iter
+        if ipopt_linear_solver is not None:
+            simulation_conditions["ipopt_linear_solver"] = ipopt_linear_solver
         simulation_conditions["ipopt_max_iter"] = ipopt_max_iter
         if ipopt_hsllib:
             simulation_conditions["ipopt_hsllib"] = ipopt_hsllib
+        simulation_conditions["pickle_file_path"] = _append_solver_suffix_to_pickle_path(
+            simulation_conditions["pickle_file_path"], solver_config, two_stage_lm_iter
+        )
 
     # --- Run the initial guess optimization --- #
     if get_initial_guess:
@@ -1144,4 +1456,6 @@ if __name__ == "__main__":
         },
         init_guess=False,
         save=True,
+        solver_config=DEFAULT_SOLVER_CONFIG,
+        two_stage_lm_iter=DEFAULT_TWO_STAGE_LM_ITER,
     )

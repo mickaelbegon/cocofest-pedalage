@@ -6,10 +6,24 @@ from cocofest.models.hill_coefficients import (muscle_force_length_coefficient,
                                                muscle_passive_force_coefficient)
 
 ENDURANCE_1500_FIXED_WEIGHTS = {
-    "Delt_ant": 220.0,
-    "Delt_post": 700.0,
-    "Biceps": 180.0,
+    "Delt_ant": 187386, #220.0,
+    "Delt_post": 31609, #700.0,
+    "Biceps": 116430, #180.0,
     "Triceps": 1.0,
+}
+
+SIMPLE_WEIGHTED_RMS_FATIGUE_WEIGHTS = {
+    "Delt_ant": 192.0,
+    "Delt_post": 32.0,
+    "Biceps": 117.0,
+    "Triceps": 0.001,
+}
+
+WEIGHTED_SQUARE_FATIGUE_WEIGHTS = {
+    "Delt_ant": 191790.4782397877e-6,
+    "Delt_post": 31608.944067062093e-6,
+    "Biceps": 117259.12134978296e-6,
+    "Triceps": 1.0e-6,
 }
 
 ENDURANCE_1500_A_MIN = {
@@ -23,7 +37,8 @@ ENDURANCE_RISK_FIXED_CONFIG = {
     "risk_sharpness": 6.0,
     "depletion_weight": 1.0,
     "risk_weight": 0.35,
-    "eps": 1e-8,
+    "hazard_cap": 10.0,
+    "eps": 1e-6,
 }
 
 ENDURANCE_RISK_ADAPTIVE_CONFIG = {
@@ -32,7 +47,8 @@ ENDURANCE_RISK_ADAPTIVE_CONFIG = {
     "risk_weight": 0.20,
     "adaptive_reserve_gain": 1.5,
     "adaptive_risk_gain": 3.0,
-    "eps": 1e-8,
+    "hazard_cap": 10.0,
+    "eps": 1e-6,
 }
 
 
@@ -138,6 +154,20 @@ class CustomCostFunctions:
                 "function": self.minimize_root_mean_square_fatigue,
                 "index": 14,
                 "description": "Minimize the root mean square of muscle fatigue",
+                "power": "2",
+                "state": "A",
+            },
+            "minimize_weighted_root_mean_square_fatigue": {
+                "function": self.minimize_weighted_root_mean_square_fatigue,
+                "index": 18,
+                "description": "Minimize the weighted root mean square of muscle fatigue",
+                "power": "2",
+                "state": "A",
+            },
+            "minimize_weighted_square_fatigue": {
+                "function": self.minimize_weighted_square_fatigue,
+                "index": 19,
+                "description": "Minimize the weighted square of muscle fatigue",
                 "power": "2",
                 "state": "A",
             },
@@ -592,6 +622,45 @@ class CustomCostFunctions:
         )
         rms_fatigue = (sum1(muscle_fatigue) / len(muscle_name_list) + eps) ** 0.5
         return rms_fatigue
+
+    @staticmethod
+    def minimize_weighted_root_mean_square_fatigue(controller: PenaltyController) -> MX:
+        """
+        Minimize the weighted root-mean-square of muscle fatigue.
+
+        This keeps exactly the same structure as minimize_root_mean_square_fatigue,
+        with fixed per-muscle weights.
+        """
+        eps = 1e-8
+        muscle_name_list = controller.model.bio_model.muscle_names
+        muscle_fatigue = vertcat(
+            *[
+                SIMPLE_WEIGHTED_RMS_FATIGUE_WEIGHTS[muscle_name_list[x]]
+                * (controller.model.muscles_dynamics_model[x].a_scale - controller.states["A_" + muscle_name_list[x]].cx) ** 2
+                for x in range(len(muscle_name_list))
+            ]
+        )
+        rms_fatigue = (sum1(muscle_fatigue) / len(muscle_name_list) + eps) ** 0.5
+        return rms_fatigue
+
+    @staticmethod
+    def minimize_weighted_square_fatigue(controller: PenaltyController) -> MX:
+        """
+        Minimize the weighted mean square of muscle fatigue.
+
+        This keeps the same weighted quadratic structure as the RMS version,
+        but without the outer square root.
+        """
+        eps = 1e-8
+        muscle_name_list = controller.model.bio_model.muscle_names
+        muscle_fatigue = vertcat(
+            *[
+                WEIGHTED_SQUARE_FATIGUE_WEIGHTS[muscle_name_list[x]]
+                * (controller.model.muscles_dynamics_model[x].a_scale - controller.states["A_" + muscle_name_list[x]].cx) ** 2
+                for x in range(len(muscle_name_list))
+            ]
+        )
+        return sum1(muscle_fatigue) 
 
     @staticmethod
     def minimize_cubic_average_fatigue(controller: PenaltyController) -> MX:
@@ -1078,7 +1147,9 @@ class CustomCostFunctions:
 
     @staticmethod
     def smooth_logsumexp(x, sharpness=6.0, eps=1e-8):
-        return log(sum1(exp(sharpness * x)) + eps) / sharpness
+        x_max = mmax(x)
+        shifted_x = x - x_max
+        return x_max + log(sum1(exp(sharpness * shifted_x)) + eps) / sharpness
 
     @staticmethod
     def endurance_risk_signals(controller: PenaltyController):
@@ -1086,6 +1157,7 @@ class CustomCostFunctions:
             CustomCostFunctions.get_muscle_quantities(controller)
         )
         eps = ENDURANCE_RISK_FIXED_CONFIG["eps"]
+        hazard_cap = ENDURANCE_RISK_FIXED_CONFIG["hazard_cap"]
         dA_normalized = CustomCostFunctions.normalized_dA(dA, A_rest, tau_fat, alpha_a, fmax)
 
         weight_fatigue = vertcat(*[ENDURANCE_1500_FIXED_WEIGHTS[name] for name in muscle_names])
@@ -1113,9 +1185,13 @@ class CustomCostFunctions:
             CustomCostFunctions.smooth_positive(-dA_normalized[i], eps=eps)
             for i in range(dA_normalized.shape[0])
         ])
-        hazard = vertcat(*[
+        raw_hazard = vertcat(*[
             fatigue_drive[i] / (reserve_to_failure[i] + eps)
             for i in range(fatigue_drive.shape[0])
+        ])
+        hazard = vertcat(*[
+            hazard_cap * tanh(raw_hazard[i] / hazard_cap)
+            for i in range(raw_hazard.shape[0])
         ])
 
         return weight_fatigue, reserve_to_failure, depletion, hazard
