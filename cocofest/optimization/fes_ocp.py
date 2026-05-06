@@ -3,7 +3,7 @@ import numpy as np
 from bioptim import (
     BoundsList,
     ConstraintList,
-    DynamicsList,
+    DynamicsOptions,
     InitialGuessList,
     InterpolationType,
     Node,
@@ -73,10 +73,7 @@ class OcpFes:
 
     @staticmethod
     def declare_dynamics(model, numerical_data_timeseries=None, ode_solver=OdeSolver.RK4(n_integration_steps=10)):
-        dynamics = DynamicsList()
-        dynamics.add(
-            model.declare_ding_variables,
-            dynamic_function=model.dynamics,
+        dynamics = DynamicsOptions(
             expand_dynamics=True,
             phase_dynamics=PhaseDynamics.SHARED_DURING_THE_PHASE,
             numerical_data_timeseries=numerical_data_timeseries,

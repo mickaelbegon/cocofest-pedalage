@@ -7,12 +7,13 @@ from bioptim import (
     DynamicsEvaluation,
     NonLinearProgram,
     OptimalControlProgram,
+    StateDynamics,
 )
 
 from cocofest.models.state_configure import StateConfigure
 
 
-class VeltinkModelPulseIntensity:
+class VeltinkModelPulseIntensity(StateDynamics):
     """
     This is a custom model implementing the muscle activation dynamics from:
 
@@ -48,6 +49,48 @@ class VeltinkModelPulseIntensity:
     def name_dof(self, with_muscle_name: bool = False) -> list[str]:
         muscle_name = "_" + self.muscle_name if self.muscle_name and with_muscle_name else ""
         return ["a" + muscle_name]  # Only muscle activation state
+
+    @property
+    def name(self) -> str:
+        return self.model_name
+
+    @property
+    def name_dofs(self) -> list[str]:
+        return self.name_dof
+
+    @property
+    def state_configuration_functions(self):
+        return [
+            lambda ocp, nlp, state_key=state_key: StateConfigure().state_dictionary[state_key](
+                ocp=ocp,
+                nlp=nlp,
+                as_states=True,
+                as_controls=False,
+                muscle_name=self.muscle_name,
+            )
+            for state_key in self.name_dof
+            if state_key in StateConfigure().state_dictionary
+        ]
+
+    @property
+    def control_configuration_functions(self):
+        return [lambda ocp, nlp: StateConfigure().configure_intensity(ocp, nlp, self.muscle_name)]
+
+    @property
+    def algebraic_configuration_functions(self):
+        return []
+
+    @property
+    def extra_configuration_functions(self):
+        return []
+
+    @property
+    def extra_dynamics(self):
+        return None
+
+    @property
+    def contact_types(self):
+        return ()
 
     @property
     def nb_state(self) -> int:

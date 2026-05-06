@@ -14,7 +14,6 @@ from matplotlib.figure import Figure
 import cycling_weight_exploration as cwe
 from derive_offline_task_weights import simulate_fatigue_ratios
 
-
 ROOT = Path(__file__).resolve().parent
 OUTPUT_DIR = ROOT / "analysis_outputs"
 SUMMARY_PATH = OUTPUT_DIR / "offline_1500_cycles_weight_derivation.json"
@@ -130,8 +129,12 @@ def plot_snapshot_criticality(summary: dict):
     }
 
     ax = axes[0]
-    ax.plot(cycles, [row["deficit_area"] for row in snapshots], color="#d00000", marker="o", lw=2.2, label="Deficit area")
-    ax.plot(cycles, [row["risk_fraction"] for row in snapshots], color="#222222", marker="s", lw=2.0, label="Risk fraction")
+    ax.plot(
+        cycles, [row["deficit_area"] for row in snapshots], color="#d00000", marker="o", lw=2.2, label="Deficit area"
+    )
+    ax.plot(
+        cycles, [row["risk_fraction"] for row in snapshots], color="#222222", marker="s", lw=2.0, label="Risk fraction"
+    )
     ax.set_title("Synthetic snapshot severity")
     ax.set_xlabel("Synthetic cycle")
     ax.grid(alpha=0.25)

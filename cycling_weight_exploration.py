@@ -17,7 +17,6 @@ from scipy.optimize import curve_fit
 
 from cocofest.dynamics.inverse_kinematics_and_dynamics import inverse_kinematics_cycling
 
-
 ROOT = Path(__file__).resolve().parent
 COCOFEST_ROOT = ROOT if (ROOT / "examples").exists() else ROOT / "cocofest"
 OUTPUT_DIR = ROOT / "analysis_outputs"
@@ -311,13 +310,17 @@ def analyze_fatigue_for_muscle(duty_cycle: float, parameters: dict, rho=HIGH_DEM
     deficits = np.array(deficits, dtype=float)
     fit_r2 = fit_fatigue_models(cycles, deficits)
 
-    return FatigueSummary(
-        duty_cycle=duty_cycle,
-        rho_crit=rho_crit,
-        cycles_to_failure_high_demand=cycles_to_failure,
-        asymptotic_capacity_ratio_at_high_demand=capacity_ratio_inf,
-        fit_r2=fit_r2,
-    ), cycles, deficits
+    return (
+        FatigueSummary(
+            duty_cycle=duty_cycle,
+            rho_crit=rho_crit,
+            cycles_to_failure_high_demand=cycles_to_failure,
+            asymptotic_capacity_ratio_at_high_demand=capacity_ratio_inf,
+            fit_r2=fit_r2,
+        ),
+        cycles,
+        deficits,
+    )
 
 
 def build_summary(theta, torque_profiles):
@@ -383,13 +386,11 @@ def build_summary(theta, torque_profiles):
     }
 
     raw_weight_signal = {
-        muscle_name: vulnerability_signal[muscle_name] * criticality_signal[muscle_name]
-        for muscle_name in MUSCLE_LIST
+        muscle_name: vulnerability_signal[muscle_name] * criticality_signal[muscle_name] for muscle_name in MUSCLE_LIST
     }
     min_non_zero = min(v for v in raw_weight_signal.values() if v > 0)
     candidate_fixed_weights = {
-        muscle_name: float(max(raw_weight_signal[muscle_name] / min_non_zero, 1e-3))
-        for muscle_name in MUSCLE_LIST
+        muscle_name: float(max(raw_weight_signal[muscle_name] / min_non_zero, 1e-3)) for muscle_name in MUSCLE_LIST
     }
 
     summary = {

@@ -1,14 +1,16 @@
 from casadi import MX, vertcat, sum1, fabs, sign, tanh, if_else, log, exp, DM, dot, mmax, mmin, cos, sin, sqrt
 from bioptim import PenaltyController
 from cocofest.models.ding2007.ding2007 import DingModelPulseWidthFrequency
-from cocofest.models.hill_coefficients import (muscle_force_length_coefficient,
-                                               muscle_force_velocity_coefficient,
-                                               muscle_passive_force_coefficient)
+from cocofest.models.hill_coefficients import (
+    muscle_force_length_coefficient,
+    muscle_force_velocity_coefficient,
+    muscle_passive_force_coefficient,
+)
 
 ENDURANCE_1500_FIXED_WEIGHTS = {
-    "Delt_ant": 187386, #220.0,
-    "Delt_post": 31609, #700.0,
-    "Biceps": 116430, #180.0,
+    "Delt_ant": 187386,  # 220.0,
+    "Delt_post": 31609,  # 700.0,
+    "Biceps": 116430,  # 180.0,
     "Triceps": 1.0,
 }
 
@@ -117,28 +119,28 @@ class CustomCostFunctions:
             "minimize_average_muscle_stress": {
                 "function": self.minimize_average_muscle_stress,
                 "index": 9,
-                "description":"Minimize the average muscle stress",
+                "description": "Minimize the average muscle stress",
                 "power": "1",
                 "state": r"\sigma",
             },
             "minimize_root_mean_square_muscle_stress": {
                 "function": self.minimize_root_mean_square_muscle_stress,
                 "index": 10,
-                "description":"Minimize the root mean square of muscle stress",
+                "description": "Minimize the root mean square of muscle stress",
                 "power": "2",
                 "state": r"\sigma",
             },
             "minimize_cubic_average_muscle_stress": {
                 "function": self.minimize_cubic_average_muscle_stress,
                 "index": 11,
-                "description":"Minimize the cubic average of muscle stress",
+                "description": "Minimize the cubic average of muscle stress",
                 "power": "3",
                 "state": r"\sigma",
             },
             "minimize_peak_muscle_stress": {
                 "function": self.minimize_peak_muscle_stress,
                 "index": 12,
-                "description":"Minimize the peak muscle stress",
+                "description": "Minimize the peak muscle stress",
                 "power": r"\infty",
                 "state": r"\sigma",
             },
@@ -194,7 +196,6 @@ class CustomCostFunctions:
                 "power": "2",
                 "state": "W",
             },
-
             # --- Custom cost functions --- #
             "minimize_average_fatigue_and_recovery": {
                 "function": self.minimize_average_fatigue_and_recovery,
@@ -210,7 +211,6 @@ class CustomCostFunctions:
                 "power": "1",
                 "state": "A_recovery",
             },
-
             "minimize_balanced_fatigue_by_contribution": {
                 "function": self.minimize_balanced_fatigue_by_contribution,
                 "index": 201,
@@ -239,7 +239,6 @@ class CustomCostFunctions:
                 "power": "2 + lse",
                 "state": "A_recovery",
             },
-
             "minimize_peak": {
                 "function": self.minimize_peak,
                 "index": 99,
@@ -267,13 +266,21 @@ class CustomCostFunctions:
         if isinstance(controller.model.muscles_dynamics_model[0], DingModelPulseWidthFrequency):
             stim_charge = vertcat(
                 *[
-                    (controller.controls["last_pulse_width_" + muscle_name_list[x]].cx - controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].min[0][0])
-                    / (controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].max[0][0] - controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].min[0][0])
+                    (
+                        controller.controls["last_pulse_width_" + muscle_name_list[x]].cx
+                        - controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].min[0][0]
+                    )
+                    / (
+                        controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].max[0][0]
+                        - controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].min[0][0]
+                    )
                     for x in range(len(muscle_name_list))
                 ]
             )
         else:
-            raise NotImplementedError("Minimizing average activation is only implemented for DingModelPulseWidthFrequency.")
+            raise NotImplementedError(
+                "Minimizing average activation is only implemented for DingModelPulseWidthFrequency."
+            )
 
         return sum1(stim_charge) / len(muscle_name_list)
 
@@ -293,21 +300,30 @@ class CustomCostFunctions:
         """
         eps = 1e-8
         muscle_name_list = controller.model.bio_model.muscle_names
-        weight_fatigue = vertcat([1.00000000e+04, 1.55976591e+03, 4.66525639e+03, 1.00000000e-05])
+        weight_fatigue = vertcat([1.00000000e04, 1.55976591e03, 4.66525639e03, 1.00000000e-05])
 
         if isinstance(controller.model.muscles_dynamics_model[0], DingModelPulseWidthFrequency):
             stim_charge = vertcat(
-                *[  weight_fatigue[x] *
-                    ((controller.controls["last_pulse_width_" + muscle_name_list[x]].cx -
-                     controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].min[0][0])
-                    / (controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].max[0][0] -
-                       controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].min[0][0])) ** 2
+                *[
+                    weight_fatigue[x]
+                    * (
+                        (
+                            controller.controls["last_pulse_width_" + muscle_name_list[x]].cx
+                            - controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].min[0][0]
+                        )
+                        / (
+                            controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].max[0][0]
+                            - controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].min[0][0]
+                        )
+                    )
+                    ** 2
                     for x in range(len(muscle_name_list))
                 ]
             )
         else:
             raise NotImplementedError(
-                "Minimizing average activation is only implemented for DingModelPulseWidthFrequency.")
+                "Minimizing average activation is only implemented for DingModelPulseWidthFrequency."
+            )
 
         rms_activation = (sum1(stim_charge) / len(muscle_name_list) + eps) ** 0.5
         return rms_activation
@@ -331,16 +347,24 @@ class CustomCostFunctions:
         if isinstance(controller.model.muscles_dynamics_model[0], DingModelPulseWidthFrequency):
             stim_charge = vertcat(
                 *[
-                    ((controller.controls["last_pulse_width_" + muscle_name_list[x]].cx -
-                      controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].min[0][0])
-                     / (controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].max[0][0] -
-                        controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].min[0][0])) ** 3
+                    (
+                        (
+                            controller.controls["last_pulse_width_" + muscle_name_list[x]].cx
+                            - controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].min[0][0]
+                        )
+                        / (
+                            controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].max[0][0]
+                            - controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].min[0][0]
+                        )
+                    )
+                    ** 3
                     for x in range(len(muscle_name_list))
                 ]
             )
         else:
             raise NotImplementedError(
-                "Minimizing average activation is only implemented for DingModelPulseWidthFrequency.")
+                "Minimizing average activation is only implemented for DingModelPulseWidthFrequency."
+            )
 
         x = sum1(stim_charge) / len(muscle_name_list)
         cubic_avg_activation = sign(x) * (fabs(x) + eps) ** (1 / 3)
@@ -364,10 +388,14 @@ class CustomCostFunctions:
         muscle_name_list = controller.model.bio_model.muscle_names
         stim_activation = vertcat(
             *[
-                (controller.controls["last_pulse_width_" + muscle_name_list[x]].cx -
-                 controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].min[0][0])
-                / (controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].max[0][0] -
-                   controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].min[0][0])
+                (
+                    controller.controls["last_pulse_width_" + muscle_name_list[x]].cx
+                    - controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].min[0][0]
+                )
+                / (
+                    controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].max[0][0]
+                    - controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].min[0][0]
+                )
                 for x in range(len(muscle_name_list))
             ]
         )
@@ -391,10 +419,7 @@ class CustomCostFunctions:
         """
         muscle_name_list = controller.model.bio_model.muscle_names
         muscle_force = vertcat(
-            *[
-                controller.states["F_" + muscle_name_list[x]].cx
-                for x in range(len(muscle_name_list))
-            ]
+            *[controller.states["F_" + muscle_name_list[x]].cx for x in range(len(muscle_name_list))]
         )
         return sum1(muscle_force) / len(muscle_name_list)
 
@@ -414,11 +439,11 @@ class CustomCostFunctions:
         """
         eps = 1e-8
         muscle_name_list = controller.model.bio_model.muscle_names
-        weight_fatigue = vertcat([1.00000000e+04, 1.55976591e+03, 4.66525639e+03, 1.00000000e-05])
-        
+        weight_fatigue = vertcat([1.00000000e04, 1.55976591e03, 4.66525639e03, 1.00000000e-05])
+
         muscle_force = vertcat(
-            *[  weight_fatigue[x] *
-                controller.states["F_" + muscle_name_list[x]].cx ** 2
+            *[
+                weight_fatigue[x] * controller.states["F_" + muscle_name_list[x]].cx ** 2
                 for x in range(len(muscle_name_list))
             ]
         )
@@ -442,10 +467,7 @@ class CustomCostFunctions:
         eps = 1e-8
         muscle_name_list = controller.model.bio_model.muscle_names
         muscle_force = vertcat(
-            *[
-                controller.states["F_" + muscle_name_list[x]].cx ** 3
-                for x in range(len(muscle_name_list))
-            ]
+            *[controller.states["F_" + muscle_name_list[x]].cx ** 3 for x in range(len(muscle_name_list))]
         )
         cubic_avg_force = (sum1(muscle_force) / len(muscle_name_list) + eps) ** (1 / 3)
         return cubic_avg_force
@@ -466,10 +488,7 @@ class CustomCostFunctions:
         """
         muscle_name_list = controller.model.bio_model.muscle_names
         muscle_force = vertcat(
-            *[
-                controller.states["F_" + muscle_name_list[x]].cx
-                for x in range(len(muscle_name_list))
-            ]
+            *[controller.states["F_" + muscle_name_list[x]].cx for x in range(len(muscle_name_list))]
         )
         max_force = mmax(muscle_force)
         return max_force
@@ -514,10 +533,12 @@ class CustomCostFunctions:
         """
         eps = 1e-8
         muscle_name_list = controller.model.bio_model.muscle_names
-        weight_fatigue = vertcat([1.00000000e+04, 1.55976591e+03, 4.66525639e+03, 1.00000000e-05])
+        weight_fatigue = vertcat([1.00000000e04, 1.55976591e03, 4.66525639e03, 1.00000000e-05])
         muscle_stress = vertcat(
-            *[  weight_fatigue[x] *
-                (controller.states["F_" + muscle_name_list[x]].cx / controller.model.muscles_dynamics_model[x].pcsa) ** 2
+            *[
+                weight_fatigue[x]
+                * (controller.states["F_" + muscle_name_list[x]].cx / controller.model.muscles_dynamics_model[x].pcsa)
+                ** 2
                 for x in range(len(muscle_name_list))
             ]
         )
@@ -542,12 +563,12 @@ class CustomCostFunctions:
         muscle_name_list = controller.model.bio_model.muscle_names
         muscle_stress = vertcat(
             *[
-                (controller.states["F_" + muscle_name_list[x]].cx / controller.model.muscles_dynamics_model[
-                    x].pcsa) ** 3
+                (controller.states["F_" + muscle_name_list[x]].cx / controller.model.muscles_dynamics_model[x].pcsa)
+                ** 3
                 for x in range(len(muscle_name_list))
             ]
         )
-        cubic_avg_stress = (sum1(muscle_stress) / len(muscle_name_list) + eps) ** (1/3)
+        cubic_avg_stress = (sum1(muscle_stress) / len(muscle_name_list) + eps) ** (1 / 3)
         return cubic_avg_stress
 
     @staticmethod
@@ -616,7 +637,8 @@ class CustomCostFunctions:
         muscle_name_list = controller.model.bio_model.muscle_names
         muscle_fatigue = vertcat(
             *[
-                (controller.model.muscles_dynamics_model[x].a_scale - controller.states["A_" + muscle_name_list[x]].cx) ** 2
+                (controller.model.muscles_dynamics_model[x].a_scale - controller.states["A_" + muscle_name_list[x]].cx)
+                ** 2
                 for x in range(len(muscle_name_list))
             ]
         )
@@ -636,7 +658,11 @@ class CustomCostFunctions:
         muscle_fatigue = vertcat(
             *[
                 SIMPLE_WEIGHTED_RMS_FATIGUE_WEIGHTS[muscle_name_list[x]]
-                * (controller.model.muscles_dynamics_model[x].a_scale - controller.states["A_" + muscle_name_list[x]].cx) ** 2
+                * (
+                    controller.model.muscles_dynamics_model[x].a_scale
+                    - controller.states["A_" + muscle_name_list[x]].cx
+                )
+                ** 2
                 for x in range(len(muscle_name_list))
             ]
         )
@@ -656,11 +682,15 @@ class CustomCostFunctions:
         muscle_fatigue = vertcat(
             *[
                 WEIGHTED_SQUARE_FATIGUE_WEIGHTS[muscle_name_list[x]]
-                * (controller.model.muscles_dynamics_model[x].a_scale - controller.states["A_" + muscle_name_list[x]].cx) ** 2
+                * (
+                    controller.model.muscles_dynamics_model[x].a_scale
+                    - controller.states["A_" + muscle_name_list[x]].cx
+                )
+                ** 2
                 for x in range(len(muscle_name_list))
             ]
         )
-        return sum1(muscle_fatigue) 
+        return sum1(muscle_fatigue)
 
     @staticmethod
     def minimize_cubic_average_fatigue(controller: PenaltyController) -> MX:
@@ -680,11 +710,12 @@ class CustomCostFunctions:
         muscle_name_list = controller.model.bio_model.muscle_names
         muscle_fatigue = vertcat(
             *[
-                (controller.model.muscles_dynamics_model[x].a_scale - controller.states["A_" + muscle_name_list[x]].cx) ** 3
+                (controller.model.muscles_dynamics_model[x].a_scale - controller.states["A_" + muscle_name_list[x]].cx)
+                ** 3
                 for x in range(len(muscle_name_list))
             ]
         )
-        cubic_avg_fatigue = (sum1(muscle_fatigue) / len(muscle_name_list) + eps) ** (1/3)
+        cubic_avg_fatigue = (sum1(muscle_fatigue) / len(muscle_name_list) + eps) ** (1 / 3)
         return cubic_avg_fatigue
 
     @staticmethod
@@ -728,13 +759,13 @@ class CustomCostFunctions:
         """
         eps = 1e-8
         muscle_name_list = controller.model.bio_model.muscle_names
-        weight_fatigue = vertcat([1.00000000e+04, 1.55976591e+03, 4.66525639e+03, 1.00000000e-05])
+        weight_fatigue = vertcat([1.00000000e04, 1.55976591e03, 4.66525639e03, 1.00000000e-05])
         muscle_velocity = controller.model.muscle_velocity()(
             controller.states["q"].cx, controller.states["qdot"].cx, controller.parameters.cx
         )
         muscle_power = vertcat(
-            *[  weight_fatigue[x] *
-                (controller.states["F_" + muscle_name_list[x]].cx * muscle_velocity[x]) ** 2
+            *[
+                weight_fatigue[x] * (controller.states["F_" + muscle_name_list[x]].cx * muscle_velocity[x]) ** 2
                 for x in range(len(muscle_name_list))
             ]
         )
@@ -759,16 +790,17 @@ class CustomCostFunctions:
 
         # --- Get all information --- #
         muscle_names, q, qdot, F, A, A_rest, tau_fat, alpha_a, fmax, dA = CustomCostFunctions.get_muscle_quantities(
-            controller)
+            controller
+        )
 
         # --- Fatigue --- #
         # weight_fatigue = vertcat([1.0, 0.6104101922170402, 0.754209800965523, 0.0])
-        weight_fatigue = vertcat([1.00000000e+04, 1.55976591e+03, 4.66525639e+03, 1.00000000e-05])
+        weight_fatigue = vertcat([1.00000000e04, 1.55976591e03, 4.66525639e03, 1.00000000e-05])
         cost_fatigue = [(A_rest[i] - A[i]) ** 2 for i in range(F.shape[0])]
 
         # --- Cost function --- #
         cost = vertcat(*[weight_fatigue[i] * cost_fatigue[i] for i in range(F.shape[0])])
-        rms_cost = (sum1(cost) / F.shape[0] + 1e-8) ** (1/2)
+        rms_cost = (sum1(cost) / F.shape[0] + 1e-8) ** (1 / 2)
 
         return rms_cost
 
@@ -789,37 +821,37 @@ class CustomCostFunctions:
 
         # --- Get all information --- #
         muscle_names, q, qdot, F, A, A_rest, tau_fat, alpha_a, fmax, dA = CustomCostFunctions.get_muscle_quantities(
-            controller)
+            controller
+        )
         max_dA_recovery = [A_rest[x] / tau_fat[x] for x in range(F.shape[0])]
         max_dA_fatigue = [-(alpha_a[x] * fmax[x]) for x in range(F.shape[0])]
         Amin = [41, 70, 379, 932]
 
         # --- Fatigue --- #
         weight_fatigue = [1.0, 0.6104101922170402, 0.754209800965523, 0.0]
-        cost_fatigue = [((A_rest[i] - A[i])/ Amin[i]) ** 2 for i in range(F.shape[0])]
+        cost_fatigue = [((A_rest[i] - A[i]) / Amin[i]) ** 2 for i in range(F.shape[0])]
 
         # --- Recovery --- #
         dA_nomalized = vertcat(
-            *[
-                if_else(dA[x] < 0, dA[x] / max_dA_fatigue[x], dA[x] / max_dA_recovery[x])
-                for x in range(F.shape[0])
-            ]
+            *[if_else(dA[x] < 0, dA[x] / max_dA_fatigue[x], dA[x] / max_dA_recovery[x]) for x in range(F.shape[0])]
         )
         cost_recovery = [(1 + tanh(-dA_nomalized[i])) for i in range(F.shape[0])]
 
         # --- Cost function --- #
-        cost = vertcat(*[weight_fatigue[i] * cost_fatigue[i] + weight_fatigue[i] * cost_recovery[i] for i in range(F.shape[0])])
+        cost = vertcat(
+            *[weight_fatigue[i] * cost_fatigue[i] + weight_fatigue[i] * cost_recovery[i] for i in range(F.shape[0])]
+        )
         rms_cost = (sum1(cost) / F.shape[0] + 1e-8) ** (1 / 2)
 
         return rms_cost
 
     @staticmethod
     def minimize_balanced_fatigue_by_contribution(controller: PenaltyController) -> MX:
-        muscle_names, q, qdot, F, A, A_rest, tau_fat, alpha_a, fmax, dA = (
-            CustomCostFunctions.get_muscle_quantities(controller)
+        muscle_names, q, qdot, F, A, A_rest, tau_fat, alpha_a, fmax, dA = CustomCostFunctions.get_muscle_quantities(
+            controller
         )
 
-        remaining_capacity = [(A[i] / A_rest[i] ) for i in range(F.shape[0])]
+        remaining_capacity = [(A[i] / A_rest[i]) for i in range(F.shape[0])]
         pull_capacity = remaining_capacity[0] + remaining_capacity[2]
         push_capacity = remaining_capacity[1] + remaining_capacity[3]
 
@@ -827,7 +859,7 @@ class CustomCostFunctions:
         push_weight = if_else(push_capacity >= pull_capacity, 1, 0)
 
         weight_fatigue = [pull_weight, push_weight, pull_weight, push_weight]
-        cost_fatigue = vertcat(*[(A_rest[i] - A[i])**2 for i in range(F.shape[0])])
+        cost_fatigue = vertcat(*[(A_rest[i] - A[i]) ** 2 for i in range(F.shape[0])])
 
         # --- Cost function --- #
         cost = vertcat(*[weight_fatigue[i] * cost_fatigue[i] for i in range(F.shape[0])])
@@ -845,29 +877,20 @@ class CustomCostFunctions:
         which pushes the optimizer away from trajectories that keep depleting fragile muscles.
         """
 
-        muscle_names, q, qdot, F, A, A_rest, tau_fat, alpha_a, fmax, dA = (
-            CustomCostFunctions.get_muscle_quantities(controller)
+        muscle_names, q, qdot, F, A, A_rest, tau_fat, alpha_a, fmax, dA = CustomCostFunctions.get_muscle_quantities(
+            controller
         )
         dA_normalized = CustomCostFunctions.normalized_dA(dA, A_rest, tau_fat, alpha_a, fmax)
 
         weight_fatigue = vertcat(*[ENDURANCE_1500_FIXED_WEIGHTS[name] for name in muscle_names])
         a_min = vertcat(*[ENDURANCE_1500_A_MIN[name] for name in muscle_names])
 
-        reserve = vertcat(*[
-            (A_rest[i] - A[i]) / (A_rest[i] - a_min[i] + 1e-8)
-            for i in range(F.shape[0])
-        ])
+        reserve = vertcat(*[(A_rest[i] - A[i]) / (A_rest[i] - a_min[i] + 1e-8) for i in range(F.shape[0])])
         reserve = vertcat(*[mmax(vertcat(0, reserve[i])) for i in range(F.shape[0])])
 
-        fatigue_pressure = vertcat(*[
-            reserve[i] ** 2 * (1 + tanh(-dA_normalized[i]))
-            for i in range(F.shape[0])
-        ])
+        fatigue_pressure = vertcat(*[reserve[i] ** 2 * (1 + tanh(-dA_normalized[i])) for i in range(F.shape[0])])
 
-        weighted_cost = vertcat(*[
-            weight_fatigue[i] * fatigue_pressure[i]
-            for i in range(F.shape[0])
-        ])
+        weighted_cost = vertcat(*[weight_fatigue[i] * fatigue_pressure[i] for i in range(F.shape[0])])
         rms_cost = (sum1(weighted_cost) / F.shape[0] + 1e-8) ** 0.5
         return rms_cost
 
@@ -884,14 +907,8 @@ class CustomCostFunctions:
         config = ENDURANCE_RISK_FIXED_CONFIG
         weight_fatigue, _, depletion, hazard = CustomCostFunctions.endurance_risk_signals(controller)
 
-        weighted_depletion = vertcat(*[
-            weight_fatigue[i] * depletion[i] ** 2
-            for i in range(depletion.shape[0])
-        ])
-        weighted_hazard = vertcat(*[
-            weight_fatigue[i] * hazard[i]
-            for i in range(hazard.shape[0])
-        ])
+        weighted_depletion = vertcat(*[weight_fatigue[i] * depletion[i] ** 2 for i in range(depletion.shape[0])])
+        weighted_hazard = vertcat(*[weight_fatigue[i] * hazard[i] for i in range(hazard.shape[0])])
 
         rms_depletion = sqrt(sum1(weighted_depletion) / depletion.shape[0] + config["eps"])
         smooth_bottleneck_risk = CustomCostFunctions.smooth_logsumexp(
@@ -913,25 +930,16 @@ class CustomCostFunctions:
         config = ENDURANCE_RISK_ADAPTIVE_CONFIG
         weight_fatigue, reserve_to_failure, depletion, hazard = CustomCostFunctions.endurance_risk_signals(controller)
 
-        adaptive_scale = vertcat(*[
-            1
-            + config["adaptive_reserve_gain"] * depletion[i]
-            + config["adaptive_risk_gain"] * hazard[i]
-            for i in range(depletion.shape[0])
-        ])
-        adaptive_weight = vertcat(*[
-            weight_fatigue[i] * adaptive_scale[i]
-            for i in range(weight_fatigue.shape[0])
-        ])
+        adaptive_scale = vertcat(
+            *[
+                1 + config["adaptive_reserve_gain"] * depletion[i] + config["adaptive_risk_gain"] * hazard[i]
+                for i in range(depletion.shape[0])
+            ]
+        )
+        adaptive_weight = vertcat(*[weight_fatigue[i] * adaptive_scale[i] for i in range(weight_fatigue.shape[0])])
 
-        weighted_depletion = vertcat(*[
-            adaptive_weight[i] * depletion[i] ** 2
-            for i in range(depletion.shape[0])
-        ])
-        weighted_hazard = vertcat(*[
-            adaptive_weight[i] * hazard[i]
-            for i in range(hazard.shape[0])
-        ])
+        weighted_depletion = vertcat(*[adaptive_weight[i] * depletion[i] ** 2 for i in range(depletion.shape[0])])
+        weighted_hazard = vertcat(*[adaptive_weight[i] * hazard[i] for i in range(hazard.shape[0])])
 
         rms_depletion = sqrt(sum1(weighted_depletion) / depletion.shape[0] + config["eps"])
         smooth_bottleneck_risk = CustomCostFunctions.smooth_logsumexp(
@@ -941,29 +949,22 @@ class CustomCostFunctions:
         )
 
         # Mild reserve barrier so the adaptive version does not exploit already exhausted muscles.
-        reserve_barrier = vertcat(*[
-            CustomCostFunctions.smooth_positive(0.05 - reserve_to_failure[i], eps=config["eps"]) ** 2
-            for i in range(reserve_to_failure.shape[0])
-        ])
-        reserve_barrier = sum1(vertcat(*[
-            weight_fatigue[i] * reserve_barrier[i]
-            for i in range(reserve_to_failure.shape[0])
-        ])) / reserve_to_failure.shape[0]
+        reserve_barrier = vertcat(
+            *[
+                CustomCostFunctions.smooth_positive(0.05 - reserve_to_failure[i], eps=config["eps"]) ** 2
+                for i in range(reserve_to_failure.shape[0])
+            ]
+        )
+        reserve_barrier = (
+            sum1(vertcat(*[weight_fatigue[i] * reserve_barrier[i] for i in range(reserve_to_failure.shape[0])]))
+            / reserve_to_failure.shape[0]
+        )
 
         return (
             config["depletion_weight"] * rms_depletion
             + config["risk_weight"] * smooth_bottleneck_risk
             + 0.10 * reserve_barrier
         )
-
-
-
-
-
-
-
-
-
 
     # --- Peak cost function and constraint used in OCP --- #
     @staticmethod
@@ -983,23 +984,32 @@ class CustomCostFunctions:
         return controller.parameters["minmax_param"].cx
 
     @staticmethod
-    def constraints_minmax(controller: PenaltyController, obj_fun_key: str, param_index:int) -> MX:
+    def constraints_minmax(controller: PenaltyController, obj_fun_key: str, param_index: int) -> MX:
         muscle_name_list = controller.model.bio_model.muscle_names
 
         if obj_fun_key == ["minimize_peak_force"]:
             value = controller.states["F_" + muscle_name_list[param_index]].cx
 
         elif obj_fun_key == ["minimize_peak_activation"]:
-            value = ((controller.controls["last_pulse_width_" + muscle_name_list[param_index]].cx -
-                     controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[param_index]].min[0][0])
-            / (controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[param_index]].max[0][0] -
-               controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[param_index]].min[0][0]))
+            value = (
+                controller.controls["last_pulse_width_" + muscle_name_list[param_index]].cx
+                - controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[param_index]].min[0][0]
+            ) / (
+                controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[param_index]].max[0][0]
+                - controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[param_index]].min[0][0]
+            )
 
         elif obj_fun_key == ["minimize_peak_muscle_stress"]:
-            value = controller.states["F_" + muscle_name_list[param_index]].cx / controller.model.muscles_dynamics_model[param_index].pcsa
+            value = (
+                controller.states["F_" + muscle_name_list[param_index]].cx
+                / controller.model.muscles_dynamics_model[param_index].pcsa
+            )
 
         elif obj_fun_key == ["minimize_peak_fatigue"]:
-            value = controller.model.muscles_dynamics_model[param_index].a_scale - controller.states["A_" + muscle_name_list[param_index]].cx
+            value = (
+                controller.model.muscles_dynamics_model[param_index].a_scale
+                - controller.states["A_" + muscle_name_list[param_index]].cx
+            )
 
         elif obj_fun_key == ["minimize_peak_fatigue_decay"]:
             A_rest = controller.model.muscles_dynamics_model[param_index].a_scale
@@ -1009,7 +1019,7 @@ class CustomCostFunctions:
             # At time t or t+1
             A_t = controller.states["A_" + muscle_name_list[param_index]].cx
             F_t = controller.states["F_" + muscle_name_list[param_index]].cx
-            
+
             value = -((A_t - A_rest) / tau_fat) + (alpha_a * F_t)
 
         else:
@@ -1035,12 +1045,9 @@ class CustomCostFunctions:
         muscle_name_list = controller.model.bio_model.muscle_names
 
         # Known form model
-        A_rest = vertcat(
-            *[controller.model.muscles_dynamics_model[x].a_scale for x in range(len(muscle_name_list))])
-        tau_fat = vertcat(
-            *[controller.model.muscles_dynamics_model[x].tau_fat for x in range(len(muscle_name_list))])
-        alpha_a = vertcat(
-            *[controller.model.muscles_dynamics_model[x].alpha_a for x in range(len(muscle_name_list))])
+        A_rest = vertcat(*[controller.model.muscles_dynamics_model[x].a_scale for x in range(len(muscle_name_list))])
+        tau_fat = vertcat(*[controller.model.muscles_dynamics_model[x].tau_fat for x in range(len(muscle_name_list))])
+        alpha_a = vertcat(*[controller.model.muscles_dynamics_model[x].alpha_a for x in range(len(muscle_name_list))])
 
         # At time t
         A_t = vertcat(*[controller.states["A_" + muscle_name_list[x]].cx for x in range(len(muscle_name_list))])
@@ -1056,22 +1063,10 @@ class CustomCostFunctions:
         F = vertcat(*[controller.states[f"F_{name}"].cx for name in muscle_names])
         A = vertcat(*[controller.states[f"A_{name}"].cx for name in muscle_names])
 
-        A_rest = vertcat(*[
-            controller.model.muscles_dynamics_model[i].a_scale
-            for i in range(len(muscle_names))
-        ])
-        tau_fat = vertcat(*[
-            controller.model.muscles_dynamics_model[i].tau_fat
-            for i in range(len(muscle_names))
-        ])
-        alpha_a = vertcat(*[
-            controller.model.muscles_dynamics_model[i].alpha_a
-            for i in range(len(muscle_names))
-        ])
-        fmax = vertcat(*[
-            controller.model.muscles_dynamics_model[i].fmax
-            for i in range(len(muscle_names))
-        ])
+        A_rest = vertcat(*[controller.model.muscles_dynamics_model[i].a_scale for i in range(len(muscle_names))])
+        tau_fat = vertcat(*[controller.model.muscles_dynamics_model[i].tau_fat for i in range(len(muscle_names))])
+        alpha_a = vertcat(*[controller.model.muscles_dynamics_model[i].alpha_a for i in range(len(muscle_names))])
+        fmax = vertcat(*[controller.model.muscles_dynamics_model[i].fmax for i in range(len(muscle_names))])
 
         q = controller.states["q"].cx
         qdot = controller.states["qdot"].cx
@@ -1083,21 +1078,39 @@ class CustomCostFunctions:
     def useful_gain_from_angle(theta):
         gains = []
         coeffs = [
-            [0.003796394160508141, 0.07527209994759597, -0.0012680063435009572, 0.0061414695027003875, -0.010001029394988675],
-            [-0.0035496461377487435, -0.168625205597484, -0.00715498920622323, -0.0021333488227879933, 0.01389008809979322],
-            [0.002167840747823907, 0.025718492411623006, -0.01056494736328612, -0.008221893404768942, -0.0004271720304807771],
-            [0.004142036625458454, -0.020814164180226594, -0.02166684165948551, 0.005969951747631583, 0.004676535739979978],
+            [
+                0.003796394160508141,
+                0.07527209994759597,
+                -0.0012680063435009572,
+                0.0061414695027003875,
+                -0.010001029394988675,
+            ],
+            [
+                -0.0035496461377487435,
+                -0.168625205597484,
+                -0.00715498920622323,
+                -0.0021333488227879933,
+                0.01389008809979322,
+            ],
+            [
+                0.002167840747823907,
+                0.025718492411623006,
+                -0.01056494736328612,
+                -0.008221893404768942,
+                -0.0004271720304807771,
+            ],
+            [
+                0.004142036625458454,
+                -0.020814164180226594,
+                -0.02166684165948551,
+                0.005969951747631583,
+                0.004676535739979978,
+            ],
         ]
 
         for i in range(len(coeffs)):
             a0, a1, b1, a2, b2 = coeffs[i]
-            g = (
-                    a0
-                    + a1 * cos(theta)
-                    + b1 * sin(theta)
-                    + a2 * cos(2 * theta)
-                    + b2 * sin(2 * theta)
-            )
+            g = a0 + a1 * cos(theta) + b1 * sin(theta) + a2 * cos(2 * theta) + b2 * sin(2 * theta)
             gains.append(g)
         return vertcat(*gains)
 
@@ -1105,25 +1118,39 @@ class CustomCostFunctions:
     def get_moment_arm_from_angle(theta):
         gains = []
         coeffs = [
-            [0.004161487758942413, 0.1073083139877185, -0.0015211682786977012, 0.00824887333313916,
-             -0.004961689555209104],
-            [-0.005257685768086165, -0.17937397449870182, -0.006646755380076929, -0.003783181999089678,
-             0.02065945437924536],
-            [0.0025016818882907517, 0.03586617223381479, -0.014120195346288443, -0.01071484060626549,
-             0.001829055148093859],
-            [0.004146157359059304, -0.021729857362885213, -0.022603532576381705, 0.007384693394067062,
-             0.004975602705321599],
+            [
+                0.004161487758942413,
+                0.1073083139877185,
+                -0.0015211682786977012,
+                0.00824887333313916,
+                -0.004961689555209104,
+            ],
+            [
+                -0.005257685768086165,
+                -0.17937397449870182,
+                -0.006646755380076929,
+                -0.003783181999089678,
+                0.02065945437924536,
+            ],
+            [
+                0.0025016818882907517,
+                0.03586617223381479,
+                -0.014120195346288443,
+                -0.01071484060626549,
+                0.001829055148093859,
+            ],
+            [
+                0.004146157359059304,
+                -0.021729857362885213,
+                -0.022603532576381705,
+                0.007384693394067062,
+                0.004975602705321599,
+            ],
         ]
 
         for i in range(len(coeffs)):
             a0, a1, b1, a2, b2 = coeffs[i]
-            g = (
-                    a0
-                    + a1 * cos(theta)
-                    + b1 * sin(theta)
-                    + a2 * cos(2 * theta)
-                    + b2 * sin(2 * theta)
-            )
+            g = a0 + a1 * cos(theta) + b1 * sin(theta) + a2 * cos(2 * theta) + b2 * sin(2 * theta)
             gains.append(g)
         return vertcat(*gains)
 
@@ -1132,14 +1159,9 @@ class CustomCostFunctions:
         max_dA_recovery = A_rest / tau_fat
         max_dA_fatigue = -(alpha_a * fmax)
 
-        return vertcat(*[
-            if_else(
-                dA[i] < 0,
-                dA[i] / max_dA_fatigue[i],
-                dA[i] / max_dA_recovery[i]
-            )
-            for i in range(dA.shape[0])
-        ])
+        return vertcat(
+            *[if_else(dA[i] < 0, dA[i] / max_dA_fatigue[i], dA[i] / max_dA_recovery[i]) for i in range(dA.shape[0])]
+        )
 
     @staticmethod
     def smooth_positive(x, eps=1e-8):
@@ -1153,8 +1175,8 @@ class CustomCostFunctions:
 
     @staticmethod
     def endurance_risk_signals(controller: PenaltyController):
-        muscle_names, q, qdot, F, A, A_rest, tau_fat, alpha_a, fmax, dA = (
-            CustomCostFunctions.get_muscle_quantities(controller)
+        muscle_names, q, qdot, F, A, A_rest, tau_fat, alpha_a, fmax, dA = CustomCostFunctions.get_muscle_quantities(
+            controller
         )
         eps = ENDURANCE_RISK_FIXED_CONFIG["eps"]
         hazard_cap = ENDURANCE_RISK_FIXED_CONFIG["hazard_cap"]
@@ -1163,35 +1185,23 @@ class CustomCostFunctions:
         weight_fatigue = vertcat(*[ENDURANCE_1500_FIXED_WEIGHTS[name] for name in muscle_names])
         a_fail = vertcat(*[ENDURANCE_1500_A_MIN[name] for name in muscle_names])
 
-        reserve_to_failure = vertcat(*[
-            (A[i] - a_fail[i]) / (A_rest[i] - a_fail[i] + eps)
-            for i in range(A.shape[0])
-        ])
-        reserve_to_failure = vertcat(*[
-            CustomCostFunctions.smooth_positive(reserve_to_failure[i], eps=eps)
-            for i in range(reserve_to_failure.shape[0])
-        ])
+        reserve_to_failure = vertcat(*[(A[i] - a_fail[i]) / (A_rest[i] - a_fail[i] + eps) for i in range(A.shape[0])])
+        reserve_to_failure = vertcat(
+            *[
+                CustomCostFunctions.smooth_positive(reserve_to_failure[i], eps=eps)
+                for i in range(reserve_to_failure.shape[0])
+            ]
+        )
 
-        depletion = vertcat(*[
-            (A_rest[i] - A[i]) / (A_rest[i] - a_fail[i] + eps)
-            for i in range(A.shape[0])
-        ])
-        depletion = vertcat(*[
-            CustomCostFunctions.smooth_positive(depletion[i], eps=eps)
-            for i in range(depletion.shape[0])
-        ])
+        depletion = vertcat(*[(A_rest[i] - A[i]) / (A_rest[i] - a_fail[i] + eps) for i in range(A.shape[0])])
+        depletion = vertcat(
+            *[CustomCostFunctions.smooth_positive(depletion[i], eps=eps) for i in range(depletion.shape[0])]
+        )
 
-        fatigue_drive = vertcat(*[
-            CustomCostFunctions.smooth_positive(-dA_normalized[i], eps=eps)
-            for i in range(dA_normalized.shape[0])
-        ])
-        raw_hazard = vertcat(*[
-            fatigue_drive[i] / (reserve_to_failure[i] + eps)
-            for i in range(fatigue_drive.shape[0])
-        ])
-        hazard = vertcat(*[
-            hazard_cap * tanh(raw_hazard[i] / hazard_cap)
-            for i in range(raw_hazard.shape[0])
-        ])
+        fatigue_drive = vertcat(
+            *[CustomCostFunctions.smooth_positive(-dA_normalized[i], eps=eps) for i in range(dA_normalized.shape[0])]
+        )
+        raw_hazard = vertcat(*[fatigue_drive[i] / (reserve_to_failure[i] + eps) for i in range(fatigue_drive.shape[0])])
+        hazard = vertcat(*[hazard_cap * tanh(raw_hazard[i] / hazard_cap) for i in range(raw_hazard.shape[0])])
 
         return weight_fatigue, reserve_to_failure, depletion, hazard

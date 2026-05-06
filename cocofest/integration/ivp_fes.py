@@ -1,7 +1,7 @@
 import numpy as np
 from bioptim import (
     ControlType,
-    DynamicsList,
+    DynamicsOptions,
     InitialGuessList,
     OdeSolver,
     OptimalControlProgram,
@@ -320,13 +320,9 @@ class IvpFes:
 
     def _declare_dynamics(self, numerical_data_time_series=None):
 
-        self.dynamics = DynamicsList()
-        self.dynamics.add(
-            self.model.declare_ding_variables,
-            dynamic_function=self.model.dynamics,
+        self.dynamics = DynamicsOptions(
             expand_dynamics=True,
             expand_continuity=False,
-            phase=0,
             phase_dynamics=PhaseDynamics.SHARED_DURING_THE_PHASE,
             numerical_data_timeseries=numerical_data_time_series,
             ode_solver=self.ode_solver,

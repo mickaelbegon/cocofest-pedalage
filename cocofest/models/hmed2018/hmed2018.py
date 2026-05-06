@@ -80,6 +80,14 @@ class DingModelPulseIntensityFrequency(DingModelFrequency):
         muscle_name = "_" + self.muscle_name if self.muscle_name else ""
         return "pulse_intensity" + muscle_name
 
+    @property
+    def control_configuration_functions(self):
+        return [
+            lambda ocp, nlp: StateConfigure().configure_pulse_intensity(
+                ocp, nlp, self.muscle_name, self.sum_stim_truncation
+            )
+        ]
+
     def set_ar(self, model, ar: MX | float):
         # models is required for bioptim compatibility
         self.ar = ar

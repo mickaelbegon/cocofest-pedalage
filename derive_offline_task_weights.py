@@ -14,7 +14,6 @@ from matplotlib.figure import Figure
 
 import cycling_weight_exploration as cwe
 
-
 OUTPUT_DIR = Path(__file__).resolve().parent / "analysis_outputs"
 GRAVITY_NEGLIGIBLE_TORQUE_NM = 1e-3
 
@@ -51,7 +50,9 @@ def simulate_fatigue_ratios(
 
 
 def intrinsic_vulnerability(duty_cycle: float, parameters: dict, rho: float, total_cycles: int) -> dict[str, float]:
-    fatigue_summary, _, _ = cwe.analyze_fatigue_for_muscle(duty_cycle=duty_cycle, parameters=parameters, rho=rho, max_cycles=total_cycles)
+    fatigue_summary, _, _ = cwe.analyze_fatigue_for_muscle(
+        duty_cycle=duty_cycle, parameters=parameters, rho=rho, max_cycles=total_cycles
+    )
     cycles_fail = fatigue_summary.cycles_to_failure_high_demand
     inv_cycles = 1e-4 if cycles_fail is None else 1.0 / float(cycles_fail)
     low_sustainable_fraction = max(1.0 - float(fatigue_summary.rho_crit), 1e-6)
@@ -121,7 +122,9 @@ def feasibility_metrics(
             "extra_deficit_if_removed": float(np.trapezoid(deficit_without_i - deficit, theta)),
             "support_in_risk_area": float(np.trapezoid(positive_profiles[i] * risk_mask, theta)),
             "support_in_pre_risk_area": float(np.trapezoid(positive_profiles[i] * pre_risk_mask, theta)),
-            "unique_support_area": float(np.trapezoid(np.where(redundancy_count == 1, positive_profiles[i], 0.0), theta)),
+            "unique_support_area": float(
+                np.trapezoid(np.where(redundancy_count == 1, positive_profiles[i], 0.0), theta)
+            ),
             "low_redundancy_support_area": float(
                 np.trapezoid(np.where(redundancy_count <= 2, positive_profiles[i], 0.0), theta)
             ),
@@ -203,10 +206,7 @@ def derive_weights(total_cycles: int, num_snapshots: int, rho: float, pre_risk_w
             unique_support = metrics["per_muscle"][muscle_name]["unique_support_area"]
             low_redundancy_support = metrics["per_muscle"][muscle_name]["low_redundancy_support_area"]
             criticality[muscle_name] += snapshot_weight * (
-                restore_gain
-                + 0.75 * unique_support
-                + 1.00 * support_pre_risk
-                + 0.10 * support_risk
+                restore_gain + 0.75 * unique_support + 1.00 * support_pre_risk + 0.10 * support_risk
             )
             trajectory_vulnerability[muscle_name] += snapshot_weight * (1.0 - ratios[i])
             row["restore_gain"][muscle_name] = float(restore_gain)
@@ -222,18 +222,14 @@ def derive_weights(total_cycles: int, num_snapshots: int, rho: float, pre_risk_w
     criticality_norm = normalize_positive(criticality)
     trajectory_norm = normalize_positive(trajectory_vulnerability)
     intrinsic_norm = normalize_positive(intrinsic_combined)
-    combined_vulnerability = {
-        m: float(np.sqrt(trajectory_norm[m] * intrinsic_norm[m]))
-        for m in cwe.MUSCLE_LIST
-    }
+    combined_vulnerability = {m: float(np.sqrt(trajectory_norm[m] * intrinsic_norm[m])) for m in cwe.MUSCLE_LIST}
     vulnerability_exponent = 2.0
     raw_weights = {
-        m: float(criticality_norm[m] * (combined_vulnerability[m] ** vulnerability_exponent))
-        for m in cwe.MUSCLE_LIST
+        m: float(criticality_norm[m] * (combined_vulnerability[m] ** vulnerability_exponent)) for m in cwe.MUSCLE_LIST
     }
     normalized_weights = normalize_positive(raw_weights)
     sqrt_compressed = {m: float(np.sqrt(v)) for m, v in normalized_weights.items()}
-    fourth_root_compressed = {m: float(v ** 0.25) for m, v in normalized_weights.items()}
+    fourth_root_compressed = {m: float(v**0.25) for m, v in normalized_weights.items()}
 
     return {
         "rho_for_offline_fatigue": float(rho),
@@ -310,7 +306,9 @@ def plot_offline_weight_derivation(summary: dict, stem: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Derive constant muscle weights from offline task and physiology only.")
+    parser = argparse.ArgumentParser(
+        description="Derive constant muscle weights from offline task and physiology only."
+    )
     parser.add_argument("--target-cycles", type=int, default=1500, help="Synthetic endurance horizon.")
     parser.add_argument("--num-snapshots", type=int, default=8, help="Number of synthetic snapshots.")
     parser.add_argument("--rho", type=float, default=cwe.HIGH_DEMAND_FRACTION, help="Standardized effort fraction.")

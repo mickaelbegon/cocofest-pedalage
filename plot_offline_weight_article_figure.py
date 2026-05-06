@@ -14,7 +14,6 @@ from matplotlib.figure import Figure
 import cycling_weight_exploration as cwe
 from derive_offline_task_weights import simulate_fatigue_ratios
 
-
 ROOT = Path(__file__).resolve().parent
 OUTPUT_DIR = ROOT / "analysis_outputs"
 SUMMARY_PATH = OUTPUT_DIR / "offline_1500_cycles_weight_derivation.json"

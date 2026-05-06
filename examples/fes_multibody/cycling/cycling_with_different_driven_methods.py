@@ -15,8 +15,7 @@ from bioptim import (
     ConstraintFcn,
     ControlType,
     CostType,
-    DynamicsFcn,
-    DynamicsList,
+    DynamicsOptions,
     ExternalForceSetTimeSeries,
     InitialGuessList,
     InterpolationType,
@@ -28,6 +27,8 @@ from bioptim import (
     ParameterList,
     PhaseDynamics,
     Solver,
+    MusclesBiorbdModel,
+    TorqueBiorbdModel,
     VariableScalingList,
     ContactType,
 )
@@ -40,7 +41,7 @@ from cocofest import (
     OcpFesMsk,
     DingModelPulseWidthFrequency,
 )
-from cost_functions import CustomCostFunctions
+from examples.fes_multibody.cycling.cost_functions import CustomCostFunctions
 
 
 def set_external_forces(n_shooting: int, torque: int | float) -> tuple[dict, ExternalForceSetTimeSeries]:
@@ -94,12 +95,18 @@ def update_model(
             previous_stim=model.muscles_dynamics_model[0].previous_stim,
             activate_force_length_relationship=model.activate_force_length_relationship,
             activate_force_velocity_relationship=model.activate_force_velocity_relationship,
+            activate_passive_force_relationship=model.activate_passive_force_relationship,
             activate_residual_torque=model.activate_residual_torque,
             parameters=parameters,
             external_force_set=external_force_set,
+            contact_types=model.contact_types,
         )
     else:
-        model = BiorbdModel(model.path, external_force_set=external_force_set)
+        model = type(model)(
+            model.path,
+            external_force_set=external_force_set,
+            contact_types=(ContactType.RIGID_EXPLICIT,),
+        )
 
     return model
 
@@ -109,7 +116,7 @@ def set_dynamics(
     numerical_time_series: dict,
     dynamics_type_str: str = "torque_driven",
     ode_solver: OdeSolver = OdeSolver.RK4(n_integration_steps=10),
-) -> DynamicsList:
+) -> DynamicsOptions:
     """
     Set the dynamics of the optimal control program based on the chosen dynamics type.
 
@@ -124,33 +131,18 @@ def set_dynamics(
 
     Returns
     -------
-        A DynamicsList configured for the problem.
+        Dynamics options configured for the problem.
     """
-    dynamics_type = (
-        DynamicsFcn.TORQUE_DRIVEN
-        if dynamics_type_str == "torque_driven"
-        else (
-            DynamicsFcn.MUSCLE_DRIVEN
-            if dynamics_type_str == "muscle_driven"
-            else model.declare_model_variables if dynamics_type_str == "fes_driven" else None
-        )
-    )
-    if dynamics_type is None:
+    if dynamics_type_str not in ("torque_driven", "muscle_driven", "fes_driven"):
         raise ValueError("Dynamics type not recognized")
 
-    dynamics = DynamicsList()
-    dynamics.add(
-        dynamics_type=dynamics_type,
-        dynamic_function=(
-            None if dynamics_type in (DynamicsFcn.TORQUE_DRIVEN, DynamicsFcn.MUSCLE_DRIVEN) else model.muscle_dynamic
-        ),
+    model._contact_types = (ContactType.RIGID_EXPLICIT,)
+    dynamics = DynamicsOptions(
         expand_dynamics=True,
         expand_continuity=False,
         phase_dynamics=PhaseDynamics.SHARED_DURING_THE_PHASE,
         numerical_data_timeseries=numerical_time_series,
-        phase=0,
         ode_solver=ode_solver,
-        contact_type=[ContactType.RIGID_EXPLICIT],
     )
     return dynamics
 
@@ -507,10 +499,10 @@ def prepare_ocp(
     model = update_model(model, external_force_set, parameters=ParameterList(use_sx=use_sx))
 
     return OptimalControlProgram(
-        [model],
-        dynamics,
-        n_shooting,
-        final_time,
+        bio_model=[model],
+        dynamics=dynamics,
+        n_shooting=n_shooting,
+        phase_time=final_time,
         x_bounds=x_bounds,
         u_bounds=u_bounds,
         x_init=x_init,
@@ -550,8 +542,11 @@ def main(
     pedal_config = {"x_center": 0.35, "y_center": 0.0, "radius": 0.1}
 
     # --- Load the appropriate model --- #
-    if dynamics_type in ["torque_driven", "muscle_driven"]:
-        model = BiorbdModel(model_path)
+    if dynamics_type == "torque_driven":
+        model = TorqueBiorbdModel(model_path)
+        n_shooting = 100 * final_time
+    elif dynamics_type == "muscle_driven":
+        model = MusclesBiorbdModel(model_path)
         n_shooting = 100 * final_time
     elif dynamics_type == "fes_driven":
         # Set FES model (set to Ding et al. 2007 + fatigue, for now)

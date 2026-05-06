@@ -13,7 +13,6 @@ import numpy as np
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 from matplotlib.figure import Figure
 
-
 OUTPUT_DIR = Path(__file__).resolve().parent / "analysis_outputs"
 
 
@@ -25,7 +24,14 @@ def load_bo_npz(path: Path) -> tuple[list[str], np.ndarray, np.ndarray]:
     return muscle_names, weights, metric
 
 
-def analyze_near_optimal(muscle_names: list[str], weights: np.ndarray, metric: np.ndarray, metric_min: float, metric_max: float, fraction: float) -> dict:
+def analyze_near_optimal(
+    muscle_names: list[str],
+    weights: np.ndarray,
+    metric: np.ndarray,
+    metric_min: float,
+    metric_max: float,
+    fraction: float,
+) -> dict:
     threshold = metric_min + fraction * (metric_max - metric_min)
     selected = metric >= threshold
     near_weights = weights[selected]
@@ -48,8 +54,7 @@ def analyze_near_optimal(muscle_names: list[str], weights: np.ndarray, metric: n
         "raw_summary": {},
         "ratio_to_triceps_summary": {},
         "top_orderings": [
-            {"order": list(order), "count": int(count)}
-            for order, count in ordering_counts.most_common(10)
+            {"order": list(order), "count": int(count)} for order, count in ordering_counts.most_common(10)
         ],
     }
 

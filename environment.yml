@@ -4,23 +4,22 @@
 #   conda env update -f environment.yml --prune
 #
 # Notes:
-# - This branch uses the local `external/bioptim` checkout through PYTHONPATH.
-# - The current code expects `biorbd_casadi < 1.12.0`, hence the pin below.
+# - This branch targets bioptim 3.4.0 from conda-forge.
+# - Keep `external/bioptim` out of PYTHONPATH so the conda package is used.
 # - `ma57` is optional. If `libhsl.dylib` is available on your machine, point IPOPT to it.
 name: cocofest-run
 channels:
 - conda-forge
 dependencies:
-- python=3.11
+- python>=3.10,<3.12
 - numpy
 - scipy
 - matplotlib
 - pytest
-- casadi=3.6.7
-- ipopt=3.14.16
-- mumps-include=5.7.3
-- mumps-seq=5.7.3
-- biorbd=1.11.2
+- casadi>=3.7
+- ipopt>=3.14,<3.15
+- biorbd>=1.12.0,<1.13.0
+- bioptim=3.4.0
 - bioviz
 - python-graphviz
 - pyqtgraph

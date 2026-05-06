@@ -15,7 +15,6 @@ from matplotlib.figure import Figure
 import cycling_weight_exploration as cwe
 from analyze_failure_feasibility import cycle_end_indices, feasibility_metrics, load_run
 
-
 OUTPUT_DIR = Path(__file__).resolve().parent / "analysis_outputs"
 
 
@@ -48,7 +47,9 @@ def intrinsic_vulnerability() -> dict[str, float]:
     vulnerability = {}
     for i, muscle_name in enumerate(cwe.MUSCLE_LIST):
         duty_cycle = float(np.mean(support_mask[i]))
-        fatigue_summary, _, _ = cwe.analyze_fatigue_for_muscle(duty_cycle=duty_cycle, parameters=cwe.PARAMETERS[muscle_name])
+        fatigue_summary, _, _ = cwe.analyze_fatigue_for_muscle(
+            duty_cycle=duty_cycle, parameters=cwe.PARAMETERS[muscle_name]
+        )
         cycles_fail = fatigue_summary.cycles_to_failure_high_demand
         vulnerability[muscle_name] = 1e-4 if cycles_fail is None else 1.0 / float(cycles_fail)
     return vulnerability
@@ -101,14 +102,8 @@ def derive_weights(run: dict, num_snapshots: int):
     intrinsic_norm = normalize_positive(intrinsic)
     trajectory_norm = normalize_positive(trajectory_vulnerability)
 
-    vulnerability = {
-        m: float(np.sqrt(intrinsic_norm[m] * trajectory_norm[m]))
-        for m in cwe.MUSCLE_LIST
-    }
-    raw_weights = {
-        m: float(criticality_norm[m] * vulnerability[m])
-        for m in cwe.MUSCLE_LIST
-    }
+    vulnerability = {m: float(np.sqrt(intrinsic_norm[m] * trajectory_norm[m])) for m in cwe.MUSCLE_LIST}
+    raw_weights = {m: float(criticality_norm[m] * vulnerability[m]) for m in cwe.MUSCLE_LIST}
     fixed_weights = normalize_positive(raw_weights)
 
     return {
@@ -172,7 +167,9 @@ def plot_weight_derivation(summary: dict, stem: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Derive constant muscle weights from fatigue snapshots of a saved MHE run.")
+    parser = argparse.ArgumentParser(
+        description="Derive constant muscle weights from fatigue snapshots of a saved MHE run."
+    )
     parser.add_argument("npz", type=Path, help="Path to the saved MHE .npz file.")
     parser.add_argument("--num-snapshots", type=int, default=8, help="Number of cycle-end snapshots to use.")
     args = parser.parse_args()

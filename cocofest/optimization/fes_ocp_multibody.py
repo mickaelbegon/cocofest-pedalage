@@ -3,7 +3,7 @@ import numpy as np
 from bioptim import (
     BoundsList,
     ConstraintList,
-    DynamicsList,
+    DynamicsOptions,
     ExternalForceSetTimeSeries,
     InitialGuessList,
     InterpolationType,
@@ -40,16 +40,12 @@ class OcpFesMsk(OcpFes):
 
     @staticmethod
     def declare_dynamics(bio_models, numerical_time_series, ode_solver, contact_type):
-        dynamics = DynamicsList()
-        dynamics.add(
-            bio_models.declare_model_variables,
-            dynamic_function=bio_models.muscle_dynamic,
+        bio_models._contact_types = tuple(contact_type)
+        dynamics = DynamicsOptions(
             expand_dynamics=True,
             expand_continuity=False,
-            phase=0,
             phase_dynamics=PhaseDynamics.SHARED_DURING_THE_PHASE,
             numerical_data_timeseries=numerical_time_series,
-            contact_type=contact_type,
             ode_solver=ode_solver,
         )
         return dynamics
@@ -286,7 +282,9 @@ class OcpFesMsk(OcpFes):
             previous_stim=model.muscles_dynamics_model[0].previous_stim,
             activate_force_length_relationship=model.activate_force_length_relationship,
             activate_force_velocity_relationship=model.activate_force_velocity_relationship,
+            activate_passive_force_relationship=model.activate_passive_force_relationship,
             activate_residual_torque=model.activate_residual_torque,
             parameters=parameters,
             external_force_set=external_force_set,
+            contact_types=model.contact_types,
         )

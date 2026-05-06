@@ -28,7 +28,7 @@ from bioptim import (
 
 import cycling_pulse_width_mhe as base
 
-from cost_functions import CustomCostFunctions
+from examples.fes_multibody.cycling.cost_functions import CustomCostFunctions
 
 
 def minimize_root_mean_square_fatigue(controller: PenaltyController, muscle_weights: list) -> MX:
@@ -40,7 +40,8 @@ def minimize_root_mean_square_fatigue(controller: PenaltyController, muscle_weig
     muscle_fatigue = vertcat(
         *[
             muscle_weights[x]
-            * (controller.model.muscles_dynamics_model[x].a_scale - controller.states["A_" + muscle_name_list[x]].cx) ** 2
+            * (controller.model.muscles_dynamics_model[x].a_scale - controller.states["A_" + muscle_name_list[x]].cx)
+            ** 2
             for x in range(len(muscle_name_list))
         ]
     )
@@ -57,10 +58,17 @@ def minimize_root_mean_pw(controller: PenaltyController, muscle_weights: list) -
     stim_charge = vertcat(
         *[
             muscle_weights[x]
-            * ((controller.controls["last_pulse_width_" + muscle_name_list[x]].cx -
-      controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].min[0][0])
-     / (controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].max[0][0] -
-        controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].min[0][0])) ** 2
+            * (
+                (
+                    controller.controls["last_pulse_width_" + muscle_name_list[x]].cx
+                    - controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].min[0][0]
+                )
+                / (
+                    controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].max[0][0]
+                    - controller.ocp.nlp[0].u_bounds["last_pulse_width_" + muscle_name_list[x]].min[0][0]
+                )
+            )
+            ** 2
             for x in range(len(muscle_name_list))
         ]
     )
@@ -85,27 +93,18 @@ def minimize_avg_fatigue_recovery(controller: PenaltyController, muscle_weights:
     muscle_range = 4 if with_triceps else 3
 
     dA_nomalized = vertcat(
-        *[
-            if_else(dA[x] < 0, dA[x] / max_dA_fatigue[x], dA[x] / max_dA_recovery[x])
-            for x in range(muscle_range)
-        ]
+        *[if_else(dA[x] < 0, dA[x] / max_dA_fatigue[x], dA[x] / max_dA_recovery[x]) for x in range(muscle_range)]
     )
 
     A_t = vertcat(*[controller.states["A_" + muscle_name_list[x]].cx for x in range(len(muscle_name_list))])
     fatigue = [((A_rest[i] - A_t[i]) / (A_rest[i] - A_min[i])) for i in range(muscle_range)]
 
     muscle_fatigue_decay = vertcat(
-        *[
-            muscle_weights[x] *  fatigue[x] * (1 + tanh(-dA_nomalized[x]))
-            for x in range(muscle_range)
-        ]
+        *[muscle_weights[x] * fatigue[x] * (1 + tanh(-dA_nomalized[x])) for x in range(muscle_range)]
     )
 
     avg_fatigue = sum1(muscle_fatigue_decay) / muscle_range
     return avg_fatigue
-
-
-
 
 
 def set_objective_functions(muscle_fatigue_key, cost_fun_weight):
@@ -120,10 +119,12 @@ def set_objective_functions(muscle_fatigue_key, cost_fun_weight):
         elif len(cost_fun_weight) == len(muscle_fatigue_key):
             weights = list(map(float, cost_fun_weight))
         else:
-            raise ValueError(f"cost_fun_weight must be length 1 or {len(muscle_fatigue_key)}, got {len(cost_fun_weight)}")
+            raise ValueError(
+                f"cost_fun_weight must be length 1 or {len(muscle_fatigue_key)}, got {len(cost_fun_weight)}"
+            )
 
     objective_functions.add(
-        minimize_avg_fatigue_recovery, #minimize_root_mean_pw, #minimize_root_mean_square_fatigue,
+        minimize_avg_fatigue_recovery,  # minimize_root_mean_pw, #minimize_root_mean_square_fatigue,
         custom_type=ObjectiveFcn.Lagrange,
         muscle_weights=weights,
         node=Node.ALL,
@@ -159,7 +160,9 @@ def prepare_nmpc_bo(
         external_force_dict=cycling_info["resistive_torque"],
         force_name="external_torque",
     )
-    time_series2, _ = model.muscles_dynamics_model[0].get_numerical_data_time_series(window_n_shooting, window_cycle_duration)
+    time_series2, _ = model.muscles_dynamics_model[0].get_numerical_data_time_series(
+        window_n_shooting, window_cycle_duration
+    )
     numerical_time_series.update(time_series2)
 
     # --- Dynamics & states --- #
@@ -178,7 +181,9 @@ def prepare_nmpc_bo(
         ode_solver=ode_solver,
         init_file_path=initial_guess_path,
     )
-    u_bounds, u_init, u_scaling = base.set_u_bounds_and_init(model, window_n_shooting, init_file_path=initial_guess_path)
+    u_bounds, u_init, u_scaling = base.set_u_bounds_and_init(
+        model, window_n_shooting, init_file_path=initial_guess_path
+    )
     constraints = base.set_constraints(model, x_init["q"].init[2][0] - 2 * np.pi, cycle_len, n_cycles_simultaneous)
 
     # --- Per-muscle fatigue objective --- #
@@ -207,7 +212,9 @@ def prepare_nmpc_bo(
     )
 
 
-def run_optim_bo(mhe_info, cycling_info, sim_cond, model_path, save_sol=False, return_metric=False, return_solution=False):
+def run_optim_bo(
+    mhe_info, cycling_info, sim_cond, model_path, save_sol=False, return_metric=False, return_solution=False
+):
     # --- Build FES model --- #
     stim_time = list(
         np.linspace(
@@ -398,7 +405,9 @@ def bayes_optimize_weights(
     already_done = len(bo_log) if resume else 0
     remaining_calls = max(0, int(n_calls) - int(already_done))
     if resume:
-        print(f"[BO] Target total evals: {n_calls} | Already on disk: {already_done} | Remaining to run: {remaining_calls}")
+        print(
+            f"[BO] Target total evals: {n_calls} | Already on disk: {already_done} | Remaining to run: {remaining_calls}"
+        )
 
     # --- Search space over FREE muscles --- #
     space = [Real(weight_bounds_log[0], weight_bounds_log[1], prior="uniform", name=f"w_{n}") for n in free_names]
@@ -453,8 +462,12 @@ def bayes_optimize_weights(
             solving_time_per_ocp = np.array([bo_log[i].get("solving_time_per_ocp") for i in idx], dtype=object)
             total_solving_time = np.array([bo_log[i].get("total_solving_time") for i in idx], dtype=float)
             iter_per_ocp = np.array([bo_log[i].get("iter_per_ocp") for i in idx], dtype=object)
-            average_solving_time_per_iter_list = np.array([bo_log[i].get("average_solving_time_per_iter_list") for i in idx], dtype=object)
-            total_average_solving_time_per_iter = np.array([bo_log[i].get("average_solving_time_per_iter") for i in idx], dtype=float)
+            average_solving_time_per_iter_list = np.array(
+                [bo_log[i].get("average_solving_time_per_iter_list") for i in idx], dtype=object
+            )
+            total_average_solving_time_per_iter = np.array(
+                [bo_log[i].get("average_solving_time_per_iter") for i in idx], dtype=float
+            )
 
             save_fn = np.savez_compressed if compress_arrays else np.savez
             save_fn(
@@ -553,7 +566,9 @@ def bayes_optimize_weights(
     # --- Run BO (or skip if nothing to do) --- #
     res = None
     if remaining_calls > 0:
-        print(f"[BO] Optimizing {len(free_names)} free weights (of {len(muscle_names)}) over {remaining_calls} NEW evaluations")
+        print(
+            f"[BO] Optimizing {len(free_names)} free weights (of {len(muscle_names)}) over {remaining_calls} NEW evaluations"
+        )
 
         callbacks = []
         if use_checkpoint:
@@ -626,8 +641,12 @@ def bayes_optimize_weights(
         for j in range(4):
             final_sim_cond["n_cycles_simultaneous"] = 2 + j
             final_sim_cond["stimulation"] = 60 + 30 * j
-            final_sim_cond["init_guess_file_path"] = f'result/initial_guess/{final_sim_cond["n_cycles_simultaneous"]}_initial_guess_collocation_3_radau.pkl'
-            final_sim_cond["pickle_file_path"] = Path(f"result/bo/bo_best_{final_sim_cond['n_cycles_simultaneous']}_cycles.pkl")
+            final_sim_cond["init_guess_file_path"] = (
+                f'result/initial_guess/{final_sim_cond["n_cycles_simultaneous"]}_initial_guess_collocation_3_radau.pkl'
+            )
+            final_sim_cond["pickle_file_path"] = Path(
+                f"result/bo/bo_best_{final_sim_cond['n_cycles_simultaneous']}_cycles.pkl"
+            )
             final_metric, final_sol = run_optim_bo(
                 mhe_info=mhe_info,
                 cycling_info=cycling_info,

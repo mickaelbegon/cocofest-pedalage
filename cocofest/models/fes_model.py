@@ -2,13 +2,61 @@ from abc import ABC, abstractmethod
 import numpy as np
 
 from casadi import MX
-from bioptim import NonLinearProgram, OptimalControlProgram
+from bioptim import NonLinearProgram, OptimalControlProgram, StateDynamics
+
+from .state_configure import StateConfigure
 
 
-class FesModel(ABC):
+class FesModel(StateDynamics, ABC):
     def __init__(self):
+        super().__init__()
         self.stim_time = None
         self.previous_stim = None
+
+    @property
+    def name(self) -> str:
+        return self.model_name
+
+    @property
+    def name_dofs(self) -> list[str]:
+        return self.name_dof
+
+    @property
+    def state_configuration_functions(self):
+        state_configure = StateConfigure()
+        return [
+            (
+                lambda ocp, nlp, state_key=state_key: state_configure.state_dictionary[state_key](
+                    ocp=ocp,
+                    nlp=nlp,
+                    as_states=True,
+                    as_controls=False,
+                    muscle_name=self.muscle_name,
+                )
+            )
+            for state_key in self.name_dof
+            if state_key in state_configure.state_dictionary
+        ]
+
+    @property
+    def control_configuration_functions(self):
+        return []
+
+    @property
+    def algebraic_configuration_functions(self):
+        return []
+
+    @property
+    def extra_configuration_functions(self):
+        return []
+
+    @property
+    def extra_dynamics(self):
+        return None
+
+    @property
+    def contact_types(self):
+        return ()
 
     @abstractmethod
     def set_a_rest(self, model, a_rest: MX | float):
