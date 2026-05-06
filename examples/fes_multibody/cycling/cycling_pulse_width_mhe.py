@@ -52,7 +52,8 @@ from examples.fes_multibody.cycling.cost_functions import CustomCostFunctions
 
 DEFAULT_SOLVER_CONFIG = "baseline"
 DEFAULT_TWO_STAGE_LM_ITER = 20
-SOLVER_CONFIG_CHOICES = ("baseline", "exact_jit", "lm", "two_stage")
+ACADOS_SOLVER_CONFIG = "acados"
+SOLVER_CONFIG_CHOICES = ("baseline", "exact_jit", "lm", "two_stage", ACADOS_SOLVER_CONFIG)
 
 
 class MyCyclicNMPC(FesNmpcMsk):
@@ -391,6 +392,28 @@ def build_ipopt_solver(
     return solver
 
 
+def build_acados_solver(simulation_conditions: dict):
+    solver = Solver.ACADOS()
+    solver.set_convergence_tolerance(simulation_conditions.get("acados_tolerance", 1e-4))
+    solver.set_maximum_iterations(simulation_conditions.get("acados_max_iter", 200))
+    solver.set_print_level(simulation_conditions.get("acados_print_level", 1))
+    solver.set_integrator_type(simulation_conditions.get("acados_integrator_type", "IRK"))
+
+    acados_dir = simulation_conditions.get("acados_dir")
+    if acados_dir:
+        solver.set_acados_dir(acados_dir)
+
+    codegen_dir = simulation_conditions.get("acados_codegen_dir")
+    if codegen_dir:
+        solver.set_c_generated_code_path(str(codegen_dir))
+
+    model_name = simulation_conditions.get("acados_model_name")
+    if model_name:
+        solver.set_acados_model_name(model_name)
+
+    return solver
+
+
 def _make_window_record(sol: Solution, window_idx: int, phase: str = "single") -> dict:
     return {
         "window": window_idx,
@@ -668,7 +691,12 @@ def prepare_nmpc(
 
     # --- Set constraints --- #
     constraints = set_constraints(
-        model, x_init["q"].init[2][0] - 2 * np.pi, cycle_len, n_cycles_simultaneous, objective_fun_dict["cost_fun_key"]
+        model,
+        x_init["q"].init[2][0] - 2 * np.pi,
+        cycle_len,
+        n_cycles_simultaneous,
+        objective_fun_dict["cost_fun_key"],
+        simulation_conditions.get("solver_config", DEFAULT_SOLVER_CONFIG),
     )
 
     # --- Update model for resistive torque --- #
@@ -831,7 +859,7 @@ def set_x_bounds(
 
 
 def set_u_bounds_and_init(bio_model, n_shooting, init_file_path):
-    u_bounds, u_init = OcpFesMsk.set_u_bounds_fes(bio_model)
+    u_bounds = BoundsList()
     u_init = InitialGuessList()  # Controls initial guess
     models = bio_model.muscles_dynamics_model
     if init_file_path:
@@ -840,6 +868,13 @@ def set_u_bounds_and_init(bio_model, n_shooting, init_file_path):
 
     for model in models:
         key = "last_pulse_width_" + str(model.muscle_name)
+        u_bounds.add(
+            key=key,
+            min_bound=np.array([[model.pd0, model.pd0, model.pd0]]),
+            max_bound=np.array([[0.0006, 0.0006, 0.0006]]),
+            phase=0,
+            interpolation=InterpolationType.CONSTANT_WITH_FIRST_AND_LAST_DIFFERENT,
+        )
         if init_file_path:
             initial_guess = data[key]
         else:
@@ -862,12 +897,15 @@ def set_u_bounds_and_init(bio_model, n_shooting, init_file_path):
     )
 
 
-def set_constraints(bio_model, one_cycle_bound, cycle_len, n_simultaneous, objective_function_key=None):
+def set_constraints(
+    bio_model, one_cycle_bound, cycle_len, n_simultaneous, objective_function_key=None, solver_config=None
+):
     constraints = ConstraintList()
+    fixed_wheel_node = Node.ALL if solver_config == ACADOS_SOLVER_CONFIG else Node.START
     # --- Constraining wheel center position to a fix position --- #
     constraints.add(
         ConstraintFcn.TRACK_MARKERS_VELOCITY,
-        node=Node.START,
+        node=fixed_wheel_node,
         marker_index=bio_model.marker_index("wheel_center"),
         axes=[Axis.X, Axis.Y],
     )
@@ -875,12 +913,17 @@ def set_constraints(bio_model, one_cycle_bound, cycle_len, n_simultaneous, objec
         ConstraintFcn.SUPERIMPOSE_MARKERS,
         first_marker="wheel_center",
         second_marker="global_wheel_center",
-        node=Node.START,
+        node=fixed_wheel_node,
         axes=[Axis.X, Axis.Y],
     )
 
     angle_slack = 0.174533 / 4  # 10 degrees in radiant
     for i in range(n_simultaneous - 1):
+        if solver_config == ACADOS_SOLVER_CONFIG:
+            raise NotImplementedError(
+                "The ACADOS cycling MHE currently supports n_cycles_simultaneous=1; "
+                "intermediate cycle constraints must be reformulated before using larger windows."
+            )
         constraints.add(
             ConstraintFcn.BOUND_STATE,
             key="q",
@@ -1323,6 +1366,12 @@ def run_optim(mhe_info, cycling_info, simulation_conditions, model_path, save_so
             n_lm_iter=two_stage_lm_iter,
         )
         simulation_conditions["solver_warm_start_level"] = "primal+dual from LM to exact within each window"
+    elif solver_config == ACADOS_SOLVER_CONFIG:
+        raise NotImplementedError(
+            "The FES pulse-width cycling MHE cannot be exported to ACADOS with bioptim 3.4 because its "
+            "stimulation and external-force numerical time series are left as free CasADi symbols in ACADOS codegen. "
+            "Use examples/fes_multibody/cycling/cycling_mhe_acados.py for the ACADOS moving-horizon cycling example."
+        )
     else:
         configure_casadi_interface_options(nmpc, solver_config)
         solver = build_ipopt_solver(
@@ -1376,22 +1425,39 @@ def main(
     ipopt_hsllib=None,
     solver_config=DEFAULT_SOLVER_CONFIG,
     two_stage_lm_iter=DEFAULT_TWO_STAGE_LM_ITER,
+    acados_dir=None,
+    acados_codegen_dir=None,
+    acados_model_name=None,
+    acados_tolerance=1e-4,
+    acados_max_iter=200,
+    acados_rk4_steps=1,
 ):
     # --- Simulation configuration --- #
     save_sol = save
     get_initial_guess = init_guess
+    if solver_config == ACADOS_SOLVER_CONFIG and any(n_cycle != 1 for n_cycle in n_cycles_simultaneous):
+        raise NotImplementedError(
+            "The ACADOS cycling MHE currently supports n_cycles_simultaneous=[1]. "
+            "Use the IPOPT configurations for multi-cycle windows."
+        )
 
     # --- Model choice --- #
     model_path = "../../msk_models/Wu/Modified_Wu_Shoulder_Model_Cycling.bioMod"
 
     # --- MHE parameters --- #
-    ode_solver = OdeSolver.COLLOCATION(polynomial_degree=3, method="radau")
+    if solver_config == ACADOS_SOLVER_CONFIG:
+        ode_solver = OdeSolver.RK4(n_integration_steps=acados_rk4_steps)
+        use_sx = True
+    else:
+        ode_solver = OdeSolver.COLLOCATION(polynomial_degree=3, method="radau")
+        use_sx = False
+
     mhe_info = {
         "cycle_duration": 1,
         "n_cycles_to_advance": 1,
         "n_cycles": n_total_cycle,
         "ode_solver": ode_solver,
-        "use_sx": False,
+        "use_sx": use_sx,
     }
 
     # --- Bike parameters --- #
@@ -1414,6 +1480,15 @@ def main(
         simulation_conditions["n_threads"] = n_threads
         simulation_conditions["solver_config"] = solver_config
         simulation_conditions["two_stage_lm_iter"] = two_stage_lm_iter
+        if solver_config == ACADOS_SOLVER_CONFIG:
+            simulation_conditions["acados_tolerance"] = acados_tolerance
+            simulation_conditions["acados_max_iter"] = acados_max_iter
+            if acados_dir:
+                simulation_conditions["acados_dir"] = acados_dir
+            if acados_codegen_dir:
+                simulation_conditions["acados_codegen_dir"] = acados_codegen_dir
+            if acados_model_name:
+                simulation_conditions["acados_model_name"] = acados_model_name
         if ipopt_linear_solver is not None:
             simulation_conditions["ipopt_linear_solver"] = ipopt_linear_solver
         simulation_conditions["ipopt_max_iter"] = ipopt_max_iter
