@@ -1,5 +1,5 @@
 from bioptim import (
-    ConfigureProblem,
+    ConfigureVariables,
     NonLinearProgram,
     OptimalControlProgram,
 )
@@ -49,7 +49,7 @@ class StateConfigure:
         muscle_name = "_" + muscle_name if muscle_name else ""
         name = "Cn" + muscle_name
         name_cn = [name]
-        ConfigureProblem.configure_new_variable(
+        ConfigureVariables.configure_new_variable(
             name,
             name_cn,
             ocp,
@@ -89,7 +89,7 @@ class StateConfigure:
         muscle_name = "_" + muscle_name if muscle_name else ""
         name = "F" + muscle_name
         name_f = [name]
-        ConfigureProblem.configure_new_variable(
+        ConfigureVariables.configure_new_variable(
             name,
             name_f,
             ocp,
@@ -129,7 +129,7 @@ class StateConfigure:
         muscle_name = "_" + muscle_name if muscle_name else ""
         name = "A" + muscle_name
         name_a = [name]
-        return ConfigureProblem.configure_new_variable(
+        return ConfigureVariables.configure_new_variable(
             name,
             name_a,
             ocp,
@@ -169,7 +169,7 @@ class StateConfigure:
         muscle_name = "_" + muscle_name if muscle_name else ""
         name = "Tau1" + muscle_name
         name_tau1 = [name]
-        return ConfigureProblem.configure_new_variable(
+        return ConfigureVariables.configure_new_variable(
             name,
             name_tau1,
             ocp,
@@ -209,7 +209,7 @@ class StateConfigure:
         muscle_name = "_" + muscle_name if muscle_name else ""
         name = "Km" + muscle_name
         name_km = [name]
-        return ConfigureProblem.configure_new_variable(
+        return ConfigureVariables.configure_new_variable(
             name,
             name_km,
             ocp,
@@ -236,7 +236,7 @@ class StateConfigure:
         muscle_name = "_" + muscle_name if muscle_name else ""
         name = "Cn_sum" + muscle_name
         name_cn_sum = [name]
-        return ConfigureProblem.configure_new_variable(name, name_cn_sum, ocp, nlp, as_states=False, as_controls=True)
+        return ConfigureVariables.configure_new_variable(name, name_cn_sum, ocp, nlp, as_states=False, as_controls=True)
 
     @staticmethod
     def configure_a_calculation(ocp, nlp, muscle_name: str = None):
@@ -255,7 +255,7 @@ class StateConfigure:
         muscle_name = "_" + muscle_name if muscle_name else ""
         name = "A_calculation" + muscle_name
         name_cn_sum = [name]
-        return ConfigureProblem.configure_new_variable(name, name_cn_sum, ocp, nlp, as_states=False, as_controls=True)
+        return ConfigureVariables.configure_new_variable(name, name_cn_sum, ocp, nlp, as_states=False, as_controls=True)
 
     @staticmethod
     def configure_muscle_activation(
@@ -287,7 +287,7 @@ class StateConfigure:
         muscle_name = "_" + muscle_name if muscle_name else ""
         name = "a" + muscle_name
         name_a = [name]
-        ConfigureProblem.configure_new_variable(
+        ConfigureVariables.configure_new_variable(
             name,
             name_a,
             ocp,
@@ -327,7 +327,7 @@ class StateConfigure:
         muscle_name = "_" + muscle_name if muscle_name else ""
         name = "mu" + muscle_name
         name_mu = [name]
-        ConfigureProblem.configure_new_variable(
+        ConfigureVariables.configure_new_variable(
             name,
             name_mu,
             ocp,
@@ -367,7 +367,7 @@ class StateConfigure:
         muscle_name = "_" + muscle_name if muscle_name else ""
         name = "theta" + muscle_name
         name_theta = [name]
-        ConfigureProblem.configure_new_variable(
+        ConfigureVariables.configure_new_variable(
             name,
             name_theta,
             ocp,
@@ -407,7 +407,7 @@ class StateConfigure:
         muscle_name = "_" + muscle_name if muscle_name else ""
         name = "dtheta_dt" + muscle_name
         name_dtheta_dt = [name]
-        ConfigureProblem.configure_new_variable(
+        ConfigureVariables.configure_new_variable(
             name,
             name_dtheta_dt,
             ocp,
@@ -432,7 +432,7 @@ class StateConfigure:
         muscle_name = "_" + muscle_name if muscle_name else ""
         name = "last_pulse_width" + muscle_name
         last_pulse_width = [name]
-        return ConfigureProblem.configure_new_variable(
+        return ConfigureVariables.configure_new_variable(
             name, last_pulse_width, ocp, nlp, as_states=False, as_controls=True
         )
 
@@ -451,7 +451,7 @@ class StateConfigure:
         muscle_name = "_" + muscle_name if muscle_name else ""
         name = "pulse_intensity" + muscle_name
         pulse_intensity = [str(i) for i in range(truncation)]
-        return ConfigureProblem.configure_new_variable(
+        return ConfigureVariables.configure_new_variable(
             name, pulse_intensity, ocp, nlp, as_states=False, as_controls=True
         )
 
@@ -470,7 +470,7 @@ class StateConfigure:
         muscle_name = "_" + muscle_name if muscle_name else ""
         name = "I" + muscle_name
         pulse_intensity = [name]
-        return ConfigureProblem.configure_new_variable(
+        return ConfigureVariables.configure_new_variable(
             name, pulse_intensity, ocp, nlp, as_states=False, as_controls=True
         )
 

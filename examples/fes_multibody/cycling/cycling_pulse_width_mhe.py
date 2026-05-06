@@ -21,7 +21,7 @@ from bioptim import (
     ConstraintFcn,
     ContactType,
     CostType,
-    DynamicsList,
+    DynamicsOptions,
     ExternalForceSetTimeSeries,
     InitialGuessList,
     InterpolationType,
@@ -697,15 +697,11 @@ def set_external_forces(n_shooting, external_force_dict, force_name):
 
 
 def set_dynamics(model, numerical_time_series, ode_solver):
-    dynamics = DynamicsList()
-    dynamics.add(
-        dynamics_type=model.declare_model_variables,
-        dynamic_function=model.muscle_dynamic,
+    model._contact_types = (ContactType.RIGID_EXPLICIT,)
+    dynamics = DynamicsOptions(
         expand_dynamics=True,
         phase_dynamics=PhaseDynamics.SHARED_DURING_THE_PHASE,
         numerical_data_timeseries=numerical_time_series,
-        contact_type=[ContactType.RIGID_EXPLICIT],
-        phase=0,
         ode_solver=ode_solver,
     )
     return dynamics

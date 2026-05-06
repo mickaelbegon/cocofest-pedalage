@@ -6,7 +6,7 @@ from cocofest import (
 from bioptim import (
     OptimalControlProgram,
     PhaseDynamics,
-    DynamicsList,
+    DynamicsOptions,
     Solver,
     ObjectiveList,
     ObjectiveFcn,
@@ -17,10 +17,7 @@ from bioptim import (
 
 def prepare_ocp(model, final_time, n_shooting, fmax):
     # --- Set dynamics --- #
-    dynamics = DynamicsList()
-    dynamics.add(
-        model.declare_model_variables,
-        dynamic_function=model.dynamics,
+    dynamics = DynamicsOptions(
         expand_dynamics=True,
         phase_dynamics=PhaseDynamics.SHARED_DURING_THE_PHASE,
         numerical_data_timeseries=None,

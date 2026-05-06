@@ -77,6 +77,10 @@ class DingModelPulseWidthFrequency(DingModelFrequency):
             "pdt": self.pdt,
         }
 
+    @property
+    def control_configuration_functions(self):
+        return [lambda ocp, nlp: StateConfigure().configure_last_pulse_width(ocp, nlp, self.muscle_name)]
+
     def set_a_scale(self, model, a_scale: MX | float):
         # models is required for bioptim compatibility
         self.a_scale = a_scale
