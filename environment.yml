@@ -7,15 +7,24 @@
 # - This branch targets bioptim 3.4.0 from conda-forge.
 # - Keep `external/bioptim` out of PYTHONPATH so the conda package is used.
 # - `ma57` is optional. If `libhsl.dylib` is available on your machine, point IPOPT to it.
+# - ACADOS also needs its native libraries. Build acados separately, then export:
+#     ACADOS_SOURCE_DIR=/path/to/acados
+#     DYLD_LIBRARY_PATH=$ACADOS_SOURCE_DIR/lib:$DYLD_LIBRARY_PATH  # macOS
+#     LD_LIBRARY_PATH=$ACADOS_SOURCE_DIR/lib:$LD_LIBRARY_PATH      # Linux
 name: cocofest-run
 channels:
 - conda-forge
 dependencies:
 - python>=3.10,<3.12
+- pip
 - numpy
 - scipy
 - matplotlib
 - pytest
+- cmake
+- make
+- c-compiler
+- cxx-compiler
 - casadi>=3.7
 - ipopt>=3.14,<3.15
 - biorbd>=1.12.0,<1.13.0
