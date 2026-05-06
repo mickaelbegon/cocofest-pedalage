@@ -40,12 +40,9 @@ jobs:
           conda info
           conda list
 
-      - name: Install bioptim on Windows
+      - name: Verify conda bioptim installation
         run: |
-          pwd
-          cd external
-          ./bioptim_install_windows.sh 4 ${{ env.PREFIX_WINDOWS }}
-          cd ..
+          python -c "import bioptim; print(bioptim.__version__, bioptim.__file__)"
 
       - name: Install extra dependencies
         run: conda install pytest-cov black pytest pytest-cov codecov packaging -cconda-forge
@@ -92,12 +89,9 @@ jobs:
           conda info
           conda list
 
-      - name: Install bioptim on Windows
+      - name: Verify conda bioptim installation
         run: |
-          pwd
-          cd external
-          ./bioptim_install_windows.sh 4 ${{ env.PREFIX_WINDOWS }}
-          cd ..
+          python -c "import bioptim; print(bioptim.__version__, bioptim.__file__)"
 
       - name: Install extra dependencies
         run: pip install coverage
