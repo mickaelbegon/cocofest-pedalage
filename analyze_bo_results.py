@@ -13,7 +13,6 @@ import numpy as np
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 from matplotlib.figure import Figure
 
-
 OUTPUT_DIR = Path(__file__).resolve().parent / "analysis_outputs"
 BO_DIR = Path(__file__).resolve().parent / "examples" / "fes_multibody" / "cycling" / "result" / "bo"
 
@@ -32,13 +31,20 @@ def load_bo_table() -> tuple[list[str], np.ndarray, np.ndarray]:
             log = pickle.load(file)
         ordered_idx = sorted(log.keys())
         first_row = log[ordered_idx[0]]
-        muscle_names = [k for k in first_row.keys() if k != "metric" and not k.endswith("time_per_ocp") and k not in {
-            "solving_time_per_ocp",
-            "total_solving_time",
-            "iter_per_ocp",
-            "average_solving_time_per_iter_list",
-            "average_solving_time_per_iter",
-        }]
+        muscle_names = [
+            k
+            for k in first_row.keys()
+            if k != "metric"
+            and not k.endswith("time_per_ocp")
+            and k
+            not in {
+                "solving_time_per_ocp",
+                "total_solving_time",
+                "iter_per_ocp",
+                "average_solving_time_per_iter_list",
+                "average_solving_time_per_iter",
+            }
+        ]
         weights = np.array([[float(log[i][name]) for name in muscle_names] for i in ordered_idx], dtype=float)
         metric = np.array([float(log[i]["metric"]) for i in ordered_idx], dtype=float)
         return muscle_names, weights, metric

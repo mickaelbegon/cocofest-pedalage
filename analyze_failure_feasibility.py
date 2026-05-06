@@ -14,7 +14,6 @@ from matplotlib.figure import Figure
 
 import cycling_weight_exploration as cwe
 
-
 OUTPUT_DIR = Path(__file__).resolve().parent / "analysis_outputs"
 
 
@@ -53,7 +52,9 @@ def feasibility_metrics(theta: np.ndarray, torque_profiles: np.ndarray, ratios: 
         restore_ratios[i] = 1.0
         restored_positive = np.maximum(torque_profiles * restore_ratios[:, None], 0.0).sum(axis=0)
         deficit_if_restored = np.maximum(cwe.TASK_TORQUE_THRESHOLD - restored_positive, 0.0)
-        support_risk_area = float(np.trapezoid(positive_profiles[i] * (combined_positive < cwe.TASK_TORQUE_THRESHOLD), theta))
+        support_risk_area = float(
+            np.trapezoid(positive_profiles[i] * (combined_positive < cwe.TASK_TORQUE_THRESHOLD), theta)
+        )
 
         per_muscle[muscle_name] = {
             "max_positive_torque_nm": float(positive_profiles[i].max()),

@@ -16,7 +16,6 @@ from matplotlib.patches import Patch
 import cycling_weight_exploration as cwe
 import derive_offline_task_weights as dotw
 
-
 OUTPUT_DIR = Path(__file__).resolve().parent / "analysis_outputs"
 
 
@@ -140,8 +139,12 @@ def build_intermediate_summary(
             "candidate_fixed_weights_normalized": full_summary["candidate_fixed_weights_normalized"],
         },
         "plot_ranges": {
-            "torque_ymin": float(min(np.min(torque_profiles), np.min(combined_positive), cwe.TASK_TORQUE_THRESHOLD * -0.1)),
-            "torque_ymax": float(max(np.max(torque_profiles), np.max(combined_positive), cwe.TASK_TORQUE_THRESHOLD) * 1.05),
+            "torque_ymin": float(
+                min(np.min(torque_profiles), np.min(combined_positive), cwe.TASK_TORQUE_THRESHOLD * -0.1)
+            ),
+            "torque_ymax": float(
+                max(np.max(torque_profiles), np.max(combined_positive), cwe.TASK_TORQUE_THRESHOLD) * 1.05
+            ),
             "criticality_ymax": float(max(criticality_terms_global_max * 1.05, 1e-6)),
         },
     }
@@ -217,7 +220,13 @@ def plot_intermediates(summary: dict, stem: str) -> Path:
 
     ax = axs[1, 0]
     ax.plot(snap_cycles, [row["restore_gain"] for row in snapshots], marker="o", lw=2.2, label="Restore gain")
-    ax.plot(snap_cycles, [row["support_in_pre_risk_area"] for row in snapshots], marker="s", lw=2.0, label="Pre-risk support")
+    ax.plot(
+        snap_cycles,
+        [row["support_in_pre_risk_area"] for row in snapshots],
+        marker="s",
+        lw=2.0,
+        label="Pre-risk support",
+    )
     ax.plot(snap_cycles, [row["support_in_risk_area"] for row in snapshots], marker="^", lw=2.0, label="Risk support")
     ax.plot(snap_cycles, [row["unique_support_area"] for row in snapshots], marker="d", lw=2.0, label="Unique support")
     ax.set_xlabel("Synthetic cycle index")
@@ -276,7 +285,9 @@ def main():
         action="store_true",
         help="Optional sensitivity check; quasi-static gravity is hidden from the plot when negligible.",
     )
-    parser.add_argument("--all-muscles", action="store_true", help="Generate one figure per muscle with shared y-scales.")
+    parser.add_argument(
+        "--all-muscles", action="store_true", help="Generate one figure per muscle with shared y-scales."
+    )
     args = parser.parse_args()
 
     OUTPUT_DIR.mkdir(exist_ok=True)

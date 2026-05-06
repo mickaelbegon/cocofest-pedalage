@@ -50,7 +50,9 @@ def main():
         help="Number of limited-memory IPOPT iterations in two-stage mode.",
     )
     parser.add_argument("--max-iter", type=int, default=2000, help="Maximum IPOPT iterations per window.")
-    parser.add_argument("--n-threads", type=int, default=4, help="Thread count passed to the NMPC backend and BLAS/OpenMP.")
+    parser.add_argument(
+        "--n-threads", type=int, default=4, help="Thread count passed to the NMPC backend and BLAS/OpenMP."
+    )
     parser.add_argument("--hsllib", type=str, default=None, help="Optional path to an HSL shared library for IPOPT.")
     parser.add_argument("--save", action="store_true", help="Save the solution pickle.")
     parser.add_argument("--with-init-guess", action="store_true", help="Generate initial guesses if needed.")
