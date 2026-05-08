@@ -40,8 +40,8 @@ def main():
         "--solver-config",
         type=str,
         default="baseline",
-        choices=["baseline", "exact_jit", "lm", "two_stage"],
-        help="Ipopt/CasADi configuration to compare inside the existing MHE workflow.",
+        choices=["baseline", "exact_jit", "lm", "two_stage", "acados"],
+        help="Solver configuration to compare inside the existing MHE workflow.",
     )
     parser.add_argument(
         "--lm-iter",
@@ -50,6 +50,27 @@ def main():
         help="Number of limited-memory IPOPT iterations in two-stage mode.",
     )
     parser.add_argument("--max-iter", type=int, default=2000, help="Maximum IPOPT iterations per window.")
+    parser.add_argument("--acados-max-iter", type=int, default=200, help="Maximum ACADOS SQP iterations per window.")
+    parser.add_argument("--acados-tolerance", type=float, default=1e-4, help="ACADOS convergence tolerance.")
+    parser.add_argument("--acados-rk4-steps", type=int, default=1, help="RK4 integration steps used by the ACADOS MHE.")
+    parser.add_argument(
+        "--acados-dir",
+        type=str,
+        default=os.environ.get("ACADOS_SOURCE_DIR"),
+        help="Path to the ACADOS source/build root. Defaults to ACADOS_SOURCE_DIR.",
+    )
+    parser.add_argument(
+        "--acados-codegen-dir",
+        type=str,
+        default=None,
+        help="Optional generated C code directory for ACADOS.",
+    )
+    parser.add_argument(
+        "--acados-model-name",
+        type=str,
+        default=None,
+        help="Optional ACADOS model name for generated code reuse.",
+    )
     parser.add_argument(
         "--n-threads", type=int, default=4, help="Thread count passed to the NMPC backend and BLAS/OpenMP."
     )
@@ -99,6 +120,12 @@ def main():
         ipopt_hsllib=args.hsllib,
         solver_config=args.solver_config,
         two_stage_lm_iter=args.lm_iter,
+        acados_dir=args.acados_dir,
+        acados_codegen_dir=args.acados_codegen_dir,
+        acados_model_name=args.acados_model_name,
+        acados_tolerance=args.acados_tolerance,
+        acados_max_iter=args.acados_max_iter,
+        acados_rk4_steps=args.acados_rk4_steps,
     )
 
 
