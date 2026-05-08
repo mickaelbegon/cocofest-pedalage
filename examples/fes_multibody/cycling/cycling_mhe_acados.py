@@ -43,11 +43,28 @@ def configure_acados_solver(
     return solver
 
 
+def configure_ipopt_solver(
+    max_iter: int = 500,
+    linear_solver: str | None = None,
+    tolerance: float = 1e-4,
+):
+    solver = Solver.IPOPT(show_online_optim=False, _max_iter=max_iter, show_options=dict(show_bounds=True))
+    solver.set_convergence_tolerance(tolerance)
+    solver.set_constraint_tolerance(tolerance)
+    solver.set_dual_inf_tol(tolerance)
+    solver.set_hessian_approximation("limited-memory")
+    if linear_solver:
+        solver.set_linear_solver(linear_solver)
+    return solver
+
+
 def prepare_mhe(
     model_path: str,
     window_len: int = 5,
     window_duration: float = 1.0,
     total_angle: float = -1.0,
+    use_sx: bool = True,
+    n_threads: int = 1,
 ):
     model = TorqueBiorbdModel(model_path)
     n_nodes = window_len + 1
@@ -117,8 +134,8 @@ def prepare_mhe(
         x_init=x_init,
         u_bounds=u_bounds,
         u_init=u_init,
-        use_sx=True,
-        n_threads=1,
+        use_sx=use_sx,
+        n_threads=n_threads,
     )
 
 
