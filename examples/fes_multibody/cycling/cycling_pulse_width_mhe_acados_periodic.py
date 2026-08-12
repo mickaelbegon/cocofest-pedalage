@@ -218,22 +218,32 @@ def apply_acados_wheel_cycle_boundary_bounds(
     if float(slack) < 0.0:
         raise ValueError("ACADOS wheel cycle-boundary slack must be non-negative.")
 
-    q_bounds = interface.ocp.nlp[0].x_bounds["q"]
-    first_lower = float(q_bounds.min[2, 0])
-    first_upper = float(q_bounds.max[2, 0])
+    position_key = getattr(interface.ocp, "position_state_key", "q")
+    wheel_index = int(getattr(interface.ocp, "wheel_state_index", 2))
+    try:
+        position_bounds = interface.ocp.nlp[0].x_bounds[position_key]
+        position_state = interface.ocp.nlp[0].states[position_key]
+        position_scaling = interface.ocp.nlp[0].x_scaling[position_key]
+    except KeyError as exc:
+        raise RuntimeError(
+            "The ACADOS crank-position state is missing from the declared "
+            f"{position_key!r} block."
+        ) from exc
+    first_lower = float(position_bounds.min[wheel_index, 0])
+    first_upper = float(position_bounds.max[wheel_index, 0])
     if not np.isfinite(first_lower) or not np.isfinite(first_upper):
         raise RuntimeError("The first crank position must be bounded at cycle seams.")
     first_center = 0.5 * (first_lower + first_upper)
 
     q_state_index = int(
-        np.asarray(interface.ocp.nlp[0].states["q"].index).reshape(-1)[2]
+        np.asarray(position_state.index).reshape(-1)[wheel_index]
     )
     acados_q_index = int(interface.nparams) + q_state_index
     q_scaling = float(
         np.asarray(
-            interface.ocp.nlp[0].x_scaling["q"].scaling[:, 0],
+            position_scaling.scaling[:, 0],
             dtype=float,
-        ).reshape(-1)[2]
+        ).reshape(-1)[wheel_index]
     )
     if not np.isfinite(q_scaling) or q_scaling <= 0.0:
         raise RuntimeError("The ACADOS crank-position scaling must be positive.")

@@ -10303,6 +10303,54 @@ def test_acados_cycle_boundary_is_applied_as_scaled_stage_state_bound():
     np.testing.assert_allclose(summary[0]["upper"], expected_center + 0.02)
 
 
+def test_acados_cycle_boundary_supports_reduced_theta_state():
+    calls = []
+    theta_min = np.array([[-1.0, -20.0, -20.0]])
+    theta_max = np.array([[-1.0, 20.0, 20.0]])
+    interface = SimpleNamespace(
+        ocp=SimpleNamespace(
+            position_state_key="theta",
+            wheel_state_index=0,
+            _cocofest_wheel_cycle_boundary_slack=0.02,
+            _cocofest_cycle_len=3,
+            _cocofest_cycles_per_window=2,
+            _cocofest_wheel_cycle_shift=-2 * np.pi,
+            nlp=[
+                SimpleNamespace(
+                    x_bounds={
+                        "theta": SimpleNamespace(min=theta_min, max=theta_max)
+                    },
+                    states={"theta": SimpleNamespace(index=np.array([0]))},
+                    x_scaling={
+                        "theta": SimpleNamespace(scaling=np.array([[2.0]]))
+                    },
+                )
+            ],
+        ),
+        ocp_solver=SimpleNamespace(
+            constraints_set=lambda stage, field, values: calls.append(
+                (stage, field, np.asarray(values, dtype=float).copy())
+            )
+        ),
+        nparams=1,
+        x_bound_min=np.tile(np.array([[-10.0], [-30.0]]), (1, 3)),
+        x_bound_max=np.tile(np.array([[10.0], [30.0]]), (1, 3)),
+        acados_ocp=SimpleNamespace(
+            solver_options=SimpleNamespace(N_horizon=6),
+            dims=SimpleNamespace(nbx=2),
+            constraints=SimpleNamespace(idxbx=np.arange(2)),
+        ),
+    )
+
+    summary = periodic_example.apply_acados_wheel_cycle_boundary_bounds(interface)
+
+    expected_center = -1.0 - 2 * np.pi
+    assert [item[:2] for item in calls] == [(3, "lbx"), (3, "ubx")]
+    np.testing.assert_allclose(calls[0][2][1], (expected_center - 0.02) / 2.0)
+    np.testing.assert_allclose(calls[1][2][1], (expected_center + 0.02) / 2.0)
+    np.testing.assert_allclose(summary[0]["center"], expected_center)
+
+
 def test_acados_cycle_boundary_bounds_cover_every_internal_seam():
     calls = []
     interface = SimpleNamespace(

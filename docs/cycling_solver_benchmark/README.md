@@ -1510,6 +1510,19 @@ d'attribuer le gain. Sa solution devra rester un seed; seule la capsule
 fatigue-optimalité pourra certifier le RHO, sauf fallback R5 explicitement
 étiqueté.
 
+Le run Linux
+[31622939297](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/31622939297)
+confirme ce rôle limité. Les cas R5/extrapolation, R3/extrapolation et
+R5/répétition valident tous `5/5` RHO avec exactement le même objectif
+`20021.446`, la même AUC `4.95594` et la même capacité minimale `0.543265`.
+Les trois recoveries IPOPT forcés sont rejetés et ACADOS retrouve seul la même
+solution. Le rejet R3 coûte `5.93 s`, contre `14.39 s` pour R5 (`2.43x` plus
+rapide), mais ce temps gagné n'améliore encore aucune recertification. Le cas à
+deux cycles n'a pas atteint le solve : la couture ACADOS cherchait le bloc
+full `q[2]` dans la formulation reduced. La correction utilise désormais les
+identifiants mécaniques génériques, soit `theta[0]` en reduced; ce dernier cas
+doit être relancé avant de conclure sur l'horizon double.
+
 ### 6.3 Comparaison des contrôles reduced sur 145 RHO
 
 Une première comparaison post-traitée met en regard le plus long préfixe

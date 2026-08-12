@@ -745,7 +745,7 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     Les `152` appels de recovery coûtent `316.4 s`; l'orchestration restante
     coûte environ `158.8 s`. Après le RHO `450`, MINSTEP alterne presque un
     cycle sur deux : traiter d'abord le transfert, pas la fatigue.
-30. [implémenté localement, CI à lancer] Instrumenter chaque sous-étape du
+30. [partiellement validé, run `31622939297`] Instrumenter chaque sous-étape du
     recovery et comparer un budget ACADOS adaptatif `30 + 70` avec R5 seul et
     R3 seed-only. R3 ne possède jamais le droit d'avancer un RHO; R5 reste le
     certifieur final. L'audit IRK diagnostique mesure l'écart sur tous les
@@ -757,11 +757,24 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     2 000 pour le stage R5 final. La CI hybride doit accepter le rejet R3,
     journaliser ce résultat, faire recertifier par ACADOS et n'appeler R5 que
     si cette recertification échoue encore.
+    Les trois cas à un cycle valident `5/5` avec exactement le même objectif,
+    la même AUC, la même capacité minimale et environ `4.20 s` de solve ACADOS
+    cumulé. Les seeds IPOPT forcés sont tous rejetés; R3 rejette en `5.93 s`
+    contre `14.39 s` pour R5, sans contribuer à la solution finale. C'est un
+    gain diagnostique de `2.43x`, pas encore un gain de recovery utile. Garder
+    R3 hors du chemin de certification tant qu'un échec naturel n'établit pas
+    qu'il améliore ensuite la recertification ACADOS.
 31. [implémenté localement, CI à lancer] Extraire sans interpolation un
     checkpoint un ou deux cycles depuis le préfixe certifié, puis comparer au
     cycle 430 `extrapolate`, `repeat` et un horizon de deux cycles sur le même
     runner. Utiliser le mode `cycles=acados_recovery_speed` et le run
     `31589712434` comme `acados_control_seed_source_run_id`.
+    Le run `31622939297` valide les trois cas à un cycle mais le cas deux cycles
+    s'arrêtait avant le solve : la borne ACADOS de couture cherchait le bloc
+    full `q[2]` dans le modèle reduced. Le branchement emploie maintenant
+    `position_state_key/wheel_state_index`, donc `theta[0]` en reduced, avec
+    une régression dédiée. Relancer uniquement cette ablation avant de conclure
+    sur l'intérêt d'un horizon de deux cycles.
 32. [à faire après 30--31] Si R3 réduit réellement le mur recovery sans
     dégrader la recertification IRK/ACADOS, conserver deux capsules IPOPT R3/R5
     préconstruites. Sinon supprimer R3 du chemin online et ne le garder que
@@ -785,10 +798,11 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     auditer localement les cycles 430, 660, 779 et le dernier cycle certifié.
     Les résumés conservent aussi les PW et les frontières de tous les états aux
     mêmes jalons pour comparer IPOPT, MadNLP et ACADOS.
-37. [implémenté localement, CI à lancer] Installer `t_renderer 0.2.0` avec
+37. [validé, run `31622939297`] Installer `t_renderer 0.2.0` avec
     checksum dans le cache ACADOS. Le solve ne doit plus télécharger de binaire
-    à runtime; vérifier que le smoke passe même après la phase de préparation
-    de machine.
+    à runtime. La pile mise en cache et le renderer épinglé passent la
+    validation, puis quatre constructions de capsule atteignent le solve sans
+    téléchargement runtime.
 38. [implémenté localement, CI à lancer] Injecter de vraies limites ACADOS de
     `10`, `20` et `30` SQP aux RHO `100`, `150` et `430`, restaurer le budget
     nominal avant le retry du même RHO et poursuivre 30 cycles. Comparer sur le
