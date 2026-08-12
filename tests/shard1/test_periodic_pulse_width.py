@@ -6814,8 +6814,9 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert "ACADOS_RECOVERY_ONLY" in workflow
     assert "inputs.cycles == 'acados_lazy_recovery'" in workflow
     assert "ACADOS_LAZY_RECOVERY_ONLY" in workflow
-    assert "ACADOS full/reduced — IPOPT/Radau-5 recovery wiring" in workflow
+    assert "ACADOS full/reduced — staged IPOPT recovery wiring" in workflow
     assert "inputs.cycles == 'acados_reduced_recovery'" in workflow
+    assert workflow.count("inputs.cycles != 'acados_recovery_speed'") == 3
     assert "Download the pinned full/reduced seeds" in workflow
     assert "seed-sha256.txt" in workflow
     assert "seed-source-run-id.txt" in workflow

@@ -433,7 +433,7 @@ jobs:
           key: numerical-stack-${{ env.NUMERICAL_STACK_CACHE_VERSION }}-${{ inputs.runner_label }}-${{ runner.arch }}-madnlp-mumps-${{ env.CASADI_MADNLP_COMMIT }}-${{ env.LIBMAD_COMMIT }}-${{ hashFiles('.github/cycling-benchmark-linux-environment.yml', '.github/scripts/install_biorbd_casadi_linux.sh', '.github/scripts/install_casadi_madnlp_linux.sh') }}
 
   acados-ipopt-hybrid:
-    name: ACADOS full/reduced — IPOPT/Radau-5 recovery wiring
+    name: ACADOS full/reduced — staged IPOPT recovery wiring
     if: ${{ inputs.cycles == 'acados_hybrid' || inputs.cycles == 'acados_reduced_recovery' || inputs.cycles == 'acados_reduced_fallback' || inputs.cycles == 'acados_recovery_speed' }}
     needs: [prepare-seed, prepare-acados-stack]
     runs-on: ${{ inputs.runner_label }}
@@ -1123,7 +1123,7 @@ jobs:
 
   acados-smoke:
     name: ACADOS — sequential full/reduced and option screen
-    if: ${{ inputs.cycles != 'screen' && inputs.cycles != 'full_horizon' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles_per_window == '1' }}
+    if: ${{ inputs.cycles != 'screen' && inputs.cycles != 'full_horizon' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles_per_window == '1' }}
     needs: [prepare-seed, prepare-acados-stack]
     runs-on: ${{ inputs.runner_label }}
     timeout-minutes: 240
@@ -2355,7 +2355,7 @@ jobs:
 
   benchmark:
     name: ${{ matrix.case_slug }} — sequential full/reduced
-    if: ${{ inputs.cycles != 'screen' && inputs.cycles != 'acados' && inputs.cycles != 'acados_guard' && inputs.cycles != 'acados_recovery' && inputs.cycles != 'acados_lazy_recovery' && inputs.cycles != 'acados_homotopy' && inputs.cycles != 'acados_reduced_100' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'full_horizon' }}
+    if: ${{ inputs.cycles != 'screen' && inputs.cycles != 'acados' && inputs.cycles != 'acados_guard' && inputs.cycles != 'acados_recovery' && inputs.cycles != 'acados_lazy_recovery' && inputs.cycles != 'acados_homotopy' && inputs.cycles != 'acados_reduced_100' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles != 'full_horizon' }}
     needs: prepare-seed
     runs-on: ${{ inputs.runner_label }}
     timeout-minutes: ${{ matrix.timeout_minutes }}
@@ -3254,7 +3254,7 @@ jobs:
 
   report:
     name: Aggregate Kevin benchmark
-    if: ${{ always() && inputs.cycles != 'screen' && inputs.cycles != 'acados' && inputs.cycles != 'acados_guard' && inputs.cycles != 'acados_recovery' && inputs.cycles != 'acados_lazy_recovery' && inputs.cycles != 'acados_homotopy' && inputs.cycles != 'acados_reduced_100' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles != 'full_horizon' }}
+    if: ${{ always() && inputs.cycles != 'screen' && inputs.cycles != 'acados' && inputs.cycles != 'acados_guard' && inputs.cycles != 'acados_recovery' && inputs.cycles != 'acados_lazy_recovery' && inputs.cycles != 'acados_homotopy' && inputs.cycles != 'acados_reduced_100' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles != 'full_horizon' }}
     needs: [benchmark, acados-smoke]
     runs-on: ubuntu-24.04
     permissions:
