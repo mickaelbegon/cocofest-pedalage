@@ -184,6 +184,11 @@ class MyCyclicNMPC(FesNmpcMsk):
         self.continuous_state_initial_guess_mode = "continuous"
         self.transfer_initial_guess_mode = "historical"
         self.repeat_cyclical_state_initial_guess = False
+        # Controls were historically copied cycle-for-cycle.  Keep that as the
+        # default, while allowing a phase-aligned trend from certified cycles.
+        self.pulse_width_transfer_mode = "repeat"
+        self.pulse_width_extrapolation_factor = 1.0
+        self._previous_pulse_width_cycle = {}
         self.project_full_transfer_contact = False
         self.project_full_transfer_contact_velocity = False
         self.last_transfer_contact_projection = None
@@ -612,7 +617,7 @@ class MyCyclicNMPC(FesNmpcMsk):
 
         # --- Set initial guess for controls --- #
         for key in controls.keys():
-            self.set_init_cyclical(controls, key, 0, False)
+            self.set_init_cyclical_controls(controls, key, 0)
         self._correct_init_guess_to_fit_bounds(
             corrected_input="controls"
         )  # This function is called to move init guess within the bounds if not in bounds
@@ -626,6 +631,51 @@ class MyCyclicNMPC(FesNmpcMsk):
                     past_bounds=self.previous_bounds[key],
                     key=key,
                 )
+        return True
+
+    def set_init_cyclical_controls(self, controls, key, i):
+        """Shift controls and predict the appended cycle phase by phase.
+
+        For a multi-cycle window, the slope comes from the last two cycles in
+        the certified solution.  For a one-cycle window, it comes from the
+        previously advanced certified cycle.  Bounds are applied by the caller
+        after prediction, so pulse widths remain in their physical interval.
+        """
+
+        source = np.asarray(controls[key][i], dtype=float).reshape(-1)
+        nodes_per_cycle = self.control_nodes_per_cycle
+        if source.size < nodes_per_cycle or source.size % nodes_per_cycle:
+            raise ValueError(
+                f"Control '{key}' has {source.size} nodes; expected a positive "
+                f"multiple of {nodes_per_cycle}."
+            )
+        cycles = source.reshape((-1, nodes_per_cycle))
+        current = cycles[-1].copy()
+        retained = cycles[1:].reshape(-1)
+        appended = current.copy()
+        mode = getattr(self, "pulse_width_transfer_mode", "repeat")
+        factor = float(getattr(self, "pulse_width_extrapolation_factor", 1.0))
+        is_pulse_width = key.startswith("last_pulse_width_")
+        if mode == "extrapolate" and is_pulse_width:
+            previous = (
+                cycles[-2]
+                if cycles.shape[0] >= 2
+                else getattr(self, "_previous_pulse_width_cycle", {}).get(key)
+            )
+            if previous is not None:
+                previous = np.asarray(previous, dtype=float).reshape(-1)
+                if previous.shape != current.shape:
+                    raise ValueError(
+                        f"Previous control cycle '{key}' has shape "
+                        f"{previous.shape}; expected {current.shape}."
+                    )
+                appended = current + factor * (current - previous)
+        elif mode not in {"repeat", "extrapolate"}:
+            raise ValueError(f"Unsupported pulse-width transfer mode '{mode}'.")
+
+        values = np.concatenate((retained, appended)) if retained.size else appended
+        self.nlp[0].u_init[key].init[i, :] = values
+        self._previous_pulse_width_cycle[key] = current
         return True
 
     def set_init_continuous(self, states, key, i):

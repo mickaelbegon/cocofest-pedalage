@@ -216,6 +216,8 @@ BENCHMARK_CONFIGURATION_FIELDS = (
     "acados_transfer_active_set_guard_margin",
     "acados_transfer_active_set_threshold",
     "acados_cyclical_transfer_mode",
+    "rho_pulse_width_transfer_mode",
+    "rho_pulse_width_extrapolation_factor",
     "terminal_wheel_q_reference_mode",
     "cycles_per_window",
     "stimulations_per_cycle",
@@ -3614,6 +3616,8 @@ def main(
     acados_transfer_phase_one_target_rhos: tuple[int, ...] = (),
     acados_transfer_phase_one_screen_threshold: float | None = None,
     acados_cyclical_transfer_mode: str = "extrapolate",
+    rho_pulse_width_transfer_mode: str = "repeat",
+    rho_pulse_width_extrapolation_factor: float = 1.0,
     acados_transfer_phase_one_proximity_weight: float = 1.0,
     acados_transfer_phase_one_defect_weight: float = 10.0,
     acados_transfer_phase_one_substeps: int = 5,
@@ -4317,6 +4321,11 @@ def main(
         acados_transfer_phase_one_screen_threshold
     )
     acados_args.acados_cyclical_transfer_mode = acados_cyclical_transfer_mode
+    for solver_args in (ipopt_args, acados_args):
+        solver_args.rho_pulse_width_transfer_mode = rho_pulse_width_transfer_mode
+        solver_args.rho_pulse_width_extrapolation_factor = (
+            rho_pulse_width_extrapolation_factor
+        )
     acados_args.full_dynamics_phase_one_proximity_weight = (
         acados_transfer_phase_one_proximity_weight
     )
@@ -5033,6 +5042,18 @@ def build_cli() -> argparse.ArgumentParser:
         choices=("extrapolate", "repeat"),
         default="extrapolate",
         help="Construct the appended ACADOS cycle by extrapolation or repetition.",
+    )
+    parser.add_argument(
+        "--rho-pulse-width-transfer-mode",
+        choices=("repeat", "extrapolate"),
+        default="repeat",
+        help="Shared phase-aligned PW predictor for every RHO solver.",
+    )
+    parser.add_argument(
+        "--rho-pulse-width-extrapolation-factor",
+        type=float,
+        default=1.0,
+        help="Damping factor applied to the last certified inter-cycle PW trend.",
     )
     parser.add_argument(
         "--acados-transfer-phase-one-proximity-weight",
@@ -6262,6 +6283,10 @@ if __name__ == "__main__":
             args.acados_transfer_phase_one_screen_threshold
         ),
         acados_cyclical_transfer_mode=args.acados_cyclical_transfer_mode,
+        rho_pulse_width_transfer_mode=args.rho_pulse_width_transfer_mode,
+        rho_pulse_width_extrapolation_factor=(
+            args.rho_pulse_width_extrapolation_factor
+        ),
         acados_transfer_phase_one_proximity_weight=(
             args.acados_transfer_phase_one_proximity_weight
         ),

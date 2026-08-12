@@ -48,6 +48,7 @@ capacité musculaire :
 | `acados_reduced_100` | ACADOS SQP-IRK reduced, 100 RHO, après un seed ACADOS-native | résultat sérialisé et audité, y compris si la chaîne s'arrête avant 100 |
 | `acados_recovery_speed` | ACADOS reduced, budget adaptatif `30 + 70`, recovery R5 puis R3 seed-only, transferts `extrapolate`/`repeat` et horizon de deux cycles | ablation séquentielle sur le même runner; avec un artefact source, reprise au cycle 430 |
 | `acados_dropout` | ACADOS reduced nominal puis interruptions contrôlées à 10, 20 et 30 SQP aux RHO configurés | quatre chaînes séquentielles sur le même runner; budget nominal restauré avant tout retry, fallback IPOPT/Radau-5 certifié et poursuite 30 RHO après la dernière interruption |
+| `pw_transfer_ablation` | IPOPT et MadNLP/MUMPS reduced, SX compilé, Radau 5, 100 RHO | `repeat`, puis extrapolation PW phase-par-phase avec $\alpha=0.25$, $0.5$ et $1$ sur la même machine par solveur |
 | `fatigue_endurance` | IPOPT, MadNLP/MUMPS et FATROP reduced, SX et compilés, Radau 3; ACADOS SQP-IRK full avec garde rapide `2.60` et Phase-I mécanique | horizon atteint ou arrêt candidat de fatigue après deux fenêtres non certifiées consécutives |
 | `fatigue_endurance_radau5` | IPOPT/MUMPS et MadNLP/MUMPS reduced, SX et compilés, Radau 5 | même contrat d'endurance, afin de vérifier que le stop MadNLP R3 n'est pas un artefact de transcription |
 
@@ -61,6 +62,23 @@ PW. Il est alors rapporté comme `fatigue_limited_candidate`, donc comme un
 outcome expérimental important et non comme une erreur d'infrastructure. Sans
 ces trois indices, il reste `unconfirmed_endurance_stop` et fait échouer le
 gate : une non-convergence numérique ne doit pas être renommée fatigue.
+
+Le transfert historique répétait les PW du dernier cycle pour tous les
+solveurs. Le mode expérimental prédit désormais, pour chaque muscle $m$ et
+chaque phase $j$ parmi les 30 stimulations :
+
+```math
+PW_{k+1,m,j}^{(0)} = PW_{k,m,j}
+  + \alpha\left(PW_{k,m,j}-PW_{k-1,m,j}\right).
+```
+
+La prédiction est ensuite tronquée par les bornes physiques du NLP. Les états
+et l'angle absolu ne sont pas extrapolés par cette option : l'ablation
+`pw_transfer_ablation` isole donc l'effet du seed de contrôle. Elle exécute
+successivement `repeat`, puis $\alpha=0.25$, $0.5$ et $1$ sur le même runner,
+avec le même seed, Radau-5, SX reduced et les évaluateurs compilés. Les JSON
+conservent les itérations par RHO; le résumé Actions rapporte leur somme et
+leur moyenne, les temps hot médian/P90, la convergence, le coût et la fatigue.
 
 Après une solution non certifiée, le wrapper RHO ne décale désormais plus les
 bornes, les états ni le primal. La seconde chance repart exactement du dernier
@@ -374,6 +392,12 @@ gh workflow run cycling_solver_benchmark_linux.yml \
 
 # Les interruptions sont figées aux RHO 100, 150 et 430, puis poursuivies
 # durant 30 RHO pour rendre les campagnes directement comparables.
+
+# Mesurer l'effet du prédicteur de PW sur IPOPT et MadNLP/MUMPS
+gh workflow run cycling_solver_benchmark_linux.yml \
+  --ref codex/full-horizon-homotopy \
+  -f cycles=pw_transfer_ablation \
+  -f crank_assistance_nm=signed:+0.15
 
 # Rejouer exactement le seed Intel du run 150 sur un nouveau runner
 gh workflow run cycling_solver_benchmark_linux.yml \

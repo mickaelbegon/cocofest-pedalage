@@ -35,6 +35,8 @@ madnlp_fast_max_iterations="${MADNLP_FAST_MAX_ITERATIONS:-73}"
 madnlp_fast_max_wall_time="${MADNLP_FAST_MAX_WALL_TIME:-20}"
 high_accuracy_trace_max_cycles="${HIGH_ACCURACY_TRACE_MAX_CYCLES:-30}"
 high_accuracy_trace_cycle_milestones="${HIGH_ACCURACY_TRACE_CYCLE_MILESTONES:-430,660,779}"
+rho_pulse_width_transfer_mode="${RHO_PULSE_WIDTH_TRANSFER_MODE:-repeat}"
+rho_pulse_width_extrapolation_factor="${RHO_PULSE_WIDTH_EXTRAPOLATION_FACTOR:-1.0}"
 
 if ! [[ "$collocation_degree" =~ ^[2-9]$ ]]; then
   echo "COLLOCATION_DEGREE must be an integer between 2 and 9, got '$collocation_degree'." >&2
@@ -63,6 +65,10 @@ esac
 case "$nlp_failed_rho_phase_one_recovery" in
   true|false) ;;
   *) echo "NLP_FAILED_RHO_PHASE_ONE_RECOVERY must be true or false; got '$nlp_failed_rho_phase_one_recovery'." >&2; exit 2 ;;
+esac
+case "$rho_pulse_width_transfer_mode" in
+  repeat|extrapolate) ;;
+  *) echo "RHO_PULSE_WIDTH_TRANSFER_MODE must be repeat or extrapolate." >&2; exit 2 ;;
 esac
 
 if [[ "$ipopt_profile" =~ ^scientific[-_]radau[3456]$ ]]; then
@@ -270,6 +276,8 @@ python "$workspace/examples/fes_multibody/cycling/cycling_fes_solver_comparison.
   --first-node-wheel-q-slack 0 \
   --terminal-wheel-q-slack "$BENCHMARK_Q_SLACK" \
   --compact-rho-output \
+  --rho-pulse-width-transfer-mode "$rho_pulse_width_transfer_mode" \
+  --rho-pulse-width-extrapolation-factor "$rho_pulse_width_extrapolation_factor" \
   --print-traces \
   --output-json "$result" \
   "${trajectory_options[@]+"${trajectory_options[@]}"}" \
@@ -294,6 +302,19 @@ if [[ -f "$result" ]] && ! jq -e --arg solver "$solver" \
   '.configurations[$solver].use_sx == true' "$result" >/dev/null
 then
   echo "The generated result is not SX even though the benchmark is SX-only." >&2
+  exit 1
+fi
+
+if [[ -f "$result" ]] && ! jq -e \
+  --arg solver "$solver" \
+  --arg mode "$rho_pulse_width_transfer_mode" \
+  --argjson factor "$rho_pulse_width_extrapolation_factor" '
+  .configurations[$solver] |
+  (.rho_pulse_width_transfer_mode == $mode) and
+  (.rho_pulse_width_extrapolation_factor == $factor)
+' "$result" >/dev/null
+then
+  echo "The serialized PW-transfer predictor differs from the requested one." >&2
   exit 1
 fi
 

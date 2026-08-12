@@ -1995,6 +1995,25 @@ def build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--rho-pulse-width-transfer-mode",
+        choices=("repeat", "extrapolate"),
+        default="repeat",
+        help=(
+            "Predict the appended phase-aligned PW cycle by repetition or from "
+            "the trend between the last two certified cycles. Applies to "
+            "IPOPT, MadNLP, FATROP, and ACADOS."
+        ),
+    )
+    parser.add_argument(
+        "--rho-pulse-width-extrapolation-factor",
+        type=float,
+        default=1.0,
+        help=(
+            "Multiplier alpha in PW_next = PW_last + alpha * "
+            "(PW_last - PW_previous). The prediction is clipped to PW bounds."
+        ),
+    )
+    parser.add_argument(
         "--transfer-rollout-substeps",
         "--acados-transfer-rollout-substeps",
         dest="acados_transfer_rollout_substeps",
@@ -4852,7 +4871,9 @@ def _split_receding_solution(sol) -> tuple:
     return merged_solution, source_window_solutions, exported_cycle_solutions
 
 
-def certified_physical_receding_solution(sol) -> tuple[tuple, dict[str, object]]:
+def certified_physical_receding_solution(
+    sol, cycles_per_window: int = 1
+) -> tuple[tuple, dict[str, object]]:
     """Remove failed same-RHO attempts from physical traces and accounting."""
 
     merged_solution, source_window_solutions, exported_cycle_solutions = (
@@ -4912,16 +4933,46 @@ def certified_physical_receding_solution(sol) -> tuple[tuple, dict[str, object]]
         }
         for index, solution in enumerate(source_window_solutions, start=1)
     ]
-    # Bioptim's compact RHO output does not populate split cycle solutions.
-    # Each certified source solve is exactly one physical cycle here and is a
-    # safer trace source than the merged object, which also contains retries.
-    filtered = (merged_solution, certified_solutions, certified_solutions)
+    if cycles_per_window < 1:
+        raise ValueError("cycles_per_window must be at least one.")
+    if cycles_per_window == 1:
+        # Bioptim's compact one-cycle RHO output may not populate split cycle
+        # solutions. Each certified source solve is exactly one physical cycle.
+        certified_cycle_solutions = certified_solutions
+    else:
+        # Bioptim exports the first cycle of every attempted window, followed
+        # by the remaining cycles of the final window. Select the first-cycle
+        # entries using the retry/certification mask, then retain the terminal
+        # tail only when the final attempted window was certified.
+        first_cycle_exports = exported_cycle_solutions[: len(source_window_solutions)]
+        certified_indices = [
+            index
+            for index, solution in enumerate(source_window_solutions)
+            if (
+                getattr(solution, "_cocofest_fallback_solution", None) is not None
+                or getattr(solution, "_cocofest_advanced_physical_rho", False)
+            )
+        ]
+        certified_cycle_solutions = [
+            first_cycle_exports[index]
+            for index in certified_indices
+            if index < len(first_cycle_exports)
+        ]
+        if certified_indices and certified_indices[-1] == len(source_window_solutions) - 1:
+            certified_cycle_solutions.extend(
+                exported_cycle_solutions[
+                    len(source_window_solutions) :
+                    len(source_window_solutions) + cycles_per_window - 1
+                ]
+            )
+    filtered = (merged_solution, certified_solutions, certified_cycle_solutions)
     return filtered, {
         "available": True,
         "attempt_count": len(source_window_solutions),
         "certified_physical_rho_count": len(certified_solutions),
         "attempts": attempts,
         "ignored_exported_cycle_count": len(exported_cycle_solutions),
+        "certified_exported_cycle_count": len(certified_cycle_solutions),
     }
 
 
@@ -15550,6 +15601,13 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
     if args.acados_initial_irk_rollout and args.solver != "acados":
         raise ValueError("--acados-initial-irk-rollout requires --solver acados.")
     if (
+        not np.isfinite(args.rho_pulse_width_extrapolation_factor)
+        or args.rho_pulse_width_extrapolation_factor < 0.0
+    ):
+        raise ValueError(
+            "--rho-pulse-width-extrapolation-factor must be finite and non-negative."
+        )
+    if (
         getattr(args, "primal_feasibility_threshold", None) is not None
         and args.primal_feasibility_threshold <= 0
     ):
@@ -16512,6 +16570,10 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         nmpc.repeat_cyclical_state_initial_guess = (
             args.acados_cyclical_transfer_mode == "repeat"
         )
+        nmpc.pulse_width_transfer_mode = args.rho_pulse_width_transfer_mode
+        nmpc.pulse_width_extrapolation_factor = (
+            args.rho_pulse_width_extrapolation_factor
+        )
         nmpc.transfer_debug = echo
         # There is no certified predecessor for the first RHO. Even when the
         # experiment requests dual preservation, start from zero multipliers
@@ -16954,6 +17016,11 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             print(
                 "acados_cyclical_transfer_mode: "
                 f"{args.acados_cyclical_transfer_mode}"
+            )
+            print(
+                "rho_pulse_width_transfer: "
+                f"{args.rho_pulse_width_transfer_mode} "
+                f"alpha={args.rho_pulse_width_extrapolation_factor}"
             )
             print(
                 "acados_transfer_rollout_substeps: "
@@ -20088,7 +20155,9 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
     raw_solver_attempt_summary = None
     if args.retry_failed_rho_without_advance:
         certified_trace_filter_start = perf_counter()
-        sol, raw_solver_attempt_summary = certified_physical_receding_solution(sol)
+        sol, raw_solver_attempt_summary = certified_physical_receding_solution(
+            sol, cycles_per_window=args.cycles_per_window
+        )
         certified_trace_filter_wall_time_s = (
             perf_counter() - certified_trace_filter_start
         )

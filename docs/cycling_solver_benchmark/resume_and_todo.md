@@ -810,6 +810,19 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     angle/cadence, PW, objectif, AUC et capacité des quatre muscles. Aucun
     primal interrompu ne peut avancer le RHO; les audits DOP853 locaux restent
     requis avant toute interprétation de la fatigue.
+39. [implémenté localement, CI à lancer] Corriger le filtre des tentatives RHO
+    pour `cycles_per_window > 1`. Bioptim exporte le premier cycle de chaque
+    tentative puis le reliquat de la dernière fenêtre. Le run `31630846332`
+    avait convergé sur ses quatre fenêtres two-cycle, avec des résidus
+    dynamiques de l'ordre de $10^{-13}$, mais l'ancien filtre concaténait des
+    horizons superposés et créait artificiellement un saut de force Triceps de
+    `57.55 N`.
+40. [implémenté localement, CI à lancer] Comparer sur 100 RHO reduced/SX/Radau-5
+    compilés la répétition des PW et leur extrapolation phase-par-phase avec
+    $\alpha\in\{0.25,0.5,1\}$, séparément pour IPOPT et MadNLP/MUMPS. Rapporter
+    somme et moyenne des itérations, temps hot médian/P90, échecs, coût et
+    fatigue. Si le seed PW seul est bénéfique, tester ensuite un rollout des
+    états de Ding cohérent avec ces contrôles.
 
 La question causale est maintenant resserrée : une seule projection au RHO 19
 ne suffit pas, mais la séquence 19--36 conserve le bassin franchissant le RHO

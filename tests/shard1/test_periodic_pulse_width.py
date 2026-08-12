@@ -6367,6 +6367,28 @@ def test_same_rho_retries_are_excluded_from_physical_solution_traces():
     }
 
 
+def test_two_cycle_filter_keeps_one_cycle_per_window_and_final_tail():
+    merged = SimpleNamespace(status=None)
+    attempts = [
+        SimpleNamespace(status=2, _cocofest_advanced_physical_rho=False),
+        SimpleNamespace(status=0, _cocofest_advanced_physical_rho=True),
+        SimpleNamespace(status=0, _cocofest_advanced_physical_rho=True),
+        SimpleNamespace(status=0, _cocofest_advanced_physical_rho=True),
+        SimpleNamespace(status=0, _cocofest_advanced_physical_rho=True),
+    ]
+    first_cycles = [object() for _ in attempts]
+    final_tail = object()
+
+    filtered, accounting = periodic_example.certified_physical_receding_solution(
+        (merged, attempts, [*first_cycles, final_tail]), cycles_per_window=2
+    )
+
+    assert filtered[1] == attempts[1:]
+    assert filtered[2] == [*first_cycles[1:], final_tail]
+    assert accounting["certified_physical_rho_count"] == 4
+    assert accounting["certified_exported_cycle_count"] == 5
+
+
 def test_ipopt_fallback_replaces_failed_acados_trace_without_hiding_attempt():
     merged = SimpleNamespace(status=None)
     fallback = SimpleNamespace(
@@ -7182,19 +7204,22 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert workflow.count("inputs.cycles != 'fatigue_endurance_radau5'") >= 8
     assert workflow.count("inputs.cycles != 'radau35_comparison'") >= 8
     assert (
-        "matrix.solver == 'ipopt' && inputs.cycles != 'radau5_100' && "
+        "matrix.solver == 'ipopt' && inputs.cycles != 'pw_transfer_ablation' && "
+        "inputs.cycles != 'radau5_100' && "
         "inputs.cycles != 'radau35_comparison' && "
         "inputs.cycles != 'fatigue_endurance' && "
         "inputs.cycles != 'fatigue_endurance_radau5'"
     ) in workflow
     assert (
-        "matrix.solver == 'madnlp' && inputs.cycles != 'radau5_100' && "
+        "matrix.solver == 'madnlp' && inputs.cycles != 'pw_transfer_ablation' && "
+        "inputs.cycles != 'radau5_100' && "
         "inputs.cycles != 'radau35_comparison' && "
         "inputs.cycles != 'fatigue_endurance' && "
         "inputs.cycles != 'fatigue_endurance_radau5'"
     ) in workflow
     assert (
-        "matrix.solver == 'fatrop' && inputs.cycles != 'radau5_100' && "
+        "matrix.solver == 'fatrop' && inputs.cycles != 'pw_transfer_ablation' && "
+        "inputs.cycles != 'radau5_100' && "
         "inputs.cycles != 'radau35_comparison' && "
         "inputs.cycles != 'fatigue_endurance' && "
         "inputs.cycles != 'fatigue_endurance_radau5'"
@@ -9830,6 +9855,52 @@ def test_cyclical_transfer_keeps_complete_state_cycle_and_repeats_controls():
     )
 
 
+def test_pulse_width_transfer_extrapolates_phase_aligned_two_cycle_trend():
+    nmpc = SimpleNamespace(
+        control_nodes_per_cycle=3,
+        pulse_width_transfer_mode="extrapolate",
+        pulse_width_extrapolation_factor=0.5,
+        _previous_pulse_width_cycle={},
+        nlp=[SimpleNamespace(u_init={"last_pulse_width_Biceps": SimpleNamespace(init=np.zeros((1, 6)))})],
+    )
+    controls = {"last_pulse_width_Biceps": np.array([[1.0, 2.0, 3.0, 3.0, 5.0, 7.0]])}
+
+    MyCyclicNMPC.set_init_cyclical_controls(
+        nmpc, controls, "last_pulse_width_Biceps", 0
+    )
+
+    np.testing.assert_allclose(
+        nmpc.nlp[0].u_init["last_pulse_width_Biceps"].init[0],
+        [3.0, 5.0, 7.0, 4.0, 6.5, 9.0],
+    )
+
+
+def test_one_cycle_pulse_width_extrapolation_uses_previous_certified_cycle():
+    nmpc = SimpleNamespace(
+        control_nodes_per_cycle=3,
+        pulse_width_transfer_mode="extrapolate",
+        pulse_width_extrapolation_factor=0.25,
+        _previous_pulse_width_cycle={
+            "last_pulse_width_Biceps": np.array([1.0, 2.0, 3.0])
+        },
+        nlp=[SimpleNamespace(u_init={"last_pulse_width_Biceps": SimpleNamespace(init=np.zeros((1, 3)))})],
+    )
+    controls = {"last_pulse_width_Biceps": np.array([[2.0, 4.0, 6.0]])}
+
+    MyCyclicNMPC.set_init_cyclical_controls(
+        nmpc, controls, "last_pulse_width_Biceps", 0
+    )
+
+    np.testing.assert_allclose(
+        nmpc.nlp[0].u_init["last_pulse_width_Biceps"].init[0],
+        [2.25, 4.5, 6.75],
+    )
+    np.testing.assert_allclose(
+        nmpc._previous_pulse_width_cycle["last_pulse_width_Biceps"],
+        [2.0, 4.0, 6.0],
+    )
+
+
 def test_historical_collocation_control_transfer_uses_control_cycle_length():
     source = np.arange(60, dtype=float)[None, :]
     nmpc = SimpleNamespace(
@@ -12352,6 +12423,8 @@ def test_comparison_forwards_solver_neutral_seed_diagnostics(monkeypatch):
         acados_transfer_phase_one_max_qdot_change=0.2,
         acados_transfer_phase_one_max_fes_change=0.3,
         nlp_failed_rho_phase_one_recovery=True,
+        rho_pulse_width_transfer_mode="extrapolate",
+        rho_pulse_width_extrapolation_factor=0.5,
     )
 
     assert captured["ipopt"].initial_guess_diagnostics is True
@@ -12373,6 +12446,8 @@ def test_comparison_forwards_solver_neutral_seed_diagnostics(monkeypatch):
         assert args.full_dynamics_phase_one_max_qdot_change == pytest.approx(0.2)
         assert args.full_dynamics_phase_one_max_fes_change == pytest.approx(0.3)
         assert args.nlp_failed_rho_phase_one_recovery is True
+        assert args.rho_pulse_width_transfer_mode == "extrapolate"
+        assert args.rho_pulse_width_extrapolation_factor == pytest.approx(0.5)
 
 
 def test_generic_initial_guess_copy_reports_incompatible_grids():
@@ -12420,6 +12495,10 @@ def test_shared_transfer_rollout_cli_is_available_to_ipopt():
             "15",
             "--acados-cyclical-transfer-mode",
             "repeat",
+            "--rho-pulse-width-transfer-mode",
+            "extrapolate",
+            "--rho-pulse-width-extrapolation-factor",
+            "0.5",
             "--acados-transfer-phase-one-proximity-weight",
             "0",
             "--acados-transfer-phase-one-defect-weight",
@@ -12510,6 +12589,8 @@ def test_shared_transfer_rollout_cli_is_available_to_ipopt():
     assert comparison_args.acados_transfer_phase_one_mode == "mechanical"
     assert comparison_args.acados_transfer_phase_one_lookback_nodes == 15
     assert comparison_args.acados_cyclical_transfer_mode == "repeat"
+    assert comparison_args.rho_pulse_width_transfer_mode == "extrapolate"
+    assert comparison_args.rho_pulse_width_extrapolation_factor == pytest.approx(0.5)
     assert comparison_args.acados_transfer_phase_one_proximity_weight == 0
     assert comparison_args.acados_transfer_phase_one_defect_weight == 1
     assert comparison_args.acados_transfer_phase_one_substeps == 10
