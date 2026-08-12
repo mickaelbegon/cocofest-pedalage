@@ -965,6 +965,8 @@ def _control_saturation_metrics(result: dict, cycle_count: int) -> list[dict]:
         return []
     limited = _truncate_result_to_cycles(result, cycle_count)
     bounds = result.get("control_bounds", {})
+    shooting_per_cycle = int(result["args"].stimulations_per_cycle)
+    terminal_cycle_count = min(10, cycle_count)
     rows = []
     for key, values in sorted(limited.get("control_traces", {}).items()):
         if key not in bounds:
@@ -974,6 +976,7 @@ def _control_saturation_metrics(result: dict, cycle_count: int) -> list[dict]:
         upper = float(bounds[key]["upper"])
         span = upper - lower
         tolerance = max(1e-12, span * 1e-3)
+        terminal_trace = trace[-terminal_cycle_count * shooting_per_cycle :]
         rows.append(
             {
                 "key": key,
@@ -981,11 +984,42 @@ def _control_saturation_metrics(result: dict, cycle_count: int) -> list[dict]:
                 "upper": upper,
                 "lower_fraction": float(np.mean(trace <= lower + tolerance)),
                 "upper_fraction": float(np.mean(trace >= upper - tolerance)),
+                "terminal_cycle_count": terminal_cycle_count,
+                "terminal_lower_fraction": float(
+                    np.mean(terminal_trace <= lower + tolerance)
+                ),
+                "terminal_upper_fraction": float(
+                    np.mean(terminal_trace >= upper - tolerance)
+                ),
                 "maximum": float(np.max(trace)),
                 "mean": float(np.mean(trace)),
             }
         )
     return rows
+
+
+def _maximum_consecutive_uncertified_attempts(result: dict) -> int:
+    """Count retry failures that are absent from the certified trajectory.
+
+    Failed same-RHO retries are intentionally removed from the physical state
+    and control traces.  Their accounting nevertheless remains the authoritative
+    source for the endurance stopping rule.  Missing ``advanced`` flags belong
+    to older artifacts and are ignored instead of being guessed as failures.
+    """
+
+    attempts = (result.get("solver_attempt_accounting") or {}).get("attempts") or []
+    consecutive_failures = 0
+    maximum_consecutive_failures = 0
+    for attempt in attempts:
+        advanced = attempt.get("advanced")
+        if advanced is True:
+            consecutive_failures = 0
+        elif advanced is False:
+            consecutive_failures += 1
+            maximum_consecutive_failures = max(
+                maximum_consecutive_failures, consecutive_failures
+            )
+    return maximum_consecutive_failures
 
 
 def _stop_classification(result: dict) -> dict:
@@ -1024,9 +1058,11 @@ def _fatigue_endurance_outcome(
     physiological limit: they can also reveal a numerical defect.  We call an
     early stop fatigue-limited only when the executed, certified prefix also
     shows a loss of Ding force capacity and a material use of the upper pulse-
-    width bounds.  The resulting label deliberately remains a ``candidate``:
-    it is an observed endpoint for comparison, not a claim that the optimizer
-    has mathematically proved muscle exhaustion.
+    width bounds, either over the full certified prefix or over its last ten
+    cycles.  The terminal statistic avoids diluting endpoint recruitment over
+    a long, initially unfatigued trajectory.  The resulting label deliberately
+    remains a ``candidate``: it is an observed endpoint for comparison, not a
+    claim that the optimizer has mathematically proved muscle exhaustion.
     """
 
     if success and (
@@ -1043,7 +1079,14 @@ def _fatigue_endurance_outcome(
         evidence.append("two_consecutive_uncertified_windows")
     if minimum_capacity_ratio is not None and minimum_capacity_ratio < 1.0 - 1e-9:
         evidence.append("ding_force_capacity_decreased")
-    if any(row.get("upper_fraction", 0.0) >= 0.1 for row in control_saturation):
+    if any(
+        max(
+            row.get("upper_fraction", 0.0),
+            row.get("terminal_upper_fraction", 0.0),
+        )
+        >= 0.1
+        for row in control_saturation
+    ):
         evidence.append("pulse_width_upper_bound_active")
 
     fatigue_limited = set(evidence) == {
@@ -2725,15 +2768,22 @@ def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
                 else window["wall_time_s"] + restoration_wall_time
             )
         consecutive_failures = 0
-        maximum_consecutive_failures = 0
+        maximum_consecutive_window_failures = 0
         for window in window_rows:
             if window["solver_converged"] and window["primal_feasible"] is True:
                 consecutive_failures = 0
             else:
                 consecutive_failures += 1
-                maximum_consecutive_failures = max(
-                    maximum_consecutive_failures, consecutive_failures
+                maximum_consecutive_window_failures = max(
+                    maximum_consecutive_window_failures, consecutive_failures
                 )
+        maximum_consecutive_uncertified_attempts = (
+            _maximum_consecutive_uncertified_attempts(result)
+        )
+        maximum_consecutive_failures = max(
+            maximum_consecutive_window_failures,
+            maximum_consecutive_uncertified_attempts,
+        )
         first_failed_rho = _first_failed_rho(
             window_rows,
             result.get("physical_success"),
@@ -2944,6 +2994,12 @@ def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
                 ),
                 "first_failed_rho": first_failed_rho,
                 "maximum_consecutive_failures": maximum_consecutive_failures,
+                "maximum_consecutive_window_failures": (
+                    maximum_consecutive_window_failures
+                ),
+                "maximum_consecutive_uncertified_attempts": (
+                    maximum_consecutive_uncertified_attempts
+                ),
                 "objective": _finite_float(result.get("objective")),
                 "window_objective_sum": _finite_float(result.get("objective")),
                 "validated_prefix_window_objective_sum": (

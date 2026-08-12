@@ -4836,6 +4836,10 @@ def test_endurance_metrics_report_fatigue_and_control_saturation():
         f"Biceps={a_row['relative_final']:.6f}"
     )
     assert executed_objective > 0
+    assert saturation[0]["terminal_cycle_count"] == 2
+    assert saturation[0]["terminal_upper_fraction"] == saturation[0][
+        "upper_fraction"
+    ]
     assert muscle_objectives == [
         {
             "muscle": "Biceps",
@@ -5195,6 +5199,37 @@ def test_endurance_outcome_requires_capacity_and_recruitment_evidence():
     assert accepted["accepted"] is True
     assert rejected["label"] == "unconfirmed_endurance_stop"
     assert rejected["accepted"] is False
+
+
+def test_endurance_outcome_accepts_terminal_recruitment_saturation():
+    outcome = comparison_example._fatigue_endurance_outcome(
+        success=False,
+        validated_cycles=115,
+        requested_cycles=2000,
+        maximum_consecutive_failures=2,
+        minimum_capacity_ratio=0.46,
+        control_saturation=[
+            {"upper_fraction": 0.09, "terminal_upper_fraction": 0.23}
+        ],
+    )
+
+    assert outcome["label"] == "fatigue_limited_candidate"
+    assert outcome["accepted"] is True
+
+
+def test_uncertified_attempt_streak_includes_filtered_same_rho_retries():
+    result = {
+        "solver_attempt_accounting": {
+            "attempts": [
+                {"target_rho": 114, "advanced": True},
+                {"target_rho": 115, "advanced": True},
+                {"target_rho": 116, "advanced": False},
+                {"target_rho": 116, "advanced": False},
+            ]
+        }
+    }
+
+    assert comparison_example._maximum_consecutive_uncertified_attempts(result) == 2
 
 
 def test_receding_horizon_window_count_includes_single_cycle_horizons():
