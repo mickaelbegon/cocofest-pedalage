@@ -1,4 +1,5 @@
 import re
+import textwrap
 from pathlib import Path
 
 
@@ -103,3 +104,29 @@ def test_acados_ipopt_hybrid_reuses_the_shared_seed_physical_parameters():
     assert "prepare-acados-stack" in hybrid_job
     assert "ACADOS_SOURCE_DIR:" not in hybrid_job
     assert "CONDA_PREFIX" in hybrid_job
+
+
+def test_acados_hybrid_workflow_stays_below_github_expression_limit():
+    """Long run scalars containing expressions cannot exceed GitHub's 21 kB limit."""
+
+    repository_root = Path(__file__).resolve().parents[1]
+    workflow = (
+        repository_root / ".github" / "workflows" / "cycling_solver_benchmark_linux.yml"
+    ).read_text(encoding="utf-8")
+    hybrid_job = workflow.split("\n  acados-ipopt-hybrid:", maxsplit=1)[1].split(
+        "\n  prepare-acados-stack:", maxsplit=1
+    )[0]
+    run_block = hybrid_job.split(
+        "      - name: Run the full/reduced hybrid recovery gates", maxsplit=1
+    )[1].split("\n      - name:", maxsplit=1)[0]
+
+    run_scalar = run_block.split("        run: |\n", maxsplit=1)[1]
+    assert len(textwrap.dedent(run_scalar).encode("utf-8")) < 21_000
+    assert "bash .github/scripts/run_acados_dropout.sh" in run_block
+
+    dropout_script = (
+        repository_root / ".github" / "scripts" / "run_acados_dropout.sh"
+    ).read_text(encoding="utf-8")
+    assert "--acados-forced-iteration-cap-rhos" in dropout_script
+    assert "--acados-forced-iteration-cap" in dropout_script
+    assert "dropout-summary.json" in dropout_script
