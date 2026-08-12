@@ -56,7 +56,19 @@ except ImportError:
 
 EXAMPLE_DIR = Path(__file__).resolve().parent
 BENCHMARK_SOLVERS = ("ipopt", "acados", "fatrop", "madnlp")
-BENCHMARK_STIMULATION_PATTERN_CYCLES = (1, 2, 3, 4, 5, 10, 30, 100)
+BENCHMARK_STIMULATION_PATTERN_CYCLES = (
+    1,
+    2,
+    3,
+    4,
+    5,
+    10,
+    30,
+    100,
+    430,
+    660,
+    779,
+)
 BENCHMARK_CONFIGURATION_FIELDS = (
     "solver",
     "benchmark_profile",
@@ -99,6 +111,8 @@ BENCHMARK_CONFIGURATION_FIELDS = (
     "use_sx",
     "enforce_start_constraints",
     "validate_integrator_maps",
+    "high_accuracy_trace_max_cycles",
+    "high_accuracy_trace_cycle_milestones",
     "nlp_ordering_strategy",
     "state_scaling",
     "pulse_width_scaling",
@@ -253,6 +267,7 @@ BENCHMARK_CONFIGURATION_FIELDS = (
     "madnlp_c_compile",
     "madnlp_linear_solver",
     "max_madnlp_iterations",
+    "madnlp_max_wall_time",
     "alpaqa_dual_warm_start_mode",
     "max_alpaqa_iterations",
     "alpaqa_alm_max_iterations",
@@ -1817,6 +1832,7 @@ def _nlp_solver_config(
     alpaqa_initial_penalty: float | None = None,
     alpaqa_alm_max_iterations: int | None = None,
     madnlp_linear_solver: str | None = None,
+    madnlp_max_wall_time: float | None = None,
     alpaqa_initial_tolerance: float | None = None,
     alpaqa_penalty_update_factor: float | None = None,
     alpaqa_maximum_penalty: float | None = None,
@@ -1847,6 +1863,7 @@ def _nlp_solver_config(
         args.fatrop_print_level = fatrop_print_level
     if solver_name == "madnlp":
         args.madnlp_linear_solver = madnlp_linear_solver
+        args.madnlp_max_wall_time = madnlp_max_wall_time
     if solver_name == "alpaqa":
         args.alpaqa_lbfgs_memory = alpaqa_lbfgs_memory
         args.alpaqa_alm_max_iterations = alpaqa_alm_max_iterations
@@ -2407,6 +2424,72 @@ def stimulation_pattern_snapshots(
         f"cycle_{cycle}": _stimulation_pattern_snapshot(result, cycle)
         for cycle in cycles
     }
+
+
+def state_boundary_snapshots(
+    result: dict,
+    cycles: tuple[int, ...] = BENCHMARK_STIMULATION_PATTERN_CYCLES,
+) -> dict[str, dict]:
+    """Return comparable state values at the boundaries of selected RHO.
+
+    Stimulation patterns contain the controls inside a cycle.  These compact
+    boundary snapshots complete that evidence with the mechanical and Ding
+    states entering and leaving the same physical RHO, without serializing the
+    full collocation trajectory in the benchmark summary.
+    """
+
+    validated_cycles = _physically_validated_cycle_count(result)
+    shooting_per_cycle = int(result["args"].stimulations_per_cycle)
+    snapshots = {}
+    for cycle in cycles:
+        snapshot = {
+            "cycle": int(cycle),
+            "available": False,
+            "reason": None,
+            "states": {},
+        }
+        snapshots[f"cycle_{cycle}"] = snapshot
+        if cycle < 1:
+            snapshot["reason"] = "cycle_must_be_positive"
+            continue
+        if cycle > validated_cycles:
+            snapshot[
+                "reason"
+            ] = f"only_{validated_cycles}_cycles_belong_to_the_converged_prefix"
+            continue
+
+        limited = _truncate_result_to_cycles(result, cycle)
+        start = (cycle - 1) * shooting_per_cycle
+        stop = cycle * shooting_per_cycle
+        traces = dict(limited.get("state_traces", {}))
+        traces.setdefault("wheel_angle", limited.get("wheel_angle_trace"))
+        invalid_key = None
+        for key, values in sorted(traces.items()):
+            if values is None:
+                continue
+            trace = np.asarray(values, dtype=float)
+            if trace.ndim == 1:
+                trace = trace[np.newaxis, :]
+            if trace.ndim != 2 or trace.shape[1] <= stop:
+                invalid_key = key
+                break
+            boundary_values = trace[:, [start, stop]]
+            if not np.all(np.isfinite(boundary_values)):
+                invalid_key = key
+                break
+            snapshot["states"][key] = {
+                "start": boundary_values[:, 0].tolist(),
+                "end": boundary_values[:, 1].tolist(),
+                "delta": (
+                    boundary_values[:, 1] - boundary_values[:, 0]
+                ).tolist(),
+            }
+        if invalid_key is not None:
+            snapshot["states"] = {}
+            snapshot["reason"] = f"invalid_state_trace_for_{invalid_key}"
+            continue
+        snapshot["available"] = True
+    return snapshots
 
 
 def isolated_window_checkpoint_snapshots(
@@ -3130,11 +3213,15 @@ def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
                 "native_solver_status": result.get("native_solver_status"),
                 "windows": window_rows,
                 "stimulation_patterns": stimulation_pattern_snapshots(result),
+                "state_boundary_snapshots": state_boundary_snapshots(result),
                 "isolated_window_checkpoints": (
                     isolated_window_checkpoint_snapshots(result)
                 ),
                 "high_accuracy_trace_rollout": result.get(
                     "high_accuracy_trace_rollout"
+                ),
+                "high_accuracy_cycle_milestones": result.get(
+                    "high_accuracy_cycle_milestones"
                 ),
                 "integrator_map_initial_guess": result.get(
                     "integrator_map_initial_guess"
@@ -3396,6 +3483,7 @@ def main(
     madnlp_dual_warm_start_mode: str = "off",
     madnlp_c_compile: bool = False,
     madnlp_linear_solver: str | None = None,
+    madnlp_max_wall_time: float | None = None,
     alpaqa_max_iter: int = 2000,
     alpaqa_alm_max_iter: int | None = None,
     alpaqa_dual_warm_start_mode: str = "constraints",
@@ -3496,6 +3584,7 @@ def main(
     acados_ipopt_recovery_force_first_rho: bool = False,
     acados_ipopt_fallback_advance: bool = False,
     nlp_ipopt_recovery: bool = False,
+    nlp_ipopt_fallback_advance: bool = False,
     nlp_ipopt_recovery_max_iterations: int = 2000,
     nlp_ipopt_recovery_collocation_degree: int = 5,
     nlp_failed_rho_phase_one_recovery: bool = False,
@@ -3584,6 +3673,8 @@ def main(
     state_comparison_limit: int = 12,
     print_traces: bool = False,
     validate_integrator_maps: bool = False,
+    high_accuracy_trace_max_cycles: int = 30,
+    high_accuracy_trace_cycle_milestones: tuple[int, ...] = (),
     ipopt_profile: str = "historical",
     ipopt_model_formulation: str | None = None,
     ipopt_torque_application: str | None = None,
@@ -3969,6 +4060,14 @@ def main(
     acados_args.compact_rho_output = compact_rho_output
     ipopt_args.validate_integrator_maps = validate_integrator_maps
     acados_args.validate_integrator_maps = validate_integrator_maps
+    ipopt_args.high_accuracy_trace_max_cycles = high_accuracy_trace_max_cycles
+    acados_args.high_accuracy_trace_max_cycles = high_accuracy_trace_max_cycles
+    ipopt_args.high_accuracy_trace_cycle_milestones = (
+        high_accuracy_trace_cycle_milestones
+    )
+    acados_args.high_accuracy_trace_cycle_milestones = (
+        high_accuracy_trace_cycle_milestones
+    )
     acados_args.acados_integrator_type = acados_integrator_type
     acados_args.acados_collocation_type = acados_collocation_type
     acados_args.acados_sim_stages = acados_sim_stages
@@ -4275,10 +4374,14 @@ def main(
         max_iterations=madnlp_max_iter,
         dual_warm_start_mode=madnlp_dual_warm_start_mode,
         madnlp_linear_solver=madnlp_linear_solver,
+        madnlp_max_wall_time=madnlp_max_wall_time,
         periodic_ipopt_hot_start=optional_nlp_periodic_ipopt_hot_start,
     )
     for optional_nlp_args in (fatrop_args, madnlp_args):
         optional_nlp_args.nlp_ipopt_recovery = nlp_ipopt_recovery
+        optional_nlp_args.nlp_ipopt_fallback_advance = (
+            nlp_ipopt_fallback_advance
+        )
         optional_nlp_args.nlp_ipopt_recovery_max_iterations = (
             nlp_ipopt_recovery_max_iterations
         )
@@ -4791,6 +4894,7 @@ def build_cli() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--madnlp-max-iter", type=int, default=2000)
+    parser.add_argument("--madnlp-max-wall-time", type=float, default=None)
     parser.add_argument(
         "--madnlp-linear-solver",
         default=None,
@@ -5616,6 +5720,15 @@ def build_cli() -> argparse.ArgumentParser:
         "--nlp-ipopt-recovery-collocation-degree", type=int, default=5
     )
     parser.add_argument(
+        "--nlp-ipopt-fallback-advance",
+        action="store_true",
+        help=(
+            "Allow the final converged and feasible IPOPT/Radau recovery to "
+            "certify a reduced MadNLP/Fatrop RHO and return the next RHO to "
+            "the fast backend."
+        ),
+    )
+    parser.add_argument(
         "--nlp-failed-rho-phase-one-recovery",
         action="store_true",
         help=(
@@ -5775,6 +5888,14 @@ def build_cli() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--high-accuracy-trace-max-cycles", type=int, default=30
+    )
+    parser.add_argument(
+        "--high-accuracy-trace-cycle-milestones",
+        type=parse_positive_window_indices,
+        default=(),
+    )
+    parser.add_argument(
         "--output-json",
         default=None,
         help="Optional path for a compact JSON summary of every selected solver.",
@@ -5842,6 +5963,10 @@ if __name__ == "__main__":
         n_threads=args.n_threads,
         compact_rho_output=args.compact_rho_output,
         validate_integrator_maps=args.validate_integrator_maps,
+        high_accuracy_trace_max_cycles=args.high_accuracy_trace_max_cycles,
+        high_accuracy_trace_cycle_milestones=(
+            args.high_accuracy_trace_cycle_milestones
+        ),
         resistive_torque=args.resistive_torque,
         acados_dir=args.acados_dir,
         codegen_tag=args.codegen_tag,
@@ -5897,6 +6022,7 @@ if __name__ == "__main__":
         fatrop_print_level=args.fatrop_print_level,
         fatrop_state_scaling=args.fatrop_state_scaling,
         madnlp_max_iter=args.madnlp_max_iter,
+        madnlp_max_wall_time=args.madnlp_max_wall_time,
         madnlp_dual_warm_start_mode=args.madnlp_dual_warm_start_mode,
         madnlp_c_compile=args.madnlp_c_compile,
         madnlp_linear_solver=args.madnlp_linear_solver,
@@ -6069,6 +6195,7 @@ if __name__ == "__main__":
             args.acados_failed_rho_phase_one_recovery
         ),
         nlp_ipopt_recovery=args.nlp_ipopt_recovery,
+        nlp_ipopt_fallback_advance=args.nlp_ipopt_fallback_advance,
         nlp_ipopt_recovery_max_iterations=(
             args.nlp_ipopt_recovery_max_iterations
         ),

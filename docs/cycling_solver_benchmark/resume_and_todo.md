@@ -1,6 +1,6 @@
 # Point de reprise du benchmark RHO
 
-État consolidé au 10 août 2026 sur la branche
+État consolidé au 12 août 2026 sur la branche
 `codex/full-horizon-homotopy`. Le dernier SHA Cocofest cité ci-dessous comme
 résultat CI reste celui de la campagne correspondante; les changements locaux
 explicitement signalés ne sont pas encore des résultats Linux.
@@ -155,9 +155,15 @@ factorisation MUMPS réellement parallélisable.
 - La compilation persistante fonctionne techniquement, mais son gain doit être
   remesuré sur une campagne assez longue pour amortir le coût initial.
 
-Le prochain levier MadNLP n'est pas un budget d'itérations plus élevé. Il faut
-reconstruire une primale admissible au **même RHO** après l'échec, puis repartir
-du dernier checkpoint certifié.
+Le prochain levier MadNLP n'est pas un budget d'itérations plus élevé. Le fast
+path est maintenant plafonné au P90 exact observé sur les fenêtres Linux R5
+terminées du run `31589698184`, soit `73` itérations, avec une garde murale
+native de `20 s`. Après le premier échec, IPOPT/Radau cible reconstruit une
+primale du **même RHO** et MadNLP tente de la certifier. Après le second échec,
+une solution IPOPT ne peut avancer ce RHO que si elle est convergée et passe
+l'audit commun. Ce chemin hybride est implémenté localement mais pas encore
+mesuré en CI; il faut donc séparer dans le bilan les succès MadNLP natifs, les
+recoveries seed-only, les fallbacks IPOPT et le temps pipeline complet.
 
 Le run `30856972707` précise ce diagnostic : MadNLP/Radau-5 reduced certifie
 `140` RHO, puis reproduit deux fois exactement le même échec au RHO 141
@@ -765,10 +771,24 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     ne doit jamais certifier l'objectif de fatigue; la capsule d'optimalité
     doit résoudre à nouveau le même RHO. Comparer ce chemin au simple
     `SQP_WITH_FEASIBLE_QP` avant d'ajouter une nouvelle fonction objectif.
-34. [en cours] La campagne IPOPT/MadNLP R5 avec le même couple résistif signé
+34. [bloqué par un hang MadNLP; remplacé par le protocole 35] La campagne IPOPT/MadNLP R5 avec le même couple résistif signé
     `+0.15 N.m`, run `31589698184`,
-    exécute encore les cas d'endurance. Ne pas conclure sur leur arrêt ni leur
-    coût avant la publication des artefacts complets.
+    a atteint environ 779 fenêtres MadNLP puis n'a plus produit de sortie. Le
+    simple `max_iter=2000` ne protège donc pas le runner contre un blocage dans
+    Julia/MUMPS. Ne pas utiliser ce run incomplet pour conclure sur la fatigue.
+35. [implémenté localement, CI à lancer] Tester MadNLP/R5 reduced avec le budget
+    rapide `73` itérations et `20 s`, puis IPOPT/R5 seed-only après le premier
+    échec et fallback certifiant après le second. Exiger : aucun hang, arrêt
+    propre ou 2 000 RHO, journal natif non masqué, et temps MadNLP/recovery/
+    pipeline séparés. Recalculer le percentile si le fallback dépasse `10 %`.
+36. [implémenté localement, CI à lancer] Borner le DOP853 continu à 30 cycles et
+    auditer localement les cycles 430, 660, 779 et le dernier cycle certifié.
+    Les résumés conservent aussi les PW et les frontières de tous les états aux
+    mêmes jalons pour comparer IPOPT, MadNLP et ACADOS.
+37. [implémenté localement, CI à lancer] Installer `t_renderer 0.2.0` avec
+    checksum dans le cache ACADOS. Le solve ne doit plus télécharger de binaire
+    à runtime; vérifier que le smoke passe même après la phase de préparation
+    de machine.
 
 La question causale est maintenant resserrée : une seule projection au RHO 19
 ne suffit pas, mais la séquence 19--36 conserve le bassin franchissant le RHO

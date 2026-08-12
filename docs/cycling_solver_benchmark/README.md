@@ -76,13 +76,29 @@ baissé (`min A/A_scale = 0.8644`), mais seulement `4.33 %` des PW du biceps
 atteignent la borne supérieure, sous le seuil d'évidence de `10 %`. Le gate a
 donc correctement classé l'arrêt `unconfirmed_endurance_stop`, et non fatigue.
 
+Le chemin rapide/robuste MadNLP est maintenant borné à partir de la campagne
+Linux R5 `31589698184`. Sur les RHO terminés avant le blocage du runner, le
+90e percentile de `nlp_hess_l` vaut `73` itérations. La campagne d'endurance
+utilise donc `--madnlp-max-iter 73` et `--madnlp-max-wall-time 20`. Ces deux
+gardes sont complémentaires : la première rend le coût ordinaire prévisible;
+la seconde empêche un appel Julia/MUMPS bloqué de monopoliser le runner.
+
 Le mode `--nlp-ipopt-recovery`, activé pour les campagnes d'endurance MadNLP,
-remplace cette répétition inutile. Après un échec, il fige les bornes et les
-cibles du RHO courant, résout une restauration IPOPT sur le même degré de
-Radau, et n'injecte la primale que si sa faisabilité est mesurée. MadNLP doit
-ensuite certifier lui-même cette primale avant tout avancement. Les temps de
-restauration sont séparés des temps chauds MadNLP; le critère de fatigue reste
-inchangé.
+fige les bornes et les cibles du RHO courant après un échec. Le premier appel
+IPOPT/Radau cible ne sert que de seed et MadNLP doit encore certifier cette
+primale. Si la seconde tentative MadNLP échoue aussi, le mode
+`--nlp-ipopt-fallback-advance` autorise la dernière solution IPOPT à avancer
+le même RHO seulement si elle est à la fois convergée et admissible selon
+l'audit commun. Les échecs MadNLP restent dans le journal natif, tandis que les
+temps IPOPT sont comptés séparément. On mesure ainsi la vitesse du fast path,
+le taux de fallback et le coût réel du pipeline robuste sans présenter les RHO
+hybrides comme des succès MadNLP.
+
+Le plafond `73` est une hypothèse expérimentale, pas une constante
+algorithmique universelle. La CI doit republier P50/P90/P99, taux de première
+tentative, taux de récupération par seed et taux de fallback. Si plus de
+`10 %` des RHO exigent IPOPT ou si le temps pipeline augmente, il faudra
+recalculer le budget sur les seuls RHO chauds de la nouvelle transcription.
 
 ### Préparation adaptative des RHO IPOPT/MadNLP
 
@@ -360,6 +376,7 @@ gain important, même lorsqu'elle ne réduit pas le temps de calcul.
 | Force passive incluse et axe du pédalier maintenu sur la variété de contact | L'ancienne référence n'était pas une cible physique suffisamment sûre si ces termes étaient omis ou trop faiblement discrétisés | Évite de sous-estimer le couple musculaire et la fatigue; rend full et reduced comparables sur les mêmes équations | Correction scientifique; aucun gain de vitesse revendiqué |
 | PW bornées et seeds validées dans `[pd0 ≈ 131.405 µs, 600 µs]` | Dans Ding, `pd0` est le vrai zéro de recrutement; une PW à zéro ou sous `pd0` est incohérente avec le modèle utilisé | Plus de warm-start historique hors bornes et warning explicite lors d'une correction de seed | Améliore la reproductibilité; ne change pas les bornes finales de l'OCP |
 | Seed commun, projection mécanique et raffinement IPOPT préalable pour MadNLP | MadNLP était très sensible à la branche non convexe sélectionnée par le warm-start | À 100 RHO R3, le premier échec reduced a été déplacé du RHO 1 au RHO 99; médiane chaude `0.806 s` sur le préfixe | Le RHO 99 n'était pas une preuve de fatigue et doit être retesté avec la nouvelle politique de reprise |
+| Budget MadNLP P90 + fallback IPOPT/Radau cible | Borner le fast path sans confondre plafond d'itérations, blocage Julia/MUMPS et fatigue | Budget initial `73` itérations, garde murale `20 s`; premier échec restauré comme seed, second échec remplaçable seulement par un IPOPT convergé et faisable du même RHO | À valider en CI; rapporter séparément temps MadNLP, recovery IPOPT et pipeline, puis recalibrer le percentile si le taux de fallback dépasse `10 %` |
 | MUMPS retenu pour IPOPT et MadNLP; PARDISO/MKL écarté | PARDISO n'a pas apporté le gain attendu dans les campagnes appariées, tandis que MUMPS est portable et reproductible en CI | Une pile Linux commune et stable; suppression d'une dépendance complexe sans perte de performance démontrée | MA57 peut rester une ablation IPOPT locale, mais n'est pas le backend CI portable |
 | Collocation du calcium raffinée | R3 sous-estime le calcium périodique isolé de `6.3864 %` | Erreur isolée ramenée à `0.0173 %` en R5 et `0.000415 %` en R6 | R5 est le compromis d'endurance en cours; le rollout DOP853 favorise provisoirement R6 pour la cible scientifique |
 | Comparaison longue R3/R5 appariée | Une comparaison à cinq cycles ne permet pas d'attribuer un écart de fatigue à la transcription plutôt qu'au transitoire du seed | Nouvelle campagne reduced, SX et compilée à 300 RHO par défaut, IPOPT/MUMPS et MadNLP/MUMPS séquentiellement sur la même machine | R3 et R5 emploient désormais le même contrat scientifique (SX, `periodic_node`, Radau, contraintes initiales, bridge primale cible et audit DOP853); seul le degré change |
@@ -368,6 +385,7 @@ gain important, même lorsqu'elle ne réduit pas le temps de calcul.
 | Après un échec, aucun shift ni transfert du primal; deux essais sur le même RHO | L'ancien loop Bioptim avançait parfois une solution non convergée, créant un faux motif « échec puis succès » | Le préfixe d'endurance ne peut plus être artificiellement prolongé après une non-convergence | Correctif `ae42595`; une première CI a révélé un relais CLI manquant, corrigé avant la relance |
 | Arrêt endurance après deux échecs et plafond porté à 2 000 RHO | Un arrêt attendu par fatigue est un résultat expérimental, pas une panne CI; 1 000 RHO pouvait être insuffisant | Distingue `fatigue_limited_candidate`, horizon complété et arrêt numérique non confirmé | La fatigue exige aussi une baisse de `A/A_scale` et une saturation PW; la non-convergence seule ne suffit jamais |
 | ACADOS 0.5.5, IRK, rollout/projection et Phase-I | Explorer une résolution sous la seconde avec des OCP précompilés et des paramètres runtime | Sur le reduced hybride 300 RHO : médiane/P90 solveur `0.131/0.170 s`, murale `0.144/0.183 s`; aucun défaut mécanique | La préparation initiale reste coûteuse et les audits lourds doivent sortir du chemin online |
+| `t_renderer` ACADOS épinglé et mis en cache | `acados_template` tentait encore un téléchargement GitHub au premier solve, ce qui a fait échouer le run `31618753133` avant le premier RHO | Version `0.2.0` installée avec SHA-256 vérifié dans la pile numérique mise en cache; aucun accès réseau n'est requis pendant le solve | Correctif d'infrastructure; il améliore la reproductibilité, pas le temps chaud |
 | Reprise hybride ACADOS full/reduced → IPOPT/Radau-5 | Restaurer le **même** RHO lorsque le SQP ACADOS reste non certifié, avec un OCP IPOPT strictement isomorphe à la formulation cible | Reduced : gate `5/5`; full : gate `5/5`, IPOPT `status=0`, `inf_pr=2.09e-9`, recovery `87.98 s`, ACADOS chaud médian `0.466 s` et P90 `0.681 s` | Câblage full certifié au run `31414366905`; le recovery reste exceptionnel et doit maintenant être testé naturellement au RHO 141 |
 | Campagne naturelle ACADOS reduced + recovery IPOPT/Radau-5 | Mesurer le chemin de production sans provoquer artificiellement un échec au premier RHO | `150/150` sans recovery au run `31419405169`; `300/300` avec 5 recoveries aux RHO 5, 120, 183 et 286 au run `31420496210`; médiane murale ACADOS `0.174 s` à 300 RHO | Le solve est robuste mais pas encore sous `1 s/RHO` recovery inclus : les 5 IPOPT coûtent `392.2 s`; variabilité du préfixe 1–150 à expliquer |
 | Seed Intel épinglé + fallback IPOPT certifié pour ACADOS reduced | Éviter qu'un échec de recertification ACADOS rejette un RHO déjà convergé et faisable sous IPOPT | Run `31428024125` : `300/300`, un seul RHO certifié IPOPT (234), puis ACADOS jusqu'au bout; `46.15 s` cumulées pour les RHO validés (`0.154 s/RHO`) | Meilleur candidat online actuel; résultat hybride, pas ACADOS pur. Sauts de PW jusqu'à `468.6 µs` à régulariser et seed à pérenniser |
@@ -681,6 +699,16 @@ localise l'intervalle, le cycle, le nœud local et l'état qui portent l'écart
 maximal. R3 et R5 peuvent ainsi être comparés sur le même diagnostic DOP853;
 un écart ne sera plus attribué au degré si les deux cas n'ont pas passé la même
 vérification de rollout.
+
+Pour éviter qu'un audit post-solve masque le résultat de 2 000 RHO ou dépasse
+la limite CI, le rollout DOP853 **continu** est maintenant borné aux 30 premiers
+cycles par `--high-accuracy-trace-max-cycles`. Des rollouts locaux, chacun
+réinitialisé depuis l'état certifié du RHO, sont exécutés indépendamment aux
+cycles `430`, `660`, `779` et au dernier cycle couvert. Le JSON compact conserve
+pour ces points les contrôles, les frontières de tous les états mécaniques et
+Ding, ainsi que les diagnostics haute précision. La borne de 30 cycles limite
+le coût; les milestones conservent la capacité de détecter une dégradation
+tardive sans attribuer au solveur un drift accumulé par l'auditeur lui-même.
 
 L'audit du run `30754413003` a aussi séparé une réussite aux nœuds d'une
 violation cachée entre nœuds : la vitesse moyenne d'intervalle dépasse la

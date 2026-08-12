@@ -2281,6 +2281,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="Experimentally generate and compile the CasADi NLP used by MadNLP.",
     )
     parser.add_argument(
+        "--madnlp-max-wall-time",
+        type=float,
+        default=None,
+        help="Optional native MadNLP wall-time limit in seconds for each RHO solve.",
+    )
+    parser.add_argument(
         "--acados-ipopt-recovery",
         action="store_true",
         help=(
@@ -2353,6 +2359,16 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "Radau recovery to certify that frozen RHO, shift from its "
             "shooting-node trajectory, and return the next RHO to ACADOS. "
             "Each fallback is reported separately from pure ACADOS solves."
+        ),
+    )
+    parser.add_argument(
+        "--nlp-ipopt-fallback-advance",
+        action="store_true",
+        help=(
+            "Hybrid reduced-RHO mode for MadNLP/Fatrop: after the final "
+            "authorized backend failure, let a converged and independently "
+            "feasible IPOPT/Radau recovery certify and advance the identical "
+            "frozen RHO. The native failure remains in attempt accounting."
         ),
     )
     parser.add_argument(
@@ -2483,6 +2499,27 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help=(
             "Compare selected shooting intervals with a high-accuracy DOP853 integration "
             "before solving."
+        ),
+    )
+    parser.add_argument(
+        "--high-accuracy-trace-max-cycles",
+        type=int,
+        default=30,
+        help=(
+            "Maximum number of consecutive certified RHO cycles reintegrated "
+            "by the independent DOP853 trace audit. This bound prevents a "
+            "post-solve diagnostic from hiding a completed endurance run."
+        ),
+    )
+    parser.add_argument(
+        "--high-accuracy-trace-cycle-milestones",
+        type=parse_positive_window_indices,
+        default=(),
+        help=(
+            "Comma-separated one-based certified cycle indices audited locally "
+            "with DOP853. Each milestone starts from its optimized shooting "
+            "state, so local transcription error is not confused with "
+            "thousands of cycles of accumulated open-loop drift."
         ),
     )
     parser.add_argument(
@@ -4736,6 +4773,7 @@ def configure_cycle_nlp_solver(args: argparse.Namespace):
             tolerance=args.nlp_tolerance,
             madnlp_c_compile=args.madnlp_c_compile,
             madnlp_linear_solver=args.madnlp_linear_solver,
+            madnlp_max_wall_time=args.madnlp_max_wall_time,
         )
     if args.solver == "fatrop":
         return configure_nlp_solver(
@@ -9255,6 +9293,10 @@ def high_accuracy_trace_rollout_diagnostics(
 
         def augmented_rhs(time, values):
             state = values[:n_states]
+            if not np.all(np.isfinite(state)):
+                raise FloatingPointError(
+                    f"Non-finite DOP853 state at interval {interval}."
+                )
             state_rhs = _full_dynamics_rhs(
                 nlp,
                 time,
@@ -9263,6 +9305,10 @@ def high_accuracy_trace_rollout_diagnostics(
                 control,
                 numerical_timeseries,
             )
+            if not np.all(np.isfinite(state_rhs)):
+                raise FloatingPointError(
+                    f"Non-finite dynamics RHS at interval {interval}."
+                )
             normalized_fatigue = np.asarray(
                 [1.0 - state[index] / scale for _, index, scale in capacity_rows]
             )
@@ -9361,6 +9407,105 @@ def high_accuracy_trace_rollout_diagnostics(
         "fatigue_auc_cycles": float(np.sum(auc_values)),
         "muscle_fatigue": muscle_fatigue,
     }
+
+
+def slice_rho_trace_cycle(
+    state_traces: dict[str, np.ndarray],
+    control_traces: dict[str, np.ndarray],
+    *,
+    cycle_index: int,
+    intervals_per_cycle: int,
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
+    """Return one certified RHO while preserving its collocation-node stride."""
+
+    if cycle_index < 0:
+        raise ValueError("cycle_index must be non-negative.")
+    control_columns = {
+        np.atleast_2d(np.asarray(values)).shape[1]
+        for values in control_traces.values()
+    }
+    if len(control_columns) != 1:
+        raise ValueError("Control traces must share one interval count.")
+    total_intervals = int(next(iter(control_columns)))
+    first_interval = cycle_index * intervals_per_cycle
+    final_interval = first_interval + intervals_per_cycle
+    if final_interval > total_intervals:
+        raise ValueError(
+            f"Cycle {cycle_index + 1} exceeds the {total_intervals // intervals_per_cycle} "
+            "complete cycles available in the control trace."
+        )
+
+    controls = {
+        key: np.atleast_2d(np.asarray(values))[:, first_interval:final_interval]
+        for key, values in control_traces.items()
+    }
+    states = {}
+    for key, values in state_traces.items():
+        trace = np.atleast_2d(np.asarray(values))
+        state_intervals = trace.shape[1] - 1
+        stride, remainder = divmod(state_intervals, total_intervals)
+        if remainder != 0 or stride < 1:
+            raise ValueError(
+                f"State trace '{key}' is incompatible with the control interval count."
+            )
+        first_column = first_interval * stride
+        final_column = final_interval * stride + 1
+        states[key] = trace[:, first_column:final_column]
+    return states, controls
+
+
+def high_accuracy_cycle_milestone_diagnostics(
+    nmpc,
+    state_traces: dict[str, np.ndarray],
+    control_traces: dict[str, np.ndarray],
+    *,
+    covered_cycles: int,
+    requested_milestones: tuple[int, ...],
+    capacity_scales: dict[str, float],
+) -> list[dict]:
+    """Audit selected RHO cycles independently and retain diagnostic failures."""
+
+    milestones = sorted(
+        {
+            int(cycle)
+            for cycle in (*requested_milestones, covered_cycles)
+            if 1 <= int(cycle) <= covered_cycles
+        }
+    )
+    rows = []
+    for cycle in milestones:
+        started = perf_counter()
+        try:
+            states, controls = slice_rho_trace_cycle(
+                state_traces,
+                control_traces,
+                cycle_index=cycle - 1,
+                intervals_per_cycle=int(nmpc.cycle_len),
+            )
+            diagnostic = high_accuracy_trace_rollout_diagnostics(
+                nmpc,
+                states,
+                controls,
+                cycle_count=1,
+                capacity_scales=capacity_scales,
+            )
+            diagnostic.update(
+                {
+                    "absolute_cycle": cycle,
+                    "local_reset_at_cycle_start": True,
+                    "wall_time_s": perf_counter() - started,
+                }
+            )
+        except Exception as exc:
+            diagnostic = {
+                "available": False,
+                "absolute_cycle": cycle,
+                "local_reset_at_cycle_start": True,
+                "error": f"{type(exc).__name__}: {exc}",
+                "wall_time_s": perf_counter() - started,
+            }
+        rows.append(diagnostic)
+    return rows
 
 
 def solution_trace_comparisons(
@@ -15110,6 +15255,8 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
 
     if args.n_windows < 1:
         raise ValueError("--n-windows must be >= 1")
+    if args.high_accuracy_trace_max_cycles < 0:
+        raise ValueError("--high-accuracy-trace-max-cycles must be non-negative.")
     if args.full_dynamics_phase_one and args.disable_full_dynamics_phase_one:
         raise ValueError(
             "--full-dynamics-phase-one and --disable-full-dynamics-phase-one "
@@ -15201,6 +15348,15 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         if args.nlp_ipopt_recovery_collocation_degree < 1:
             raise ValueError(
                 "--nlp-ipopt-recovery-collocation-degree must be >= 1."
+            )
+    if getattr(args, "nlp_ipopt_fallback_advance", False):
+        if not getattr(args, "nlp_ipopt_recovery", False):
+            raise ValueError(
+                "--nlp-ipopt-fallback-advance requires --nlp-ipopt-recovery."
+            )
+        if args.solver not in {"madnlp", "fatrop"}:
+            raise ValueError(
+                "--nlp-ipopt-fallback-advance requires MadNLP or Fatrop."
             )
     if getattr(args, "nlp_failed_rho_phase_one_recovery", False):
         if args.solver not in {"ipopt", "madnlp", "fatrop"}:
@@ -17950,7 +18106,10 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                     self._cocofest_recovery_seed_pending = True
                 ipopt_recovery_summaries.append(recovery_summary)
                 fallback_eligible = bool(
-                    args.acados_ipopt_fallback_advance
+                    (
+                        args.acados_ipopt_fallback_advance
+                        or getattr(args, "nlp_ipopt_fallback_advance", False)
+                    )
                     and recovery_stage["may_advance_as_fallback"]
                     and recovery_solution is not None
                     and recovery_summary.get("quality") == "converged"
@@ -17981,11 +18140,11 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                         f"injected={recovery_summary['seed_injected']}"
                     )
             if fallback_adapter is not None:
-                # This is an explicitly hybrid RHO, not an ACADOS success.
-                # Shift only from the independently certified Radau primal on
-                # the ACADOS shooting grid, then let ACADOS solve the next
-                # physical RHO.  The failed ACADOS attempt remains in raw
-                # accounting and points to this replacement trajectory.
+                # This is an explicitly hybrid RHO, not a target-backend
+                # success. Shift only from the independently certified Radau
+                # primal on the common shooting grid, then return the next
+                # physical RHO to the fast backend. The native failure remains
+                # in raw accounting and points to this replacement trajectory.
                 self._cocofest_retry_same_rho_pending = False
                 self._cocofest_recovery_seed_pending = False
                 original_before_window_advance = self.before_window_advance
@@ -19560,6 +19719,13 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                     bool(item.get("seed_injected"))
                     for item in ipopt_recovery_summaries
                 ),
+                "fallback_advance_enabled": bool(
+                    args.nlp_ipopt_fallback_advance
+                ),
+                "fallback_advanced_count": sum(
+                    bool(item.get("fallback_advanced"))
+                    for item in ipopt_recovery_summaries
+                ),
             }
         if control_homotopy_summaries:
             summary["control_homotopy_summaries"] = control_homotopy_summaries
@@ -19599,6 +19765,7 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                 ),
                 fallback_advances_physical_rho=bool(
                     args.acados_ipopt_fallback_advance
+                    or getattr(args, "nlp_ipopt_fallback_advance", False)
                 ),
                 requested_physical_rhos=requested_window_solves,
             ),
@@ -19677,6 +19844,13 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                 "attempt_count": len(ipopt_recovery_summaries),
                 "injected_count": sum(
                     bool(item.get("seed_injected"))
+                    for item in ipopt_recovery_summaries
+                ),
+                "fallback_advance_enabled": bool(
+                    args.nlp_ipopt_fallback_advance
+                ),
+                "fallback_advanced_count": sum(
+                    bool(item.get("fallback_advanced"))
                     for item in ipopt_recovery_summaries
                 ),
             }
@@ -19806,6 +19980,11 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             "injected_count": sum(
                 bool(item.get("seed_injected")) for item in ipopt_recovery_summaries
             ),
+            "fallback_advance_enabled": bool(args.nlp_ipopt_fallback_advance),
+            "fallback_advanced_count": sum(
+                bool(item.get("fallback_advanced"))
+                for item in ipopt_recovery_summaries
+            ),
         }
     if nlp_dual_warm_start_summaries:
         summary["nlp_dual_warm_start_summaries"] = nlp_dual_warm_start_summaries
@@ -19931,22 +20110,56 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
     if args.validate_integrator_maps:
         high_accuracy_trace_rollout_start = perf_counter()
         covered_cycles = int(summary.get("covered_cycles") or 0)
-        if covered_cycles > 0:
-            summary["high_accuracy_trace_rollout"] = (
-                high_accuracy_trace_rollout_diagnostics(
-                    nmpc,
-                    summary.get("state_traces") or {},
-                    summary.get("control_traces") or {},
-                    cycle_count=covered_cycles,
-                    capacity_scales=fatigue_capacity_scales,
+        audited_cycles = min(covered_cycles, args.high_accuracy_trace_max_cycles)
+        if audited_cycles > 0:
+            try:
+                summary["high_accuracy_trace_rollout"] = (
+                    high_accuracy_trace_rollout_diagnostics(
+                        nmpc,
+                        summary.get("state_traces") or {},
+                        summary.get("control_traces") or {},
+                        cycle_count=audited_cycles,
+                        capacity_scales=fatigue_capacity_scales,
+                    )
                 )
-            )
+                summary["high_accuracy_trace_rollout"]["bounded"] = bool(
+                    audited_cycles < covered_cycles
+                )
+                summary["high_accuracy_trace_rollout"]["covered_cycles"] = (
+                    covered_cycles
+                )
+            except Exception as exc:
+                summary["high_accuracy_trace_rollout"] = {
+                    "available": False,
+                    "reason": "diagnostic_exception",
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "cycle_count": audited_cycles,
+                    "covered_cycles": covered_cycles,
+                    "bounded": bool(audited_cycles < covered_cycles),
+                }
         else:
             summary["high_accuracy_trace_rollout"] = {
                 "available": False,
-                "reason": "no_strictly_validated_cycle",
+                "reason": (
+                    "disabled_by_zero_cycle_cap"
+                    if covered_cycles > 0
+                    else "no_strictly_validated_cycle"
+                ),
                 "cycle_count": 0,
+                "covered_cycles": covered_cycles,
             }
+        summary["high_accuracy_cycle_milestones"] = (
+            high_accuracy_cycle_milestone_diagnostics(
+                nmpc,
+                summary.get("state_traces") or {},
+                summary.get("control_traces") or {},
+                covered_cycles=covered_cycles,
+                requested_milestones=args.high_accuracy_trace_cycle_milestones,
+                capacity_scales=fatigue_capacity_scales,
+            )
+            if covered_cycles > 0
+            else []
+        )
         high_accuracy_trace_rollout_wall_time_s = (
             perf_counter() - high_accuracy_trace_rollout_start
         )

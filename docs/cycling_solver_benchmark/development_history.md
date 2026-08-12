@@ -5148,12 +5148,12 @@ physique `omega in [-2*pi-3, -2*pi+3] rad/s`. À chacun des 30 shooting nodes,
 une contrainte supplémentaire porte sur le prédicteur mécanique de milieu
 d'intervalle
 
-$$
+```math
 \widehat{\omega}_{k+1/2}
 = \omega_k + \frac{\Delta t}{2}
 f_\omega\!\left(\theta_k,\omega_k,F_k,\tau_{\mathrm{ext}}\right),
 \qquad \Delta t=\frac{1}{30}\ \mathrm{s}.
-$$
+```
 
 La fonction $f_\omega$ est exactement l'accélération de la dynamique mécanique
 réduite, force passive et quatre forces Ding comprises. Aucun PW ni état n'est
@@ -5227,3 +5227,49 @@ fatigue ACADOS plus faible est donc un résultat prometteur, mais pas encore la
 preuve d'un meilleur optimum du même NLP : il faut rejouer ses PW sous
 Radau-5 et raffiner le primal complet avec IPOPT avant d'attribuer l'écart au
 solveur plutôt qu'à la transcription IRK ou au bassin local.
+
+## 35. Pipeline MadNLP borné et audits d'endurance déterministes (12 août 2026)
+
+La campagne résistive R5 `31589698184` n'a pas produit d'artefact final : le
+job MadNLP a atteint environ le RHO 779, puis le processus Julia/MUMPS est resté
+actif sans nouvelle sortie. Le budget `max_iter=2000` ne borne donc pas à lui
+seul le temps d'un appel. Sur les fenêtres terminées de cette transcription
+exacte, le 90e percentile du compteur `nlp_hess_l` vaut `73`. Cette valeur est
+retenue comme budget initial du fast path, avec la limite murale MadNLP native
+`max_wall_time=20 s`.
+
+La nouvelle stratégie conserve deux chances MadNLP sur le même RHO :
+
+1. MadNLP s'arrête au plus tard à 73 itérations ou 20 secondes;
+2. après le premier échec, IPOPT sur le même degré Radau produit un seed si sa
+   primale est admissible, puis MadNLP recertifie le même RHO;
+3. après le second échec MadNLP, IPOPT résout encore ce RHO avec le budget de
+   certification;
+4. seule une solution IPOPT convergée et faisable peut avancer la chaîne;
+5. le RHO est marqué hybride et les deux échecs MadNLP restent visibles dans
+   `solver_attempt_accounting`.
+
+Cette règle copie le principe éprouvé ACADOS vers IPOPT sans prétendre qu'un
+fallback est une convergence MadNLP. Le percentile doit être recalibré après la
+campagne : un plafond rapide qui envoie trop de RHO vers IPOPT peut être plus
+lent qu'un budget MadNLP légèrement supérieur. Les métriques décisionnelles
+sont le temps pipeline, le taux de succès natif au premier essai, le taux de
+succès après seed et le taux de fallback, pas seulement la médiane MadNLP.
+
+Deux autres causes de CI non déterministe ont été corrigées. D'abord,
+`acados_template` téléchargeait `t_renderer` au premier solve; une coupure GitHub
+a fait échouer le run `31618753133` avant le premier RHO. La préparation de la
+pile installe désormais `t_renderer 0.2.0`, vérifie son SHA-256 selon
+l'architecture et le conserve dans le cache ACADOS. Ensuite, le run IPOPT R5 a
+bien certifié `2000/2000` RHO, puis a dépassé trois heures dans le rollout
+DOP853 continu. Cet audit est maintenant limité aux 30 premiers cycles. Des
+audits locaux remis à l'état certifié sont conservés aux cycles 430, 660, 779
+et au dernier cycle couvert.
+
+Les résumés JSON ajoutent aux mêmes jalons les PW intra-cycle et les valeurs
+initiales/finales de chaque état mécanique et de chacun des 20 états de Ding.
+Ces données sont assez petites pour rester dans l'artefact compact et
+permettent une comparaison IPOPT--MadNLP--ACADOS sans confondre drift de
+l'intégrateur d'audit, changement de bassin des contrôles et fatigue physique.
+L'arrêt demeure `fatigue_limited_candidate`, jamais une preuve mathématique :
+une non-convergence seule, même répétée deux fois, reste insuffisante.

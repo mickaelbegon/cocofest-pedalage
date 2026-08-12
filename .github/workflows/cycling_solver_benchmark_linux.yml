@@ -160,6 +160,7 @@ env:
   BIOPTIM_ALPAQA_COMMIT: d84e7e43534360fc048e0be26a3bd69a2abc2d77
   ACADOS_COMMIT: 59d93e17d2985fdd73fc58b8a83ed8f83a024171
   ACADOS_INSTALL_SCRIPT_BLOB: 5ac8064ab613251e62560b5de8cbbb9550f5c5d0
+  TERA_RENDERER_VERSION: "0.2.0"
   LIBMAD_REPOSITORY: mickaelbegon/libMad
   # This public libMad revision also contains PARDISO support, but the
   # benchmark certifies and selects only its built-in MumpsSolver.
@@ -467,7 +468,7 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: ${{ env.CONDA }}/envs/${{ env.CONDA_ENV_NAME }}
-          key: numerical-stack-${{ env.NUMERICAL_STACK_CACHE_VERSION }}-${{ inputs.runner_label }}-${{ runner.arch }}-acados-${{ env.ACADOS_COMMIT }}-${{ env.ACADOS_INSTALL_SCRIPT_BLOB }}-casadi-${{ env.CASADI_VERSION }}-${{ hashFiles('.github/cycling-benchmark-linux-environment.yml', '.github/scripts/install_biorbd_casadi_linux.sh') }}
+          key: numerical-stack-${{ env.NUMERICAL_STACK_CACHE_VERSION }}-${{ inputs.runner_label }}-${{ runner.arch }}-acados-${{ env.ACADOS_COMMIT }}-${{ env.ACADOS_INSTALL_SCRIPT_BLOB }}-tera-${{ env.TERA_RENDERER_VERSION }}-casadi-${{ env.CASADI_VERSION }}-${{ hashFiles('.github/cycling-benchmark-linux-environment.yml', '.github/scripts/install_biorbd_casadi_linux.sh', '.github/scripts/install_acados_tera_renderer.sh') }}
           fail-on-cache-miss: true
 
       - name: Detect the CPU allocation
@@ -476,6 +477,7 @@ jobs:
           test "$available_cores" -ge 1
           echo "BENCHMARK_THREADS=$available_cores" >> "$GITHUB_ENV"
           echo "CMAKE_BUILD_PARALLEL_LEVEL=$available_cores" >> "$GITHUB_ENV"
+          echo "TERA_PATH=$CONDA_PREFIX/bin/t_renderer" >> "$GITHUB_ENV"
           lscpu
 
       - name: Install the pinned Bioptim integration
@@ -489,15 +491,18 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: |
           test -f "$CONDA_PREFIX/lib/libacados.so"
+          test -x "$CONDA_PREFIX/bin/t_renderer"
           python - <<'PY'
           import os
           from pathlib import Path
 
           import acados_template
           import casadi as cas
+          from acados_template import get_tera
 
           assert cas.has_nlpsol("ipopt")
           assert (Path(os.environ["CONDA_PREFIX"]) / "lib" / "link_libs.json").is_file()
+          assert Path(get_tera()).resolve() == Path(os.environ["TERA_PATH"]).resolve()
           print(f"CasADi {cas.__version__}; acados_template={acados_template.__file__}")
           PY
           python -m pytest -q \
@@ -1034,7 +1039,7 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: ${{ env.CONDA }}/envs/${{ env.CONDA_ENV_NAME }}
-          key: numerical-stack-${{ env.NUMERICAL_STACK_CACHE_VERSION }}-${{ inputs.runner_label }}-${{ runner.arch }}-acados-${{ env.ACADOS_COMMIT }}-${{ env.ACADOS_INSTALL_SCRIPT_BLOB }}-casadi-${{ env.CASADI_VERSION }}-${{ hashFiles('.github/cycling-benchmark-linux-environment.yml', '.github/scripts/install_biorbd_casadi_linux.sh') }}
+          key: numerical-stack-${{ env.NUMERICAL_STACK_CACHE_VERSION }}-${{ inputs.runner_label }}-${{ runner.arch }}-acados-${{ env.ACADOS_COMMIT }}-${{ env.ACADOS_INSTALL_SCRIPT_BLOB }}-tera-${{ env.TERA_RENDERER_VERSION }}-casadi-${{ env.CASADI_VERSION }}-${{ hashFiles('.github/cycling-benchmark-linux-environment.yml', '.github/scripts/install_biorbd_casadi_linux.sh', '.github/scripts/install_acados_tera_renderer.sh') }}
 
       - name: Restore the official numerical stack
         if: steps.acados-stack-cache.outputs.cache-hit != 'true'
@@ -1100,16 +1105,27 @@ jobs:
             "$BENCHMARK_THREADS" \
             "$CONDA_PREFIX"
 
+      - name: Install the pinned ACADOS template renderer
+        if: steps.acados-stack-cache.outputs.cache-hit != 'true'
+        run: bash .github/scripts/install_acados_tera_renderer.sh "$CONDA_PREFIX"
+
       - name: Validate the ACADOS numerical stack
         run: |
           test -f "$CONDA_PREFIX/lib/libacados.so"
           test -f "$CONDA_PREFIX/lib/libhpipm.so"
+          test -x "$CONDA_PREFIX/bin/t_renderer"
           python - <<'PY'
+          import os
+          from pathlib import Path
+
           import acados_template
           import biorbd_casadi
           import casadi as cas
+          from acados_template import get_tera
 
           assert cas.has_nlpsol("ipopt")
+          os.environ["TERA_PATH"] = str(Path(os.environ["CONDA_PREFIX"]) / "bin" / "t_renderer")
+          assert Path(get_tera()).resolve() == Path(os.environ["TERA_PATH"]).resolve()
           print(f"CasADi {cas.__version__}; biorbd {biorbd_casadi.__version__}")
           print(f"acados_template: {acados_template.__file__}")
           PY
@@ -1119,7 +1135,7 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: ${{ env.CONDA }}/envs/${{ env.CONDA_ENV_NAME }}
-          key: numerical-stack-${{ env.NUMERICAL_STACK_CACHE_VERSION }}-${{ inputs.runner_label }}-${{ runner.arch }}-acados-${{ env.ACADOS_COMMIT }}-${{ env.ACADOS_INSTALL_SCRIPT_BLOB }}-casadi-${{ env.CASADI_VERSION }}-${{ hashFiles('.github/cycling-benchmark-linux-environment.yml', '.github/scripts/install_biorbd_casadi_linux.sh') }}
+          key: numerical-stack-${{ env.NUMERICAL_STACK_CACHE_VERSION }}-${{ inputs.runner_label }}-${{ runner.arch }}-acados-${{ env.ACADOS_COMMIT }}-${{ env.ACADOS_INSTALL_SCRIPT_BLOB }}-tera-${{ env.TERA_RENDERER_VERSION }}-casadi-${{ env.CASADI_VERSION }}-${{ hashFiles('.github/cycling-benchmark-linux-environment.yml', '.github/scripts/install_biorbd_casadi_linux.sh', '.github/scripts/install_acados_tera_renderer.sh') }}
 
   acados-smoke:
     name: ACADOS — sequential full/reduced and option screen
@@ -1154,7 +1170,7 @@ jobs:
         uses: actions/cache/restore@v6
         with:
           path: ${{ env.CONDA }}/envs/${{ env.CONDA_ENV_NAME }}
-          key: numerical-stack-${{ env.NUMERICAL_STACK_CACHE_VERSION }}-${{ inputs.runner_label }}-${{ runner.arch }}-acados-${{ env.ACADOS_COMMIT }}-${{ env.ACADOS_INSTALL_SCRIPT_BLOB }}-casadi-${{ env.CASADI_VERSION }}-${{ hashFiles('.github/cycling-benchmark-linux-environment.yml', '.github/scripts/install_biorbd_casadi_linux.sh') }}
+          key: numerical-stack-${{ env.NUMERICAL_STACK_CACHE_VERSION }}-${{ inputs.runner_label }}-${{ runner.arch }}-acados-${{ env.ACADOS_COMMIT }}-${{ env.ACADOS_INSTALL_SCRIPT_BLOB }}-tera-${{ env.TERA_RENDERER_VERSION }}-casadi-${{ env.CASADI_VERSION }}-${{ hashFiles('.github/cycling-benchmark-linux-environment.yml', '.github/scripts/install_biorbd_casadi_linux.sh', '.github/scripts/install_acados_tera_renderer.sh') }}
           fail-on-cache-miss: true
 
       - name: Detect the CPU allocation
@@ -1167,6 +1183,7 @@ jobs:
           echo "BENCHMARK_THREADS=$available_cores" >> "$GITHUB_ENV"
           echo "OMP_NUM_THREADS=$available_cores" >> "$GITHUB_ENV"
           echo "OMP_THREAD_LIMIT=$available_cores" >> "$GITHUB_ENV"
+          echo "TERA_PATH=$CONDA_PREFIX/bin/t_renderer" >> "$GITHUB_ENV"
           lscpu
           grep '^Cpus_allowed_list' /proc/self/status || true
 
@@ -1184,13 +1201,19 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
         run: |
           test -f "$CONDA_PREFIX/lib/libacados.so"
+          test -x "$CONDA_PREFIX/bin/t_renderer"
           python - <<'PY'
+          import os
+          from pathlib import Path
+
           import acados_template
           import bioptim
           import biorbd_casadi
           import casadi as cas
+          from acados_template import get_tera
 
           assert cas.has_nlpsol("ipopt")
+          assert Path(get_tera()).resolve() == Path(os.environ["TERA_PATH"]).resolve()
           print(f"CasADi {cas.__version__}")
           print(f"Bioptim {bioptim.__version__}")
           print(f"biorbd {biorbd_casadi.__version__}")

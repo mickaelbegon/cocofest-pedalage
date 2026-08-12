@@ -61,6 +61,7 @@ def test_configure_madnlp_uses_supported_primal_hot_start():
         max_iterations=321,
         tolerance=2e-6,
         madnlp_linear_solver="umfpack",
+        madnlp_max_wall_time=20.0,
         solver_namespace=namespace,
         check_availability=False,
     )
@@ -81,6 +82,7 @@ def test_configure_madnlp_uses_supported_primal_hot_start():
     )
     assert not any(call[0] == "set_warm_start_options" for call in solver.calls)
     assert ("set_option_unsafe", "umfpack", "linear_solver") in solver.calls
+    assert ("set_option_unsafe", 20.0, "max_wall_time") in solver.calls
     assert ("set_c_compile", False) in solver.calls
 
 
@@ -240,6 +242,10 @@ def test_configure_ipopt_retains_robust_cocofest_settings():
         (
             {"max_iterations": 1, "madnlp_linear_solver": "MumpsSolver"},
             "madnlp_linear_solver",
+        ),
+        (
+            {"max_iterations": 1, "madnlp_max_wall_time": 0},
+            "madnlp_max_wall_time",
         ),
         (
             {"max_iterations": 1, "fatrop_structure_detection": "none"},

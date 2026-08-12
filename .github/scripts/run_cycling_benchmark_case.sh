@@ -31,6 +31,10 @@ nlp_transfer_preparation="${NLP_TRANSFER_PREPARATION:-none}"
 nlp_phase_one_screen_threshold="${NLP_PHASE_ONE_SCREEN_THRESHOLD:-0.001}"
 nlp_phase_one_mode="${NLP_PHASE_ONE_MODE:-mechanical}"
 nlp_failed_rho_phase_one_recovery="${NLP_FAILED_RHO_PHASE_ONE_RECOVERY:-false}"
+madnlp_fast_max_iterations="${MADNLP_FAST_MAX_ITERATIONS:-73}"
+madnlp_fast_max_wall_time="${MADNLP_FAST_MAX_WALL_TIME:-20}"
+high_accuracy_trace_max_cycles="${HIGH_ACCURACY_TRACE_MAX_CYCLES:-30}"
+high_accuracy_trace_cycle_milestones="${HIGH_ACCURACY_TRACE_CYCLE_MILESTONES:-430,660,779}"
 
 if ! [[ "$collocation_degree" =~ ^[2-9]$ ]]; then
   echo "COLLOCATION_DEGREE must be an integer between 2 and 9, got '$collocation_degree'." >&2
@@ -67,11 +71,19 @@ if [[ "$ipopt_profile" =~ ^scientific[-_]radau[3456]$ ]]; then
   # and full/reduced before any re-optimization.
   trajectory_options+=(
     --validate-integrator-maps
+    --high-accuracy-trace-max-cycles
+    "$high_accuracy_trace_max_cycles"
+    --high-accuracy-trace-cycle-milestones
+    "$high_accuracy_trace_cycle_milestones"
     --receding-horizon-solution-output
     "$case_dir/validated-rho-trajectory.npz"
     --allow-partial-receding-horizon-solution-output
     --rho-replay-checkpoint-output
     "$case_dir/last-certified-rho-replay.npz"
+    --rho-prepared-checkpoint-output-template
+    "$case_dir/checkpoint-after-{completed_windows}-for-{target_rho}.npz"
+    --rho-prepared-checkpoint-windows
+    "$high_accuracy_trace_cycle_milestones"
   )
 fi
 
@@ -145,7 +157,8 @@ elif [[ "$solver" == "madnlp" ]]; then
     initialization_options=(--optional-nlp-periodic-ipopt-hot-start)
   fi
   solver_options+=(
-    --madnlp-max-iter "$BENCHMARK_MAX_ITER"
+    --madnlp-max-iter "$madnlp_fast_max_iterations"
+    --madnlp-max-wall-time "$madnlp_fast_max_wall_time"
     --madnlp-linear-solver "$backend"
     --madnlp-dual-warm-start-mode "$dual_warm_start"
   )
@@ -153,11 +166,14 @@ elif [[ "$solver" == "madnlp" ]]; then
     solver_options+=(--madnlp-c-compile)
   fi
   if [[ "$case_slug" == *"fatigue-endurance"* && "$nlp_failed_rho_phase_one_recovery" != "true" ]]; then
-    # A plain same-RHO retry repeats the exact failed MadNLP primal. Restore
-    # only failed endurance windows with IPOPT on the frozen Radau grid, then
-    # require MadNLP itself to certify the restored seed before advancing.
+    # Run 31589698184 measured a 73-iteration P90 over the completed Linux
+    # Radau-5 windows. Spend that calibrated fast budget in MadNLP, then let a
+    # separately converged/feasible IPOPT Radau solve certify only the rare
+    # frozen RHO that MadNLP cannot finish. Both native failures remain in the
+    # attempt accounting used by the fatigue-stop classifier.
     solver_options+=(
       --nlp-ipopt-recovery
+      --nlp-ipopt-fallback-advance
       --nlp-ipopt-recovery-max-iterations "$BENCHMARK_MAX_ITER"
       --nlp-ipopt-recovery-collocation-degree "$collocation_degree"
     )

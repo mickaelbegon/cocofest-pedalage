@@ -819,6 +819,39 @@ def test_high_accuracy_trace_rollout_truncates_collocation_failed_window():
     assert diagnostic["maximum_endpoint_error_interval"]["state_key"] == "A_Test"
 
 
+def test_high_accuracy_milestones_reset_each_selected_cycle():
+    class Variables(dict):
+        def __init__(self, values, shape):
+            super().__init__(values)
+            self.shape = shape
+
+    state_variables = Variables({"A_Test": SimpleNamespace(index=[0])}, shape=1)
+    control_variables = Variables({"u": SimpleNamespace(index=[0])}, shape=1)
+    nlp = SimpleNamespace(
+        states=state_variables,
+        controls=control_variables,
+        numerical_data_timeseries=None,
+        dynamics_func=lambda _time, _state, _control, _parameters, _algebraic, _data: np.array(
+            [-1.0]
+        ),
+    )
+    nmpc = SimpleNamespace(nlp=[nlp], cycle_duration=1.0, cycle_len=2)
+
+    rows = periodic_example.high_accuracy_cycle_milestone_diagnostics(
+        nmpc,
+        {"A_Test": np.linspace(10.0, 7.0, 7)[None, :]},
+        {"u": np.zeros((1, 6))},
+        covered_cycles=3,
+        requested_milestones=(2,),
+        capacity_scales={"A_Test": 10.0},
+    )
+
+    assert [row["absolute_cycle"] for row in rows] == [2, 3]
+    assert all(row["available"] for row in rows)
+    assert all(row["local_reset_at_cycle_start"] for row in rows)
+    assert max(row["maximum_absolute_endpoint_error"] for row in rows) < 1e-11
+
+
 def test_solver_comparison_cli_exposes_high_accuracy_trace_audit():
     parser = comparison_example.build_cli()
 
@@ -1108,12 +1141,17 @@ def test_nlp_ipopt_recovery_cli_is_opt_in():
             "1200",
             "--nlp-ipopt-recovery-collocation-degree",
             "5",
+            "--nlp-ipopt-fallback-advance",
+            "--madnlp-max-wall-time",
+            "20",
         ]
     )
 
     assert args.nlp_ipopt_recovery is True
     assert args.nlp_ipopt_recovery_max_iterations == 1200
     assert args.nlp_ipopt_recovery_collocation_degree == 5
+    assert args.nlp_ipopt_fallback_advance is True
+    assert args.madnlp_max_wall_time == 20.0
 
     runner = (
         Path(__file__).resolve().parents[2]
@@ -1122,6 +1160,9 @@ def test_nlp_ipopt_recovery_cli_is_opt_in():
     assert '[[ "$case_slug" == *"fatigue-endurance"*' in runner
     assert '"$nlp_failed_rho_phase_one_recovery" != "true"' in runner
     assert "--nlp-ipopt-recovery" in runner
+    assert 'MADNLP_FAST_MAX_ITERATIONS:-73' in runner
+    assert 'MADNLP_FAST_MAX_WALL_TIME:-20' in runner
+    assert "--nlp-ipopt-fallback-advance" in runner
 
 
 def test_failed_rho_phase_one_recovery_cli_is_opt_in():
@@ -4383,6 +4424,23 @@ def test_benchmark_compares_only_the_successful_prefix():
     assert limited["control_traces"]["last_pulse_width_Biceps"].shape == (1, 4)
 
 
+def test_state_boundary_snapshots_match_selected_physical_rho():
+    result = _benchmark_result([0, 0, 4])
+
+    snapshots = comparison_example.state_boundary_snapshots(result, cycles=(1, 2, 3))
+
+    assert snapshots["cycle_1"]["available"] is True
+    a_boundary = snapshots["cycle_1"]["states"]["A_Biceps"]
+    assert a_boundary["start"] == [100.0]
+    assert a_boundary["end"] == pytest.approx([100.0 - 2.0 * (20.0 / 6.0)])
+    assert a_boundary["delta"] == pytest.approx([-2.0 * (20.0 / 6.0)])
+    assert snapshots["cycle_2"]["available"] is True
+    assert snapshots["cycle_3"]["available"] is False
+    assert snapshots["cycle_3"]["reason"] == (
+        "only_2_cycles_belong_to_the_converged_prefix"
+    )
+
+
 def test_benchmark_separates_attempted_and_validated_prefix_objectives():
     result = _benchmark_result([0, 1, 0])
     result.update(
@@ -6950,6 +7008,9 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
         "ACADOS_INSTALL_SCRIPT_BLOB: 5ac8064ab613251e62560b5de8cbbb9550f5c5d0"
         in workflow
     )
+    assert 'TERA_RENDERER_VERSION: "0.2.0"' in workflow
+    assert "install_acados_tera_renderer.sh" in workflow
+    assert 'echo "TERA_PATH=$CONDA_PREFIX/bin/t_renderer"' in workflow
     assert "for mechanics in full reduced" in workflow
     assert workflow.index("prepare_case reduced") < workflow.index("prepare_case full")
     assert (
@@ -7186,6 +7247,8 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert '(.acados_transfer_phase_one_screen_threshold == $threshold)' in benchmark_runner
     assert 'trajectory_options=()' in benchmark_runner
     assert '[[ "$ipopt_profile" =~ ^scientific[-_]radau[3456]$ ]]' in benchmark_runner
+    assert 'HIGH_ACCURACY_TRACE_MAX_CYCLES:-30' in benchmark_runner
+    assert 'HIGH_ACCURACY_TRACE_CYCLE_MILESTONES:-430,660,779' in benchmark_runner
     assert '--receding-horizon-solution-output' in benchmark_runner
     assert '"$case_dir/validated-rho-trajectory.npz"' in benchmark_runner
     assert '"${trajectory_options[@]}"' in benchmark_runner
@@ -7444,6 +7507,7 @@ def test_optional_nlp_config_clones_ipopt_transcription_exactly():
         max_iterations=500,
         dual_warm_start_mode="bounds",
         madnlp_linear_solver="umfpack",
+        madnlp_max_wall_time=20.0,
         periodic_ipopt_hot_start=True,
     )
     fatrop = comparison_example._nlp_solver_config(
@@ -7481,6 +7545,7 @@ def test_optional_nlp_config_clones_ipopt_transcription_exactly():
         assert candidate.nlp_periodic_ipopt_hot_start is True
 
     assert madnlp.madnlp_linear_solver == "umfpack"
+    assert madnlp.madnlp_max_wall_time == 20.0
     assert fatrop.fatrop_structure_detection == "auto"
     assert fatrop.fatrop_bound_tightening_factor == 2e-8
     assert fatrop.max_fatrop_iterations == 600

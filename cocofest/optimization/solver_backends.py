@@ -93,6 +93,7 @@ def configure_nlp_solver(
     fatrop_bound_tightening_factor: float = 1e-8,
     madnlp_c_compile: bool = False,
     madnlp_linear_solver: str | None = None,
+    madnlp_max_wall_time: float | None = None,
     alpaqa_alm_max_iterations: int | None = None,
     alpaqa_lbfgs_memory: int = 20,
     alpaqa_max_wall_time: float | None = None,
@@ -135,6 +136,8 @@ def configure_nlp_solver(
             "madnlp_linear_solver must be one of "
             f"{', '.join(MADNLP_LINEAR_SOLVER_NAMES)}."
         )
+    if madnlp_max_wall_time is not None and madnlp_max_wall_time <= 0:
+        raise ValueError("madnlp_max_wall_time must be strictly positive.")
     if alpaqa_initial_tolerance is not None and alpaqa_initial_tolerance <= 0:
         raise ValueError("alpaqa_initial_tolerance must be strictly positive.")
     if (
@@ -237,6 +240,8 @@ def configure_nlp_solver(
                 madnlp_linear_solver, madnlp_linear_solver
             )
             solver.set_option_unsafe(runtime_linear_solver, "linear_solver")
+        if madnlp_max_wall_time is not None:
+            solver.set_option_unsafe(float(madnlp_max_wall_time), "max_wall_time")
         solver.set_c_compile(madnlp_c_compile)
         return solver
 
