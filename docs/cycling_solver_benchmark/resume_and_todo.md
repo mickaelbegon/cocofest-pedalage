@@ -789,6 +789,13 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     checksum dans le cache ACADOS. Le solve ne doit plus télécharger de binaire
     à runtime; vérifier que le smoke passe même après la phase de préparation
     de machine.
+38. [implémenté localement, CI à lancer] Injecter de vraies limites ACADOS de
+    `10`, `20` et `30` SQP aux RHO `100`, `150` et `430`, restaurer le budget
+    nominal avant le retry du même RHO et poursuivre 30 cycles. Comparer sur le
+    même runner à la chaîne nominale : statut, recoveries/fallbacks, temps,
+    angle/cadence, PW, objectif, AUC et capacité des quatre muscles. Aucun
+    primal interrompu ne peut avancer le RHO; les audits DOP853 locaux restent
+    requis avant toute interprétation de la fatigue.
 
 La question causale est maintenant resserrée : une seule projection au RHO 19
 ne suffit pas, mais la séquence 19--36 conserve le bassin franchissant le RHO

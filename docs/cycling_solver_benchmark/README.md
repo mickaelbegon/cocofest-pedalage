@@ -47,6 +47,7 @@ capacité musculaire :
 | `radau35_comparison` | IPOPT/MUMPS et MadNLP/MUMPS reduced, SX et compilés, Radau 3 puis Radau 5 sur le même runner | comparaison longue appariée, par défaut 300 RHO; chaque degré doit certifier tout son horizon |
 | `acados_reduced_100` | ACADOS SQP-IRK reduced, 100 RHO, après un seed ACADOS-native | résultat sérialisé et audité, y compris si la chaîne s'arrête avant 100 |
 | `acados_recovery_speed` | ACADOS reduced, budget adaptatif `30 + 70`, recovery R5 puis R3 seed-only, transferts `extrapolate`/`repeat` et horizon de deux cycles | ablation séquentielle sur le même runner; avec un artefact source, reprise au cycle 430 |
+| `acados_dropout` | ACADOS reduced nominal puis interruptions contrôlées à 10, 20 et 30 SQP aux RHO configurés | quatre chaînes séquentielles sur le même runner; budget nominal restauré avant tout retry, fallback IPOPT/Radau-5 certifié et poursuite 30 RHO après la dernière interruption |
 | `fatigue_endurance` | IPOPT, MadNLP/MUMPS et FATROP reduced, SX et compilés, Radau 3; ACADOS SQP-IRK full avec garde rapide `2.60` et Phase-I mécanique | horizon atteint ou arrêt candidat de fatigue après deux fenêtres non certifiées consécutives |
 | `fatigue_endurance_radau5` | IPOPT/MUMPS et MadNLP/MUMPS reduced, SX et compilés, Radau 5 | même contrat d'endurance, afin de vérifier que le stop MadNLP R3 n'est pas un artefact de transcription |
 
@@ -322,6 +323,27 @@ full reste rapide après préparation : médiane chaude `0.466 s`, P90 `0.681 s`
 Ce résultat valide le câblage full, pas encore la capacité à franchir l'échec
 naturel observé au RHO 141.
 
+### Interruptions ACADOS contrôlées
+
+Le cas `acados_dropout` ne remplace pas un statut convergé par un échec
+artificiel. Il réduit réellement `nlp_solver_max_iter` pour le premier solve
+des RHO sélectionnés. Le budget nominal de 100 SQP est restauré dans un bloc
+`finally` avant tout retry du même RHO. Une solution interrompue reste donc
+dans l'accounting brut mais ne peut jamais être shiftée vers le cycle suivant.
+
+La campagne par défaut exécute successivement, sur le même runner, une chaîne
+nominale puis trois chaînes avec des caps de 10, 20 et 30 SQP aux RHO 100, 150
+et 430. Chaque chaîne continue 30 RHO après la dernière interruption. Les
+sorties séparent le statut et le temps du solve capé, les recoveries
+IPOPT/Radau-5, les fallbacks certifiants, le temps total, l'objectif, l'AUC et
+la capacité minimale. Les audits DOP853 sont bornés à 30 cycles et répétés
+localement aux trois jalons.
+
+Une baisse apparente de fatigue n'est pas interprétée comme un gain si la
+trajectoire mécanique ou l'angle absolu ne sont pas certifiés. Le résultat
+scientifique recherché est la différence avec la chaîne nominale après 30 RHO
+de boucle fermée, pas le coût du seul cycle interrompu.
+
 Exemples de lancement manuel :
 
 ```bash
@@ -344,6 +366,13 @@ gh workflow run cycling_solver_benchmark_linux.yml \
 gh workflow run cycling_solver_benchmark_linux.yml \
   --ref codex/full-horizon-homotopy \
   -f cycles=acados_reduced_recovery -f acados_smoke_rhos=150
+
+gh workflow run cycling_solver_benchmark_linux.yml \
+  --ref codex/full-horizon-homotopy \
+  -f cycles=acados_dropout \
+  -f crank_assistance_nm=signed:+0.15 \
+  -f acados_dropout_rhos=100,150,430 \
+  -f acados_dropout_followup_rhos=30
 
 # Rejouer exactement le seed Intel du run 150 sur un nouveau runner
 gh workflow run cycling_solver_benchmark_linux.yml \

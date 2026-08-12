@@ -2351,6 +2351,27 @@ def build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--acados-forced-iteration-cap-rhos",
+        type=parse_positive_window_indices,
+        default=(),
+        help=(
+            "Test-only increasing list of one-based physical RHO indices whose "
+            "first ACADOS solve receives --acados-forced-iteration-cap. The "
+            "nominal budget is restored before every same-RHO retry. RHO 1 is "
+            "excluded because the instrumentation is installed after the first "
+            "native solve."
+        ),
+    )
+    parser.add_argument(
+        "--acados-forced-iteration-cap",
+        type=int,
+        default=None,
+        help=(
+            "Temporary SQP iteration budget used only at the selected RHO. "
+            "This is an interruption experiment, not a production option."
+        ),
+    )
+    parser.add_argument(
         "--acados-ipopt-fallback-advance",
         action="store_true",
         help=(
@@ -5452,6 +5473,97 @@ def set_acados_runtime_max_iterations(periodic_nmpc, max_iterations: int) -> boo
         options_set("nlp_solver_max_iter", int(max_iterations))
     except (AttributeError, ValueError):
         return False
+    return True
+
+
+def install_acados_forced_iteration_cap(
+    periodic_nmpc,
+    *,
+    nominal_iterations: int,
+    summaries: list,
+    echo: bool = True,
+    set_iterations_function=None,
+    diagnostics_function=None,
+) -> bool:
+    """Temporarily cap one explicitly armed main-window ACADOS solve.
+
+    The cap is consumed before calling the native solver and the nominal
+    budget is restored in a ``finally`` block.  A same-RHO retry therefore
+    starts from the ordinary budget unless another experiment arms it
+    explicitly.  Auxiliary solves remain untouched because they run while no
+    target RHO is armed.
+    """
+
+    interface = getattr(periodic_nmpc, "ocp_solver", None)
+    if interface is None:
+        return False
+    if getattr(interface, "_cocofest_forced_iteration_cap_installed", False):
+        return True
+
+    set_iterations_function = (
+        set_acados_runtime_max_iterations
+        if set_iterations_function is None
+        else set_iterations_function
+    )
+    diagnostics_function = (
+        _acados_interface_residual_diagnostics
+        if diagnostics_function is None
+        else diagnostics_function
+    )
+    original_solve = interface.solve
+
+    def solve_with_forced_iteration_cap(_interface, *args, **kwargs):
+        experiment = getattr(
+            periodic_nmpc, "_cocofest_forced_iteration_cap_pending", None
+        )
+        periodic_nmpc._cocofest_forced_iteration_cap_pending = None
+        if experiment is None:
+            return original_solve(*args, **kwargs)
+
+        target_rho = int(experiment["target_rho"])
+        iteration_cap = int(experiment["iteration_cap"])
+        if not set_iterations_function(periodic_nmpc, iteration_cap):
+            raise RuntimeError(
+                "The forced ACADOS interruption could not set its temporary "
+                "SQP iteration budget."
+            )
+        started = perf_counter()
+        try:
+            output = original_solve(*args, **kwargs)
+            status = int(getattr(_interface, "status", -1))
+            diagnostics = diagnostics_function(periodic_nmpc)
+        finally:
+            restored = bool(
+                set_iterations_function(periodic_nmpc, nominal_iterations)
+            )
+        if not restored:
+            raise RuntimeError(
+                "The forced ACADOS interruption did not restore the nominal "
+                f"{nominal_iterations}-iteration SQP budget."
+            )
+
+        summary = {
+            "target_rho": target_rho,
+            "iteration_cap": iteration_cap,
+            "nominal_iterations": int(nominal_iterations),
+            "status": status,
+            "iterations": int(_acados_stat_scalar(diagnostics.get("sqp_iter"))),
+            "solver_time_s": _acados_stat_scalar(diagnostics.get("time_tot")),
+            "wall_time_s": perf_counter() - started,
+            "nominal_budget_restored": restored,
+        }
+        summaries.append(summary)
+        if echo:
+            print(
+                "acados_forced_iteration_cap: "
+                f"target_rho={target_rho} cap={iteration_cap} "
+                f"status={status} iterations={summary['iterations']} "
+                f"nominal_restored={restored}"
+            )
+        return output
+
+    interface.solve = MethodType(solve_with_forced_iteration_cap, interface)
+    interface._cocofest_forced_iteration_cap_installed = True
     return True
 
 
@@ -15310,6 +15422,43 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             "--acados-ipopt-recovery-force-first-rho requires "
             "--acados-ipopt-recovery."
         )
+    forced_cap_rhos = tuple(args.acados_forced_iteration_cap_rhos or ())
+    if forced_cap_rhos:
+        if args.solver != "acados":
+            raise ValueError(
+                "--acados-forced-iteration-cap-rhos requires --solver acados."
+            )
+        if args.single_shot:
+            raise ValueError(
+                "--acados-forced-iteration-cap-rhos requires the RHO mode."
+            )
+        if forced_cap_rhos[0] < 2:
+            raise ValueError(
+                "--acados-forced-iteration-cap-rhos currently starts at RHO 2."
+            )
+        if args.acados_forced_iteration_cap is None:
+            raise ValueError(
+                "--acados-forced-iteration-cap-rhos requires "
+                "--acados-forced-iteration-cap."
+            )
+        if args.acados_forced_iteration_cap < 1:
+            raise ValueError(
+                "--acados-forced-iteration-cap must be strictly positive."
+            )
+        if args.acados_forced_iteration_cap >= args.max_acados_iterations:
+            raise ValueError(
+                "--acados-forced-iteration-cap must be smaller than the "
+                "nominal --max-acados-iterations budget."
+            )
+        if forced_cap_rhos[-1] > args.n_windows:
+            raise ValueError(
+                "A forced ACADOS interruption RHO exceeds --n-windows."
+            )
+    elif args.acados_forced_iteration_cap is not None:
+        raise ValueError(
+            "--acados-forced-iteration-cap requires "
+            "--acados-forced-iteration-cap-rhos."
+        )
     if args.acados_ipopt_fallback_advance:
         if not args.acados_ipopt_recovery:
             raise ValueError(
@@ -16784,6 +16933,15 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                     f"{args.acados_maxiter_retry_feasibility_tolerance}"
                 )
             print(
+                "acados_forced_iteration_cap_rhos: "
+                f"{tuple(args.acados_forced_iteration_cap_rhos or ())}"
+            )
+            if args.acados_forced_iteration_cap_rhos:
+                print(
+                    "acados_forced_iteration_cap: "
+                    f"{args.acados_forced_iteration_cap}"
+                )
+            print(
                 "acados_cyclical_transfer_mode: "
                 f"{args.acados_cyclical_transfer_mode}"
             )
@@ -17702,6 +17860,9 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
     transfer_bound_homotopy_summaries = []
     transfer_sqp_restart_summaries = []
     maxiter_retry_summaries = []
+    forced_iteration_cap_summaries = []
+    forced_iteration_cap_rhos = set(args.acados_forced_iteration_cap_rhos or ())
+    forced_iteration_cap_armed_rhos = set()
     ipopt_recovery_summaries = []
     nlp_failed_rho_phase_one_summaries = []
     acados_failed_rho_phase_one_summaries = []
@@ -19191,6 +19352,32 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                     f"signature={next_audit['signature']} "
                     f"finite={next_audit['finite']}"
                 )
+        if args.solver == "acados" and forced_iteration_cap_rhos:
+            cap_installed = install_acados_forced_iteration_cap(
+                _nmpc,
+                nominal_iterations=args.max_acados_iterations,
+                summaries=forced_iteration_cap_summaries,
+                echo=echo,
+            )
+            next_target_rho = completed_physical_rhos + 1
+            should_arm_cap = bool(
+                continue_solving
+                and cap_installed
+                and next_target_rho in forced_iteration_cap_rhos
+                and next_target_rho not in forced_iteration_cap_armed_rhos
+            )
+            if should_arm_cap:
+                _nmpc._cocofest_forced_iteration_cap_pending = {
+                    "target_rho": next_target_rho,
+                    "iteration_cap": args.acados_forced_iteration_cap,
+                }
+                forced_iteration_cap_armed_rhos.add(next_target_rho)
+                if echo:
+                    print(
+                        "acados_forced_iteration_cap_armed: "
+                        f"target_rho={next_target_rho} "
+                        f"cap={args.acados_forced_iteration_cap}"
+                    )
         if args.solver == "acados" and args.acados_maxiter_retries:
             retry_installed = install_acados_conditional_maxiter_retry(
                 _nmpc,
@@ -19866,6 +20053,10 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             summary["acados_failed_rho_phase_one_summaries"] = (
                 acados_failed_rho_phase_one_summaries
             )
+        if forced_iteration_cap_summaries:
+            summary["acados_forced_iteration_cap_summaries"] = (
+                forced_iteration_cap_summaries
+            )
         summary["rho_replay_checkpoint"] = rho_replay_checkpoint_summary
         summary["rho_prepared_checkpoints"] = rho_prepared_checkpoint_summaries
         summary["execution_timing"] = {
@@ -20033,6 +20224,10 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         summary["transfer_sqp_restart_summaries"] = transfer_sqp_restart_summaries
     if maxiter_retry_summaries:
         summary["acados_maxiter_retry_summaries"] = maxiter_retry_summaries
+    if forced_iteration_cap_summaries:
+        summary["acados_forced_iteration_cap_summaries"] = (
+            forced_iteration_cap_summaries
+        )
     if ipopt_recovery_summaries:
         summary["ipopt_recovery_summaries"] = ipopt_recovery_summaries
         if args.solver == "acados":

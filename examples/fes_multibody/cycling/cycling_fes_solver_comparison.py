@@ -161,6 +161,8 @@ BENCHMARK_CONFIGURATION_FIELDS = (
     "acados_ipopt_recovery_seed_max_iterations",
     "acados_ipopt_recovery_irk_seed_audit",
     "acados_ipopt_recovery_force_first_rho",
+    "acados_forced_iteration_cap_rhos",
+    "acados_forced_iteration_cap",
     "acados_ipopt_fallback_advance",
     "nlp_ipopt_recovery",
     "nlp_ipopt_recovery_max_iterations",
@@ -3238,6 +3240,9 @@ def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
                 "acados_maxiter_retry_summaries": (
                     result.get("acados_maxiter_retry_summaries") or []
                 ),
+                "acados_forced_iteration_cap_summaries": (
+                    result.get("acados_forced_iteration_cap_summaries") or []
+                ),
                 "initial_acados_irk_rollout": result.get(
                     "initial_acados_irk_rollout"
                 ),
@@ -3582,6 +3587,8 @@ def main(
     acados_ipopt_recovery_seed_max_iterations: int | None = None,
     acados_ipopt_recovery_irk_seed_audit: bool = False,
     acados_ipopt_recovery_force_first_rho: bool = False,
+    acados_forced_iteration_cap_rhos: tuple[int, ...] = (),
+    acados_forced_iteration_cap: int | None = None,
     acados_ipopt_fallback_advance: bool = False,
     nlp_ipopt_recovery: bool = False,
     nlp_ipopt_fallback_advance: bool = False,
@@ -4136,6 +4143,10 @@ def main(
     acados_args.acados_ipopt_recovery_force_first_rho = (
         acados_ipopt_recovery_force_first_rho
     )
+    acados_args.acados_forced_iteration_cap_rhos = tuple(
+        acados_forced_iteration_cap_rhos
+    )
+    acados_args.acados_forced_iteration_cap = acados_forced_iteration_cap
     acados_args.acados_ipopt_fallback_advance = acados_ipopt_fallback_advance
     acados_args.acados_failed_rho_phase_one_recovery = (
         acados_failed_rho_phase_one_recovery
@@ -5687,6 +5698,16 @@ def build_cli() -> argparse.ArgumentParser:
     )
     parser.add_argument("--acados-ipopt-recovery-force-first-rho", action="store_true")
     parser.add_argument(
+        "--acados-forced-iteration-cap-rhos",
+        type=parse_positive_window_indices,
+        default=(),
+        help=(
+            "Test-only RHO indices whose first ACADOS solve receives a "
+            "temporary reduced SQP iteration budget."
+        ),
+    )
+    parser.add_argument("--acados-forced-iteration-cap", type=int, default=None)
+    parser.add_argument(
         "--acados-ipopt-fallback-advance",
         action="store_true",
         help=(
@@ -6190,6 +6211,10 @@ if __name__ == "__main__":
         acados_ipopt_recovery_force_first_rho=(
             args.acados_ipopt_recovery_force_first_rho
         ),
+        acados_forced_iteration_cap_rhos=(
+            args.acados_forced_iteration_cap_rhos
+        ),
+        acados_forced_iteration_cap=args.acados_forced_iteration_cap,
         acados_ipopt_fallback_advance=args.acados_ipopt_fallback_advance,
         acados_failed_rho_phase_one_recovery=(
             args.acados_failed_rho_phase_one_recovery

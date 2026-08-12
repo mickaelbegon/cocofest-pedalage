@@ -10,7 +10,7 @@ on:
         default: ubuntu-24.04
         type: string
       cycles:
-        description: Number of RHO solves, or "screen", "acados", "acados_guard", "acados_recovery", "acados_lazy_recovery", "acados_homotopy", "acados_reduced_100", "acados_hybrid", "acados_reduced_recovery", "acados_reduced_fallback", "acados_recovery_speed", "radau5_100", "radau35_comparison", "fatigue_endurance", "fatigue_endurance_radau5", or "full_horizon"
+        description: Number of RHO solves, or "screen", "acados", "acados_guard", "acados_recovery", "acados_lazy_recovery", "acados_homotopy", "acados_reduced_100", "acados_hybrid", "acados_reduced_recovery", "acados_reduced_fallback", "acados_recovery_speed", "acados_dropout", "radau5_100", "radau35_comparison", "fatigue_endurance", "fatigue_endurance_radau5", or "full_horizon"
         required: true
         default: "100"
         type: string
@@ -78,6 +78,16 @@ on:
         description: Short RHO count for each ACADOS solver-option candidate
         required: true
         default: "5"
+        type: string
+      acados_dropout_rhos:
+        description: Increasing physical RHO indices receiving a forced first-attempt ACADOS iteration cap
+        required: true
+        default: "100,150,430"
+        type: string
+      acados_dropout_followup_rhos:
+        description: Certified RHO cycles continued after the final forced interruption
+        required: true
+        default: "30"
         type: string
       refined_collocation_validation:
         description: Run reduced IPOPT and MadNLP with Radau degrees 4, 5, and 6 to audit the stiff calcium transcription
@@ -435,7 +445,7 @@ jobs:
 
   acados-ipopt-hybrid:
     name: ACADOS full/reduced — staged IPOPT recovery wiring
-    if: ${{ inputs.cycles == 'acados_hybrid' || inputs.cycles == 'acados_reduced_recovery' || inputs.cycles == 'acados_reduced_fallback' || inputs.cycles == 'acados_recovery_speed' }}
+    if: ${{ inputs.cycles == 'acados_hybrid' || inputs.cycles == 'acados_reduced_recovery' || inputs.cycles == 'acados_reduced_fallback' || inputs.cycles == 'acados_recovery_speed' || inputs.cycles == 'acados_dropout' }}
     needs: [prepare-seed, prepare-acados-stack]
     runs-on: ${{ inputs.runner_label }}
     timeout-minutes: 240
@@ -509,6 +519,8 @@ jobs:
             tests/shard1/test_acados_control_seed.py \
             tests/shard1/test_periodic_pulse_width.py::test_acados_ipopt_recovery_compatibility_reports_pulse_width_in_us \
             tests/shard1/test_periodic_pulse_width.py::test_acados_ipopt_recovery_cli_is_opt_in \
+            tests/shard1/test_periodic_pulse_width.py::test_forced_acados_iteration_cap_is_consumed_once_and_restores_nominal_budget \
+            tests/shard1/test_periodic_pulse_width.py::test_forced_acados_iteration_cap_restores_nominal_budget_after_exception \
             tests/shard1/test_periodic_pulse_width.py::test_acados_two_level_ipopt_recovery_keeps_radau3_seed_only \
             tests/shard1/test_periodic_pulse_width.py::test_acados_two_level_recovery_cli_is_explicit \
             tests/shard1/test_periodic_pulse_width.py::test_acados_irk_seed_audit_does_not_mutate_initial_guess \
@@ -607,7 +619,129 @@ jobs:
           if [[ "${{ inputs.cycles }}" == "acados_reduced_fallback" ]]; then
             reduced_recovery_options+=(--acados-ipopt-fallback-advance)
           fi
-          if [[ "${{ inputs.cycles }}" == "acados_recovery_speed" ]]; then
+          if [[ "${{ inputs.cycles }}" == "acados_dropout" ]]; then
+            if [[ "${{ inputs.crank_assistance_nm }}" != "signed:+0.15" ]]; then
+              echo "acados_dropout requires signed:+0.15 N.m so it reuses the certified endurance problem." >&2
+              exit 2
+            fi
+            IFS=',' read -r -a dropout_rhos <<< "${{ inputs.acados_dropout_rhos }}"
+            previous_rho=0
+            for rho in "${dropout_rhos[@]}"; do
+              if [[ ! "$rho" =~ ^[0-9]+$ ]] || (( rho < 2 || rho <= previous_rho )); then
+                echo "acados_dropout_rhos must be unique, increasing integers >= 2." >&2
+                exit 2
+              fi
+              previous_rho="$rho"
+            done
+            followup_rhos="${{ inputs.acados_dropout_followup_rhos }}"
+            if [[ ! "$followup_rhos" =~ ^[0-9]+$ ]] || (( followup_rhos < 1 )); then
+              echo "acados_dropout_followup_rhos must be a positive integer." >&2
+              exit 2
+            fi
+            reduced_rhos=$((previous_rho + followup_rhos))
+
+            run_acados_dropout_case() {
+              local case_name="$1"
+              local iteration_cap="$2"
+              local case_dir="acados-ipopt-hybrid-results/$case_name"
+              local cap_options=()
+              mkdir -p "$case_dir"
+              if [[ "$iteration_cap" != "nominal" ]]; then
+                cap_options=(
+                  --acados-forced-iteration-cap-rhos
+                  "${{ inputs.acados_dropout_rhos }}"
+                  --acados-forced-iteration-cap
+                  "$iteration_cap"
+                )
+              fi
+              python examples/fes_multibody/cycling/cycling_fes_solver_comparison.py \
+                --solvers acados \
+                --objective fatigue \
+                --cycles-per-window 1 \
+                --stimulations-per-cycle 30 \
+                --n-windows "$reduced_rhos" \
+                --n-threads "$BENCHMARK_THREADS" \
+                --crank-assistance "${{ inputs.crank_assistance_nm }}" \
+                --first-node-wheel-q-slack 0 \
+                --terminal-wheel-q-slack "${{ inputs.terminal_wheel_q_slack }}" \
+                --mechanical-formulation reduced \
+                --experimental-reduced-acados \
+                --compact-rho-output \
+                --common-initial-solution "$common_seed_path" \
+                --common-initial-solution-recenter-first-node-bounds \
+                --adopt-common-initial-solution-warmup-cycles \
+                "${assisted_hot_start_options[@]}" \
+                --acados-disable-standard-ipopt-warmup \
+                --periodic-ipopt-refinement-ode-solver collocation \
+                --periodic-ipopt-refinement-collocation-degree 5 \
+                --periodic-ipopt-refinement-collocation-method radau \
+                --periodic-ipopt-refinement-iterations "${{ inputs.solver_max_iterations }}" \
+                --warmup-ipopt-linear-solver mumps \
+                --retry-failed-rho-without-advance \
+                --max-consecutive-failing 2 \
+                --acados-integrator-type IRK \
+                --acados-sim-stages 4 \
+                --acados-sim-steps 5 \
+                --acados-wheel-qdot-fast-bound-margin "${{ inputs.acados_reduced_fast_bound_margin }}" \
+                --acados-initial-irk-rollout \
+                --acados-max-iter 100 \
+                --acados-store-iterates \
+                --acados-ipopt-recovery \
+                --acados-ipopt-recovery-max-iterations "${{ inputs.solver_max_iterations }}" \
+                --acados-ipopt-recovery-collocation-degree 5 \
+                --acados-ipopt-fallback-advance \
+                --ipopt-linear-solver mumps \
+                --validate-integrator-maps \
+                --high-accuracy-trace-max-cycles 30 \
+                --high-accuracy-trace-cycle-milestones "${{ inputs.acados_dropout_rhos }}" \
+                --receding-horizon-solution-output "$case_dir/validated-prefix.npz" \
+                --allow-partial-receding-horizon-solution-output \
+                --output-json "$case_dir/result.json" \
+                "${cap_options[@]}" \
+                2>&1 | tee "$case_dir/solver.log"
+            }
+
+            run_acados_dropout_case nominal-100 nominal
+            run_acados_dropout_case cap-10 10
+            run_acados_dropout_case cap-20 20
+            run_acados_dropout_case cap-30 30
+            for cap in 10 20 30; do
+              jq -e \
+                --argjson requested "$reduced_rhos" \
+                --argjson cap "$cap" \
+                --arg rhos "${{ inputs.acados_dropout_rhos }}" '
+                ($rhos | split(",") | map(tonumber)) as $targets |
+                .configurations.acados.acados_forced_iteration_cap_rhos == $targets and
+                .configurations.acados.acados_forced_iteration_cap == $cap and
+                .results[0].error == null and
+                .results[0].requested_cycles == $requested and
+                (.results[0].acados_forced_iteration_cap_summaries | length) == ($targets | length) and
+                all(.results[0].acados_forced_iteration_cap_summaries[];
+                    .target_rho as $rho |
+                    ($targets | index($rho)) != null and
+                    .iteration_cap == $cap and
+                    .nominal_budget_restored == true)
+              ' "acados-ipopt-hybrid-results/cap-$cap/result.json"
+            done
+            jq -s '
+              map({
+                case: (if .configurations.acados.acados_forced_iteration_cap == null
+                       then "nominal-100"
+                       else "cap-\(.configurations.acados.acados_forced_iteration_cap)"
+                       end),
+                validated_cycles: .results[0].validated_cycles,
+                executed_fatigue_objective: .results[0].executed_fatigue_objective,
+                fatigue_auc_cycles: .results[0].fatigue_auc_cycles,
+                min_A_capacity_ratio: .results[0].min_A_capacity_ratio,
+                forced_caps: .results[0].acados_forced_iteration_cap_summaries,
+                fallback_count: .results[0].acados_ipopt_recovery.fallback_advanced_count,
+                recovery_wall_time_s: .results[0].acados_ipopt_recovery.recovery_wall_time_s,
+                end_to_end_wall_time_s: .results[0].end_to_end_wall_time_s,
+                rho_pipeline_wall_time_per_cycle_s: .results[0].rho_pipeline_wall_time_per_cycle_s
+              })
+            ' acados-ipopt-hybrid-results/{nominal-100,cap-10,cap-20,cap-30}/result.json \
+              > acados-ipopt-hybrid-results/dropout-summary.json
+          elif [[ "${{ inputs.cycles }}" == "acados_recovery_speed" ]]; then
             if [[ "${{ inputs.crank_assistance_nm }}" != "signed:+0.15" ]]; then
               echo "acados_recovery_speed requires the explicit resistive torque signed:+0.15 N.m." >&2
               exit 2
@@ -1139,7 +1273,7 @@ jobs:
 
   acados-smoke:
     name: ACADOS — sequential full/reduced and option screen
-    if: ${{ inputs.cycles != 'screen' && inputs.cycles != 'full_horizon' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles_per_window == '1' }}
+    if: ${{ inputs.cycles != 'screen' && inputs.cycles != 'full_horizon' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles != 'acados_dropout' && inputs.cycles_per_window == '1' }}
     needs: [prepare-seed, prepare-acados-stack]
     runs-on: ${{ inputs.runner_label }}
     timeout-minutes: 240
@@ -2378,7 +2512,7 @@ jobs:
 
   benchmark:
     name: ${{ matrix.case_slug }} — sequential full/reduced
-    if: ${{ inputs.cycles != 'screen' && inputs.cycles != 'acados' && inputs.cycles != 'acados_guard' && inputs.cycles != 'acados_recovery' && inputs.cycles != 'acados_lazy_recovery' && inputs.cycles != 'acados_homotopy' && inputs.cycles != 'acados_reduced_100' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles != 'full_horizon' }}
+    if: ${{ inputs.cycles != 'screen' && inputs.cycles != 'acados' && inputs.cycles != 'acados_guard' && inputs.cycles != 'acados_recovery' && inputs.cycles != 'acados_lazy_recovery' && inputs.cycles != 'acados_homotopy' && inputs.cycles != 'acados_reduced_100' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles != 'acados_dropout' && inputs.cycles != 'full_horizon' }}
     needs: prepare-seed
     runs-on: ${{ inputs.runner_label }}
     timeout-minutes: ${{ matrix.timeout_minutes }}
@@ -3277,7 +3411,7 @@ jobs:
 
   report:
     name: Aggregate Kevin benchmark
-    if: ${{ always() && inputs.cycles != 'screen' && inputs.cycles != 'acados' && inputs.cycles != 'acados_guard' && inputs.cycles != 'acados_recovery' && inputs.cycles != 'acados_lazy_recovery' && inputs.cycles != 'acados_homotopy' && inputs.cycles != 'acados_reduced_100' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles != 'full_horizon' }}
+    if: ${{ always() && inputs.cycles != 'screen' && inputs.cycles != 'acados' && inputs.cycles != 'acados_guard' && inputs.cycles != 'acados_recovery' && inputs.cycles != 'acados_lazy_recovery' && inputs.cycles != 'acados_homotopy' && inputs.cycles != 'acados_reduced_100' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles != 'acados_dropout' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles != 'full_horizon' }}
     needs: [benchmark, acados-smoke]
     runs-on: ubuntu-24.04
     permissions:

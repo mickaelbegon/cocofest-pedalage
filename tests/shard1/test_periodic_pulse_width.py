@@ -997,6 +997,10 @@ def test_acados_ipopt_recovery_cli_is_opt_in():
             "--acados-ipopt-recovery-collocation-degree",
             "5",
             "--acados-ipopt-recovery-force-first-rho",
+            "--acados-forced-iteration-cap-rhos",
+            "100,150,430",
+            "--acados-forced-iteration-cap",
+            "10",
             "--acados-initial-irk-rollout",
         ]
     )
@@ -1005,6 +1009,8 @@ def test_acados_ipopt_recovery_cli_is_opt_in():
     assert args.acados_ipopt_recovery_max_iterations == 800
     assert args.acados_ipopt_recovery_collocation_degree == 5
     assert args.acados_ipopt_recovery_force_first_rho is True
+    assert args.acados_forced_iteration_cap_rhos == (100, 150, 430)
+    assert args.acados_forced_iteration_cap == 10
     assert args.acados_ipopt_fallback_advance is False
     assert args.acados_initial_irk_rollout is True
     assert args.acados_failed_rho_phase_one_recovery is False
@@ -1022,6 +1028,17 @@ def test_acados_ipopt_recovery_cli_is_opt_in():
     )
     assert fallback_args.acados_ipopt_fallback_advance is True
     assert comparison_fallback_args.acados_ipopt_fallback_advance is True
+
+    comparison_cap_args = comparison_example.build_cli().parse_args(
+        [
+            "--acados-forced-iteration-cap-rhos",
+            "100,150,430",
+            "--acados-forced-iteration-cap",
+            "20",
+        ]
+    )
+    assert comparison_cap_args.acados_forced_iteration_cap_rhos == (100, 150, 430)
+    assert comparison_cap_args.acados_forced_iteration_cap == 20
 
 
 def test_acados_two_level_ipopt_recovery_keeps_radau3_seed_only():
@@ -1727,6 +1744,79 @@ def test_capture_rejects_acados_algebraic_states():
     assert summary["captured"] is False
     assert summary["reason"] == "algebraic_states_not_supported"
     assert state is None
+
+
+def test_forced_acados_iteration_cap_is_consumed_once_and_restores_nominal_budget():
+    class FakeAcadosInterface:
+        status = -1
+
+        def solve(self):
+            self.status = 2
+            return {"status": self.status}
+
+    interface = FakeAcadosInterface()
+    nmpc = SimpleNamespace(
+        ocp_solver=interface,
+        _cocofest_forced_iteration_cap_pending={
+            "target_rho": 100,
+            "iteration_cap": 10,
+        },
+    )
+    budgets = []
+    summaries = []
+
+    assert periodic_example.install_acados_forced_iteration_cap(
+        nmpc,
+        nominal_iterations=30,
+        summaries=summaries,
+        echo=False,
+        set_iterations_function=lambda _nmpc, value: budgets.append(value) or True,
+        diagnostics_function=lambda _nmpc: {"sqp_iter": 10, "time_tot": 0.12},
+    )
+
+    assert interface.solve() == {"status": 2}
+    assert interface.solve() == {"status": 2}
+    assert budgets == [10, 30]
+    assert summaries == [
+        {
+            "target_rho": 100,
+            "iteration_cap": 10,
+            "nominal_iterations": 30,
+            "status": 2,
+            "iterations": 10,
+            "solver_time_s": pytest.approx(0.12),
+            "wall_time_s": pytest.approx(0.0, abs=0.1),
+            "nominal_budget_restored": True,
+        }
+    ]
+
+
+def test_forced_acados_iteration_cap_restores_nominal_budget_after_exception():
+    class FailingAcadosInterface:
+        def solve(self):
+            raise RuntimeError("native failure")
+
+    interface = FailingAcadosInterface()
+    nmpc = SimpleNamespace(
+        ocp_solver=interface,
+        _cocofest_forced_iteration_cap_pending={
+            "target_rho": 150,
+            "iteration_cap": 20,
+        },
+    )
+    budgets = []
+
+    periodic_example.install_acados_forced_iteration_cap(
+        nmpc,
+        nominal_iterations=30,
+        summaries=[],
+        echo=False,
+        set_iterations_function=lambda _nmpc, value: budgets.append(value) or True,
+    )
+
+    with pytest.raises(RuntimeError, match="native failure"):
+        interface.solve()
+    assert budgets == [20, 30]
 
 
 def test_conditional_maxiter_retry_ignores_successful_main_solve():
@@ -6055,6 +6145,13 @@ def test_benchmark_json_summary_contains_comparable_fatigue_metrics(tmp_path):
     result["acados_maxiter_retry_summaries"] = [
         {"window": 13, "retry_status": 2}
     ]
+    result["acados_forced_iteration_cap_summaries"] = [
+        {
+            "target_rho": 100,
+            "iteration_cap": 10,
+            "nominal_budget_restored": True,
+        }
+    ]
 
     output_path = comparison_example.write_benchmark_summary(
         tmp_path / "benchmark.json", {"madnlp": result}
@@ -6133,6 +6230,13 @@ def test_benchmark_json_summary_contains_comparable_fatigue_metrics(tmp_path):
     assert row["windows"][0]["native_status"] == "Solve_Succeeded"
     assert row["nlp_solver_stats"][0]["t_wall_nlp_hess_l"] == 0.75
     assert row["compiled_nlp_reuse"]["compiled_library_build_count"] == 1
+    assert row["acados_forced_iteration_cap_summaries"] == [
+        {
+            "target_rho": 100,
+            "iteration_cap": 10,
+            "nominal_budget_restored": True,
+        }
+    ]
     assert row["acados_maxiter_retry_summaries"] == [
         {"window": 13, "retry_status": 2}
     ]
