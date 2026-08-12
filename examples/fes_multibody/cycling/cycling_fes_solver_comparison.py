@@ -143,6 +143,9 @@ BENCHMARK_CONFIGURATION_FIELDS = (
     "acados_ipopt_recovery",
     "acados_ipopt_recovery_max_iterations",
     "acados_ipopt_recovery_collocation_degree",
+    "acados_ipopt_recovery_seed_collocation_degree",
+    "acados_ipopt_recovery_seed_max_iterations",
+    "acados_ipopt_recovery_irk_seed_audit",
     "acados_ipopt_recovery_force_first_rho",
     "acados_ipopt_fallback_advance",
     "nlp_ipopt_recovery",
@@ -3487,6 +3490,9 @@ def main(
     acados_ipopt_recovery: bool = False,
     acados_ipopt_recovery_max_iterations: int = 2000,
     acados_ipopt_recovery_collocation_degree: int = 5,
+    acados_ipopt_recovery_seed_collocation_degree: int | None = None,
+    acados_ipopt_recovery_seed_max_iterations: int | None = None,
+    acados_ipopt_recovery_irk_seed_audit: bool = False,
     acados_ipopt_recovery_force_first_rho: bool = False,
     acados_ipopt_fallback_advance: bool = False,
     nlp_ipopt_recovery: bool = False,
@@ -4018,6 +4024,15 @@ def main(
     )
     acados_args.acados_ipopt_recovery_collocation_degree = (
         acados_ipopt_recovery_collocation_degree
+    )
+    acados_args.acados_ipopt_recovery_seed_collocation_degree = (
+        acados_ipopt_recovery_seed_collocation_degree
+    )
+    acados_args.acados_ipopt_recovery_seed_max_iterations = (
+        acados_ipopt_recovery_seed_max_iterations
+    )
+    acados_args.acados_ipopt_recovery_irk_seed_audit = (
+        acados_ipopt_recovery_irk_seed_audit
     )
     acados_args.acados_ipopt_recovery_force_first_rho = (
         acados_ipopt_recovery_force_first_rho
@@ -5557,6 +5572,15 @@ def build_cli() -> argparse.ArgumentParser:
     parser.add_argument(
         "--acados-ipopt-recovery-collocation-degree", type=int, default=5
     )
+    parser.add_argument(
+        "--acados-ipopt-recovery-seed-collocation-degree", type=int, default=None
+    )
+    parser.add_argument(
+        "--acados-ipopt-recovery-seed-max-iterations", type=int, default=None
+    )
+    parser.add_argument(
+        "--acados-ipopt-recovery-irk-seed-audit", action="store_true"
+    )
     parser.add_argument("--acados-ipopt-recovery-force-first-rho", action="store_true")
     parser.add_argument(
         "--acados-ipopt-fallback-advance",
@@ -6027,6 +6051,15 @@ if __name__ == "__main__":
         ),
         acados_ipopt_recovery_collocation_degree=(
             args.acados_ipopt_recovery_collocation_degree
+        ),
+        acados_ipopt_recovery_seed_collocation_degree=(
+            args.acados_ipopt_recovery_seed_collocation_degree
+        ),
+        acados_ipopt_recovery_seed_max_iterations=(
+            args.acados_ipopt_recovery_seed_max_iterations
+        ),
+        acados_ipopt_recovery_irk_seed_audit=(
+            args.acados_ipopt_recovery_irk_seed_audit
         ),
         acados_ipopt_recovery_force_first_rho=(
             args.acados_ipopt_recovery_force_first_rho

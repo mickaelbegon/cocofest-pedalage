@@ -1,5 +1,5 @@
 name: Cycling fatigue solvers — endurance benchmark
-run-name: Cycling fatigue solvers — ${{ inputs.cycles }} RHO, assistance ${{ inputs.crank_assistance_nm }} N.m
+run-name: Cycling fatigue solvers — ${{ inputs.cycles }} RHO, couple ${{ inputs.crank_assistance_nm }} N.m
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
         default: ubuntu-24.04
         type: string
       cycles:
-        description: Number of RHO solves, or "screen", "acados", "acados_guard", "acados_recovery", "acados_lazy_recovery", "acados_homotopy", "acados_reduced_100", "acados_hybrid", "acados_reduced_recovery", "acados_reduced_fallback", "radau5_100", "radau35_comparison", "fatigue_endurance", "fatigue_endurance_radau5", or "full_horizon"
+        description: Number of RHO solves, or "screen", "acados", "acados_guard", "acados_recovery", "acados_lazy_recovery", "acados_homotopy", "acados_reduced_100", "acados_hybrid", "acados_reduced_recovery", "acados_reduced_fallback", "acados_recovery_speed", "radau5_100", "radau35_comparison", "fatigue_endurance", "fatigue_endurance_radau5", or "full_horizon"
         required: true
         default: "100"
         type: string
@@ -434,7 +434,7 @@ jobs:
 
   acados-ipopt-hybrid:
     name: ACADOS full/reduced — IPOPT/Radau-5 recovery wiring
-    if: ${{ inputs.cycles == 'acados_hybrid' || inputs.cycles == 'acados_reduced_recovery' || inputs.cycles == 'acados_reduced_fallback' }}
+    if: ${{ inputs.cycles == 'acados_hybrid' || inputs.cycles == 'acados_reduced_recovery' || inputs.cycles == 'acados_reduced_fallback' || inputs.cycles == 'acados_recovery_speed' }}
     needs: [prepare-seed, prepare-acados-stack]
     runs-on: ${{ inputs.runner_label }}
     timeout-minutes: 240
@@ -504,6 +504,9 @@ jobs:
             tests/shard1/test_acados_control_seed.py \
             tests/shard1/test_periodic_pulse_width.py::test_acados_ipopt_recovery_compatibility_reports_pulse_width_in_us \
             tests/shard1/test_periodic_pulse_width.py::test_acados_ipopt_recovery_cli_is_opt_in \
+            tests/shard1/test_periodic_pulse_width.py::test_acados_two_level_ipopt_recovery_keeps_radau3_seed_only \
+            tests/shard1/test_periodic_pulse_width.py::test_acados_two_level_recovery_cli_is_explicit \
+            tests/shard1/test_periodic_pulse_width.py::test_acados_irk_seed_audit_does_not_mutate_initial_guess \
             tests/shard1/test_periodic_pulse_width.py::test_acados_default_tolerance_falls_back_to_common_nlp_tolerance \
             tests/shard1/test_periodic_pulse_width.py::test_ipopt_inf_pr_is_restored_from_native_solver_stats \
             tests/shard1/test_periodic_pulse_width.py::test_acados_hybrid_recovery_diagnostics_survive_benchmark_serialization \
@@ -599,6 +602,143 @@ jobs:
           if [[ "${{ inputs.cycles }}" == "acados_reduced_fallback" ]]; then
             reduced_recovery_options+=(--acados-ipopt-fallback-advance)
           fi
+          if [[ "${{ inputs.cycles }}" == "acados_recovery_speed" ]]; then
+            if [[ "${{ inputs.crank_assistance_nm }}" != "signed:+0.15" ]]; then
+              echo "acados_recovery_speed requires the explicit resistive torque signed:+0.15 N.m." >&2
+              exit 2
+            fi
+            # Same generated ACADOS OCP and same runner for both cases.  The
+            # only changed restoration variable is the IPOPT transcription:
+            # R5 is the control, while R3 is allowed to seed ACADOS but can
+            # never certify or advance the physical RHO on its own.
+            checkpoint_two_cycles=""
+            if [[ "${{ inputs.acados_control_seed_source_run_id }}" != "" ]]; then
+              mapfile -t certified_trajectories < <(
+                find benchmark-acados-control-seed -type f \
+                  -name reduced-validated-prefix.npz -print
+              )
+              if [[ "${#certified_trajectories[@]}" -ne 1 ]]; then
+                echo "Expected one certified ACADOS trajectory for the RHO-430 ablation." >&2
+                exit 1
+              fi
+              python examples/fes_multibody/cycling/extract_rho_checkpoint.py \
+                --source "${certified_trajectories[0]}" \
+                --output acados-ipopt-hybrid-results/checkpoint-after-430-one-cycle.npz \
+                --completed-windows 430 \
+                --cycles-per-window 1
+              python examples/fes_multibody/cycling/extract_rho_checkpoint.py \
+                --source "${certified_trajectories[0]}" \
+                --output acados-ipopt-hybrid-results/checkpoint-after-430-two-cycles.npz \
+                --completed-windows 430 \
+                --cycles-per-window 2
+              common_seed_path=acados-ipopt-hybrid-results/checkpoint-after-430-one-cycle.npz
+              checkpoint_two_cycles=acados-ipopt-hybrid-results/checkpoint-after-430-two-cycles.npz
+              assisted_hot_start_options=(--disable-acados-assisted-hot-start)
+            fi
+
+            run_reduced_recovery_speed_case() {
+              local case_name="$1"
+              local seed_degree="$2"
+              local transfer_mode="$3"
+              local window_cycles="$4"
+              local seed_path="$5"
+              local case_dir="acados-ipopt-hybrid-results/$case_name"
+              local seed_options=()
+              mkdir -p "$case_dir"
+              if [[ "$seed_degree" == "3" ]]; then
+                seed_options=(
+                  --acados-ipopt-recovery-seed-collocation-degree 3
+                  --acados-ipopt-recovery-seed-max-iterations 200
+                )
+              fi
+              python examples/fes_multibody/cycling/cycling_fes_solver_comparison.py \
+                --solvers acados \
+                --objective fatigue \
+                --cycles-per-window "$window_cycles" \
+                --stimulations-per-cycle 30 \
+                --n-windows "${{ inputs.acados_option_rhos }}" \
+                --n-threads "$BENCHMARK_THREADS" \
+                --crank-assistance "${{ inputs.crank_assistance_nm }}" \
+                --first-node-wheel-q-slack 0 \
+                --terminal-wheel-q-slack "${{ inputs.terminal_wheel_q_slack }}" \
+                --mechanical-formulation reduced \
+                --experimental-reduced-acados \
+                --compact-rho-output \
+                --common-initial-solution "$seed_path" \
+                --common-initial-solution-recenter-first-node-bounds \
+                --adopt-common-initial-solution-warmup-cycles \
+                "${assisted_hot_start_options[@]}" \
+                --acados-disable-standard-ipopt-warmup \
+                --periodic-ipopt-refinement-ode-solver collocation \
+                --periodic-ipopt-refinement-collocation-degree 5 \
+                --periodic-ipopt-refinement-collocation-method radau \
+                --periodic-ipopt-refinement-iterations "${{ inputs.solver_max_iterations }}" \
+                --warmup-ipopt-linear-solver mumps \
+                --retry-failed-rho-without-advance \
+                --max-consecutive-failing 2 \
+                --acados-integrator-type IRK \
+                --acados-sim-stages 4 \
+                --acados-sim-steps 5 \
+                --acados-wheel-qdot-fast-bound-margin "${{ inputs.acados_reduced_fast_bound_margin }}" \
+                --acados-cyclical-transfer-mode "$transfer_mode" \
+                --acados-initial-irk-rollout \
+                --acados-max-iter 30 \
+                --acados-store-iterates \
+                --acados-maxiter-retries 1 \
+                --acados-maxiter-retry-iterations 70 \
+                --acados-ipopt-recovery \
+                --acados-ipopt-recovery-max-iterations "${{ inputs.solver_max_iterations }}" \
+                --acados-ipopt-recovery-collocation-degree 5 \
+                --acados-ipopt-recovery-irk-seed-audit \
+                --acados-ipopt-recovery-force-first-rho \
+                --ipopt-linear-solver mumps \
+                --receding-horizon-solution-output "$case_dir/validated-prefix.npz" \
+                --allow-partial-receding-horizon-solution-output \
+                --output-json "$case_dir/result.json" \
+                "${seed_options[@]}" \
+                2>&1 | tee "$case_dir/solver.log"
+            }
+
+            run_reduced_recovery_speed_case \
+              r5-extrapolate-control 5 extrapolate 1 "$common_seed_path"
+            run_reduced_recovery_speed_case \
+              r3-extrapolate-seed-r5-certifier 3 extrapolate 1 "$common_seed_path"
+            run_reduced_recovery_speed_case \
+              r5-repeat-control 5 repeat 1 "$common_seed_path"
+            if [[ "$checkpoint_two_cycles" != "" ]]; then
+              run_reduced_recovery_speed_case \
+                r5-extrapolate-two-cycle 5 extrapolate 2 "$checkpoint_two_cycles"
+            fi
+            jq -e --argjson requested "${{ inputs.acados_option_rhos }}" '
+              .configurations.acados.crank_torque_role == "resistive" and
+              .configurations.acados.constant_crank_torque == 0.15 and
+              .configurations.acados.max_acados_iterations == 30 and
+              .configurations.acados.acados_maxiter_retry_iterations == 70 and
+              .results[0].validated_cycles == $requested and
+              any(.results[0].acados_ipopt_recovery_summaries[];
+                  .forced_for_ci == true and
+                  .seed_injected == true and
+                  .acados_irk_seed_audit.diagnostic_only == true)
+            ' acados-ipopt-hybrid-results/r5-extrapolate-control/result.json
+            jq -e --argjson requested "${{ inputs.acados_option_rhos }}" '
+              .configurations.acados.crank_torque_role == "resistive" and
+              .configurations.acados.constant_crank_torque == 0.15 and
+              .configurations.acados.acados_ipopt_recovery_seed_collocation_degree == 3 and
+              .results[0].validated_cycles == $requested and
+              any(.results[0].acados_ipopt_recovery_summaries[];
+                  .forced_for_ci == true and
+                  .collocation_degree == 3 and
+                  .recovery_role == "seed_only" and
+                  .fallback_advanced == false and
+                  ((.seed_injected == false) or
+                   (.acados_irk_seed_audit.diagnostic_only == true))) and
+              all(.results[0].acados_ipopt_recovery_summaries[];
+                  if .recovery_role == "certifying_fallback_candidate"
+                  then .collocation_degree == 5
+                  else true
+                  end)
+            ' acados-ipopt-hybrid-results/r3-extrapolate-seed-r5-certifier/result.json
+          else
           python examples/fes_multibody/cycling/cycling_fes_solver_comparison.py \
             --solvers acados \
             --objective fatigue \
@@ -856,6 +996,7 @@ jobs:
               any(.results[0].control_homotopy_summaries[];
                   .accepted == true and .radius != null)
             ' acados-ipopt-hybrid-results/result.json
+          fi
           fi
 
       - name: Upload the hybrid gate logs and result

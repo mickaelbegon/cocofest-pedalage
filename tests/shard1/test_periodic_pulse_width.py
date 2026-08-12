@@ -976,9 +976,7 @@ def test_acados_ipopt_recovery_cli_is_opt_in():
     assert args.acados_initial_irk_rollout is True
     assert args.acados_failed_rho_phase_one_recovery is False
 
-    lazy_args = parser.parse_args(
-        ["--acados-failed-rho-phase-one-recovery"]
-    )
+    lazy_args = parser.parse_args(["--acados-failed-rho-phase-one-recovery"])
     comparison_lazy_args = comparison_example.build_cli().parse_args(
         ["--acados-failed-rho-phase-one-recovery"]
     )
@@ -991,6 +989,71 @@ def test_acados_ipopt_recovery_cli_is_opt_in():
     )
     assert fallback_args.acados_ipopt_fallback_advance is True
     assert comparison_fallback_args.acados_ipopt_fallback_advance is True
+
+
+def test_acados_two_level_ipopt_recovery_keeps_radau3_seed_only():
+    first = periodic_example.select_ipopt_recovery_stage(
+        recovery_attempt=1,
+        maximum_attempts=2,
+        seed_collocation_degree=3,
+        certifying_collocation_degree=5,
+        seed_max_iterations=200,
+        certifying_max_iterations=2000,
+    )
+    final = periodic_example.select_ipopt_recovery_stage(
+        recovery_attempt=2,
+        maximum_attempts=2,
+        seed_collocation_degree=3,
+        certifying_collocation_degree=5,
+        seed_max_iterations=200,
+        certifying_max_iterations=2000,
+    )
+
+    assert first == {
+        "final_attempt": False,
+        "collocation_degree": 3,
+        "max_iterations": 200,
+        "role": "seed_only",
+        "may_advance_as_fallback": False,
+    }
+    assert final == {
+        "final_attempt": True,
+        "collocation_degree": 5,
+        "max_iterations": 2000,
+        "role": "certifying_fallback_candidate",
+        "may_advance_as_fallback": True,
+    }
+
+
+def test_acados_two_level_recovery_cli_is_explicit():
+    args = periodic_example.build_argument_parser().parse_args(
+        [
+            "--acados-ipopt-recovery",
+            "--acados-ipopt-recovery-seed-collocation-degree",
+            "3",
+            "--acados-ipopt-recovery-seed-max-iterations",
+            "200",
+            "--acados-ipopt-recovery-irk-seed-audit",
+        ]
+    )
+
+    assert args.acados_ipopt_recovery_seed_collocation_degree == 3
+    assert args.acados_ipopt_recovery_seed_max_iterations == 200
+    assert args.acados_ipopt_recovery_irk_seed_audit is True
+    assert args.acados_ipopt_fallback_advance is False
+
+    comparison_args = comparison_example.build_cli().parse_args(
+        [
+            "--acados-ipopt-recovery-seed-collocation-degree",
+            "3",
+            "--acados-ipopt-recovery-seed-max-iterations",
+            "200",
+            "--acados-ipopt-recovery-irk-seed-audit",
+        ]
+    )
+    assert comparison_args.acados_ipopt_recovery_seed_collocation_degree == 3
+    assert comparison_args.acados_ipopt_recovery_seed_max_iterations == 200
+    assert comparison_args.acados_ipopt_recovery_irk_seed_audit is True
 
 
 def test_prepared_rho_checkpoint_cli_parses_ordered_milestones():
@@ -5409,6 +5472,24 @@ def test_warmup_cache_signature_is_independent_from_target_linear_solver(
     )
 
 
+def test_warmup_cache_signature_ignores_reduced_runtime_dynamics(tmp_path):
+    model_path = tmp_path / "model.bioMod"
+    model_path.write_text("version 4\n")
+    args = periodic_example.build_argument_parser().parse_args([])
+    cycling_info = {"turn_number": 1}
+    baseline = {"state_scaling": "full"}
+    with_runtime_object = {
+        **baseline,
+        "reduced_cycling_dynamics": object(),
+    }
+
+    assert periodic_example._warmup_cache_signature(
+        args, model_path, baseline, cycling_info
+    ) == periodic_example._warmup_cache_signature(
+        args, model_path, with_runtime_object, cycling_info
+    )
+
+
 def test_standard_warmup_conditions_ignore_target_active_set():
     baseline = {
         "pulse_width_active_set_mode": "none",
@@ -6676,6 +6757,19 @@ def test_github_acados_hybrid_gate_guards_inter_node_cadence():
         in hybrid_job
     )
     assert "exit 0" not in hybrid_job
+    assert "inputs.cycles == 'acados_recovery_speed'" in hybrid_job
+    assert '!= "signed:+0.15"' in hybrid_job
+    assert '.crank_torque_role == "resistive"' in hybrid_job
+    assert ".constant_crank_torque == 0.15" in hybrid_job
+    assert "--acados-max-iter 30" in hybrid_job
+    assert "--acados-maxiter-retry-iterations 70" in hybrid_job
+    assert "--acados-ipopt-recovery-seed-collocation-degree 3" in hybrid_job
+    assert "--acados-ipopt-recovery-irk-seed-audit" in hybrid_job
+    assert "r5-extrapolate-control" in hybrid_job
+    assert "r3-extrapolate-seed-r5-certifier" in hybrid_job
+    assert "r5-repeat-control" in hybrid_job
+    assert "r5-extrapolate-two-cycle" in hybrid_job
+    assert "extract_rho_checkpoint.py" in hybrid_job
 
 
 def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
@@ -6737,10 +6831,23 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert '.seed_source == "certified_target_solution"' in workflow
     assert ".results[0].nlp_validated_cycles == 1" in workflow
     assert ".results[0].mechanical_equivalence_audit.passes_physical_crank_velocity_bounds == true" in workflow
-    native_seed_consumer = workflow.split(
-        "--common-initial-solution acados-ipopt-hybrid-results/full-reference/native-full-seed.npz",
-        maxsplit=1,
-    )[1].split("--output-json acados-ipopt-hybrid-results/full-result.json", maxsplit=1)[0]
+    native_seed_marker = (
+        "--common-initial-solution "
+        "acados-ipopt-hybrid-results/full-reference/native-full-seed.npz"
+    )
+    native_seed_position = workflow.index(native_seed_marker)
+    native_seed_command_start = workflow.rfind(
+        "python examples/fes_multibody/cycling/cycling_fes_solver_comparison.py",
+        0,
+        native_seed_position,
+    )
+    native_seed_command_end = workflow.index(
+        "--output-json acados-ipopt-hybrid-results/full-result.json",
+        native_seed_position,
+    )
+    native_seed_consumer = workflow[
+        native_seed_command_start:native_seed_command_end
+    ]
     assert "--adopt-common-initial-solution-warmup-cycles" not in native_seed_consumer
     assert "--standard-warmup-seed .github/benchmark-seeds/legacy-resistive-0p22-warmup.npz" in native_seed_consumer
     assert "--disable-periodic-ipopt-refinement" in native_seed_consumer
@@ -10594,6 +10701,64 @@ def test_acados_irk_transfer_rollout_uses_scaled_variables_and_stage_data():
     np.testing.assert_allclose(simulator.settings[0][1], [0.5])
     np.testing.assert_allclose(simulator.settings[1][1], [1.0])
     assert summary["max_scaled_bound_violation_by_key"] == {"q": 0.0, "qdot": 0.0}
+    assert summary["max_trajectory_delta"] == {"q": 3.0, "qdot": 21.0}
+
+
+def test_acados_irk_seed_audit_does_not_mutate_initial_guess():
+    class Variables(dict):
+        def __init__(self, *args, shape, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.shape = shape
+
+    class FakeSimulator:
+        acados_sim = SimpleNamespace(dims=SimpleNamespace(nx=1, nu=1))
+
+        def set(self, *_):
+            pass
+
+        def simulate(self, *, x, u, p):
+            del p
+            return np.asarray(x) + np.asarray(u)
+
+        def get(self, field):
+            assert field == "time_tot"
+            return 0.001
+
+    states = Variables({"theta": SimpleNamespace(index=[0])}, shape=1)
+    controls = Variables({"u": SimpleNamespace(index=[0])}, shape=1)
+    theta = np.array([[0.0, 99.0, 99.0]])
+    nlp = SimpleNamespace(
+        x_init={"theta": SimpleNamespace(init=theta)},
+        u_init={"u": SimpleNamespace(init=np.array([[1.0, 2.0]]))},
+        x_bounds={
+            "theta": SimpleNamespace(
+                min=np.full((1, 3), -100.0), max=np.full((1, 3), 100.0)
+            )
+        },
+        states=states,
+        controls=controls,
+        x_scaling={"theta": SimpleNamespace(scaling=np.ones((1, 1)))},
+        u_scaling={"u": SimpleNamespace(scaling=np.ones((1, 1)))},
+        numerical_data_timeseries={},
+    )
+    nmpc = SimpleNamespace(
+        nlp=[nlp],
+        nodes_per_cycle=2,
+        control_nodes_per_cycle=2,
+        cycle_duration=1.0,
+        cycle_len=2,
+        _cocofest_acados_sim_solver=FakeSimulator(),
+    )
+
+    summary = periodic_example.rollout_transferred_cycle_acados_irk(
+        nmpc, start_node=0, apply_result=False
+    )
+
+    assert summary["applied"] is False
+    assert summary["diagnostic_only"] is True
+    assert summary["within_bound_guard"] is True
+    assert summary["max_trajectory_delta"] == {"theta": 98.0}
+    np.testing.assert_allclose(theta, [[0.0, 99.0, 99.0]])
 
 
 def test_initial_acados_irk_rollout_initializes_native_solver_without_solving():

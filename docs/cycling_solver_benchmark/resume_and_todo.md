@@ -733,6 +733,42 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     d'ensemble actif des premiers 35 cycles. Exiger que les quatre AUC et le
     coût exécuté restent dans une tolérance annoncée; ne pas borner le slew
     globalement avant cette ablation.
+29. [fait, run `31589712434`] Avec `+0.15 N.m` signé, donc résistif pour
+    `qdot < 0`, ACADOS reduced
+    certifie `660` RHO et produit un arrêt candidat de fatigue au RHO `661`.
+    Les `152` appels de recovery coûtent `316.4 s`; l'orchestration restante
+    coûte environ `158.8 s`. Après le RHO `450`, MINSTEP alterne presque un
+    cycle sur deux : traiter d'abord le transfert, pas la fatigue.
+30. [implémenté localement, CI à lancer] Instrumenter chaque sous-étape du
+    recovery et comparer un budget ACADOS adaptatif `30 + 70` avec R5 seul et
+    R3 seed-only. R3 ne possède jamais le droit d'avancer un RHO; R5 reste le
+    certifieur final. L'audit IRK diagnostique mesure l'écart sur tous les
+    nœuds sans modifier le seed. Les tests ciblés et la suite complète passent
+    localement (`351/351` plus `2/2` pour l'extracteur).
+    Le replay IPOPT isolé au checkpoint 430 est négatif pour R3 : infeasibility
+    `7.53e-2` avec 200 comme avec 2 000 itérations. R5 avec seulement 200
+    itérations atteint d'abord `4.95e-2`, mais ne certifie pas non plus; garder
+    2 000 pour le stage R5 final. La CI hybride doit accepter le rejet R3,
+    journaliser ce résultat, faire recertifier par ACADOS et n'appeler R5 que
+    si cette recertification échoue encore.
+31. [implémenté localement, CI à lancer] Extraire sans interpolation un
+    checkpoint un ou deux cycles depuis le préfixe certifié, puis comparer au
+    cycle 430 `extrapolate`, `repeat` et un horizon de deux cycles sur le même
+    runner. Utiliser le mode `cycles=acados_recovery_speed` et le run
+    `31589712434` comme `acados_control_seed_source_run_id`.
+32. [à faire après 30--31] Si R3 réduit réellement le mur recovery sans
+    dégrader la recertification IRK/ACADOS, conserver deux capsules IPOPT R3/R5
+    préconstruites. Sinon supprimer R3 du chemin online et ne le garder que
+    comme diagnostic de sensibilité de transcription.
+33. [à faire après l'ablation de transfert] Prototyper une capsule ACADOS de
+    faisabilité séparée, compilée une fois. Elle peut restaurer le primal mais
+    ne doit jamais certifier l'objectif de fatigue; la capsule d'optimalité
+    doit résoudre à nouveau le même RHO. Comparer ce chemin au simple
+    `SQP_WITH_FEASIBLE_QP` avant d'ajouter une nouvelle fonction objectif.
+34. [en cours] La campagne IPOPT/MadNLP R5 avec le même couple résistif signé
+    `+0.15 N.m`, run `31589698184`,
+    exécute encore les cas d'endurance. Ne pas conclure sur leur arrêt ni leur
+    coût avant la publication des artefacts complets.
 
 La question causale est maintenant resserrée : une seule projection au RHO 19
 ne suffit pas, mais la séquence 19--36 conserve le bassin franchissant le RHO

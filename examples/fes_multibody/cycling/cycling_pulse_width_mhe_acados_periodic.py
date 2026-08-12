@@ -2309,6 +2309,33 @@ def build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--acados-ipopt-recovery-seed-collocation-degree",
+        type=int,
+        default=None,
+        help=(
+            "Optional cheaper Radau degree used only before the final recovery "
+            "attempt. Its primal must be recertified by ACADOS and can never "
+            "advance a RHO as an IPOPT fallback."
+        ),
+    )
+    parser.add_argument(
+        "--acados-ipopt-recovery-seed-max-iterations",
+        type=int,
+        default=None,
+        help=(
+            "Optional IPOPT iteration cap for the seed-only recovery. The "
+            "certifying recovery keeps --acados-ipopt-recovery-max-iterations."
+        ),
+    )
+    parser.add_argument(
+        "--acados-ipopt-recovery-irk-seed-audit",
+        action="store_true",
+        help=(
+            "Before retrying ACADOS, compare each accepted IPOPT recovery seed "
+            "with a diagnostic-only rollout of the generated ACADOS IRK map."
+        ),
+    )
+    parser.add_argument(
         "--acados-ipopt-recovery-force-first-rho",
         action="store_true",
         help=(
@@ -3137,6 +3164,17 @@ def _target_independent_warmup_conditions(
     return warmup_conditions
 
 
+def _warmup_cacheable_conditions(simulation_conditions: dict) -> dict:
+    """Drop target-only runtime objects from the standard warmup signature."""
+
+    conditions = dict(simulation_conditions)
+    # The reduced mechanical surrogate is used by the periodic target OCP,
+    # not by the standard full-mechanics IPOPT bridge. Besides being target
+    # specific, it contains CasADi functions and is not JSON serializable.
+    conditions.pop("reduced_cycling_dynamics", None)
+    return conditions
+
+
 def _warmup_cache_signature(
     args: argparse.Namespace,
     model_path: Path,
@@ -3167,7 +3205,9 @@ def _warmup_cache_signature(
         "state_scaling": args.state_scaling,
         "pulse_width_scaling": args.pulse_width_scaling,
         "warmup_ipopt_linear_solver": _warmup_ipopt_linear_solver(args),
-        "simulation_conditions": simulation_conditions,
+        "simulation_conditions": _warmup_cacheable_conditions(
+            simulation_conditions
+        ),
         "cycling_info_keys": sorted(cycling_info.keys()),
         "sources": [
             _source_stamp(model_path),
@@ -10339,12 +10379,16 @@ def rollout_transferred_cycle_acados_irk(
     periodic_nmpc,
     max_allowed_bound_violation: float | None = None,
     start_node: int | None = None,
+    apply_result: bool = True,
 ) -> dict:
     """Roll out a trajectory suffix with the same generated IRK map as the OCP.
 
     ``start_node=None`` retains the historical transfer behavior (the appended
     cycle). Passing zero reconstructs the complete initial trajectory and is
-    used only to certify an ACADOS-native first SQP seed.
+    used only to certify an ACADOS-native first SQP seed. With
+    ``apply_result=False``, the IRK propagation is diagnostic: the returned
+    discrepancies and bound violations are measured without mutating the
+    initial guess.
     """
 
     nlp = periodic_nmpc.nlp[0]
@@ -10420,6 +10464,7 @@ def rollout_transferred_cycle_acados_irk(
     max_scaled_bound_violation_by_key = {}
     worst_bound_violation = None
     terminal_delta = {}
+    max_trajectory_delta = {}
     state_values = {}
     for key in nlp.states.keys():
         indexes = np.asarray(nlp.states[key].index).reshape((-1,)).tolist()
@@ -10453,11 +10498,15 @@ def rollout_transferred_cycle_acados_irk(
         terminal_delta[key] = float(
             np.max(np.abs(values[:, -1] - original_states[indexes, -1]))
         )
+        max_trajectory_delta[key] = float(
+            np.max(np.abs(values - original_states[indexes, :]))
+        )
 
-    applied = (
+    within_bound_guard = (
         max_allowed_bound_violation is None
         or max_bound_violation <= max_allowed_bound_violation
     )
+    applied = bool(apply_result and within_bound_guard)
     if applied:
         for key, values in state_values.items():
             nlp.x_init[key].init[:, :] = values
@@ -10467,12 +10516,15 @@ def rollout_transferred_cycle_acados_irk(
 
     return {
         "applied": applied,
+        "diagnostic_only": not apply_result,
+        "within_bound_guard": within_bound_guard,
         "start_node": start_node,
         "max_bound_violation": max_bound_violation,
         "max_bound_violation_by_key": max_bound_violation_by_key,
         "max_scaled_bound_violation_by_key": max_scaled_bound_violation_by_key,
         "worst_bound_violation": worst_bound_violation,
         "terminal_delta": terminal_delta,
+        "max_trajectory_delta": max_trajectory_delta,
         "simulator_built": simulator_built,
         "simulation_time_s": simulation_time_s,
         "interval_duration": interval_duration,
@@ -14017,17 +14069,35 @@ def run_periodic_ipopt_recovery(
             getattr(recovery_nmpc, "_cocofest_recovery_structure", None)
         ),
     }
+    recovery_start = perf_counter()
+    configure_start = perf_counter()
+    configure_wall_time_s = None
+    solve_start = None
     try:
         solver = configure_ipopt_solver(
             max_iterations=max_iterations,
             linear_solver=linear_solver,
             tolerance=tolerance,
         )
+        configure_wall_time_s = perf_counter() - configure_start
+        solve_start = perf_counter()
         solution = super(RecedingHorizonOptimization, recovery_nmpc).solve(
             solver=solver,
             warm_start=None,
         )
+        solve_call_wall_time_s = perf_counter() - solve_start
     except Exception as exc:
+        summary["timing"] = {
+            "configure_solver_wall_time_s": (
+                perf_counter() - configure_start
+                if configure_wall_time_s is None
+                else configure_wall_time_s
+            ),
+            "solve_call_wall_time_s": (
+                None if solve_start is None else perf_counter() - solve_start
+            ),
+            "total_wall_time_s": perf_counter() - recovery_start,
+        }
         summary["error"] = f"{type(exc).__name__}: {exc}"
         summary["traceback"] = traceback.format_exc()
         if echo:
@@ -14035,12 +14105,19 @@ def run_periodic_ipopt_recovery(
             print(summary["traceback"], end="")
         return None, summary
 
+    feasibility_start = perf_counter()
     populate_solution_inf_pr_from_solver_stats(solution, recovery_nmpc)
     feasibility = _solution_feasibility_summary(solution, tolerance)
     acceptance = periodic_refinement_acceptance(solution.status, feasibility)
+    feasibility_wall_time_s = perf_counter() - feasibility_start
     accepted = acceptance["accepted"]
     solver_time = getattr(solution, "solver_time_to_optimize", None)
     wall_time = getattr(solution, "real_time_to_optimize", None)
+    compatibility_start = perf_counter()
+    compatibility = solution_trace_compatibility_summary(
+        failed_target_solution, solution
+    )
+    compatibility_wall_time_s = perf_counter() - compatibility_start
     summary.update(
         {
             "status": int(solution.status),
@@ -14057,18 +14134,26 @@ def run_periodic_ipopt_recovery(
                 if accepted
                 else "rejected"
             ),
-            "compatibility_with_failed_target": solution_trace_compatibility_summary(
-                failed_target_solution, solution
-            ),
+            "compatibility_with_failed_target": compatibility,
         }
     )
     if target_solver == "acados":
         summary["compatibility_with_failed_acados"] = summary[
             "compatibility_with_failed_target"
         ]
+    injection_start = perf_counter()
     if accepted:
         apply_solution_directly_to_periodic_nmpc_initial_guess(target_nmpc, solution)
         summary["seed_injected"] = True
+    injection_wall_time_s = perf_counter() - injection_start
+    summary["timing"] = {
+        "configure_solver_wall_time_s": configure_wall_time_s,
+        "solve_call_wall_time_s": solve_call_wall_time_s,
+        "feasibility_audit_wall_time_s": feasibility_wall_time_s,
+        "compatibility_audit_wall_time_s": compatibility_wall_time_s,
+        "seed_injection_wall_time_s": injection_wall_time_s,
+        "total_wall_time_s": perf_counter() - recovery_start,
+    }
     if echo:
         print(
             f"{target_solver}_ipopt_recovery: "
@@ -14078,6 +14163,40 @@ def run_periodic_ipopt_recovery(
             f"solver_time_s={summary['solver_time_s']}"
         )
     return solution, summary
+
+
+def select_ipopt_recovery_stage(
+    *,
+    recovery_attempt: int,
+    maximum_attempts: int,
+    seed_collocation_degree: int,
+    certifying_collocation_degree: int,
+    seed_max_iterations: int,
+    certifying_max_iterations: int,
+) -> dict[str, int | str | bool]:
+    """Keep an approximate restoration distinct from the final certificate."""
+
+    if recovery_attempt < 1 or maximum_attempts < 1:
+        raise ValueError("Recovery attempt indices and budgets must be positive.")
+    final_attempt = recovery_attempt >= maximum_attempts
+    selected_degree = int(
+        certifying_collocation_degree
+        if final_attempt
+        else seed_collocation_degree
+    )
+    return {
+        "final_attempt": final_attempt,
+        "collocation_degree": selected_degree,
+        "max_iterations": int(
+            certifying_max_iterations if final_attempt else seed_max_iterations
+        ),
+        "role": (
+            "certifying_fallback_candidate" if final_attempt else "seed_only"
+        ),
+        "may_advance_as_fallback": bool(
+            final_attempt and selected_degree == int(certifying_collocation_degree)
+        ),
+    }
 
 
 def apply_control_regularization_targets(periodic_nmpc, controls) -> list[str]:
@@ -15021,6 +15140,23 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         if args.acados_ipopt_recovery_collocation_degree < 1:
             raise ValueError(
                 "--acados-ipopt-recovery-collocation-degree must be >= 1."
+            )
+        seed_degree = args.acados_ipopt_recovery_seed_collocation_degree
+        if seed_degree is not None and seed_degree < 1:
+            raise ValueError(
+                "--acados-ipopt-recovery-seed-collocation-degree must be >= 1."
+            )
+        seed_iterations = args.acados_ipopt_recovery_seed_max_iterations
+        if seed_iterations is not None and seed_iterations < 1:
+            raise ValueError(
+                "--acados-ipopt-recovery-seed-max-iterations must be >= 1."
+            )
+        if (
+            args.acados_ipopt_recovery_irk_seed_audit
+            and args.solver != "acados"
+        ):
+            raise ValueError(
+                "--acados-ipopt-recovery-irk-seed-audit requires ACADOS."
             )
     if args.acados_ipopt_recovery_force_first_rho and not args.acados_ipopt_recovery:
         raise ValueError(
@@ -17340,31 +17476,59 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         if args.acados_ipopt_recovery
         else getattr(args, "nlp_ipopt_recovery_collocation_degree", 5)
     )
+    ipopt_recovery_seed_collocation_degree = (
+        getattr(args, "acados_ipopt_recovery_seed_collocation_degree", None)
+        if args.acados_ipopt_recovery
+        else None
+    )
+    if ipopt_recovery_seed_collocation_degree is None:
+        ipopt_recovery_seed_collocation_degree = ipopt_recovery_collocation_degree
+    ipopt_recovery_seed_max_iterations = (
+        getattr(args, "acados_ipopt_recovery_seed_max_iterations", None)
+        if args.acados_ipopt_recovery
+        else None
+    )
+    if ipopt_recovery_seed_max_iterations is None:
+        ipopt_recovery_seed_max_iterations = ipopt_recovery_max_iterations
     ipopt_recovery_nmpc = None
+    ipopt_recovery_nmpcs = {}
     if ipopt_recovery_enabled:
         # Use the same physical full or reduced OCP as the target solver, but
         # a Radau CasADi/IPOPT transcription for a robust restoration solve.
         # Per-window bounds, targets and the shifted primal are copied
         # immediately before each recovery attempt below.
         recovery_mhe_info = {**mhe_info, "use_sx": True}
-        ipopt_recovery_nmpc = build_periodic_ipopt_refinement_nmpc(
-            source_nmpc=nmpc,
-            model_path=model_path,
-            stim_time=stim_time,
-            mhe_info=recovery_mhe_info,
-            cycling_info=cycling_info,
-            simulation_conditions=nmpc_simulation_conditions,
-            model_formulation=args.model_formulation,
-            refinement_ode_solver=OdeSolver.COLLOCATION(
-                polynomial_degree=ipopt_recovery_collocation_degree,
-                method="radau",
-            ),
-        )
+        for recovery_degree in sorted(
+            {
+                int(ipopt_recovery_seed_collocation_degree),
+                int(ipopt_recovery_collocation_degree),
+            }
+        ):
+            ipopt_recovery_nmpcs[recovery_degree] = (
+                build_periodic_ipopt_refinement_nmpc(
+                    source_nmpc=nmpc,
+                    model_path=model_path,
+                    stim_time=stim_time,
+                    mhe_info=recovery_mhe_info,
+                    cycling_info=cycling_info,
+                    simulation_conditions=nmpc_simulation_conditions,
+                    model_formulation=args.model_formulation,
+                    refinement_ode_solver=OdeSolver.COLLOCATION(
+                        polynomial_degree=recovery_degree,
+                        method="radau",
+                    ),
+                )
+            )
+        ipopt_recovery_nmpc = ipopt_recovery_nmpcs[
+            int(ipopt_recovery_collocation_degree)
+        ]
         if echo:
             print(
                 f"{args.solver}_ipopt_recovery: enabled "
-                f"(Radau-{ipopt_recovery_collocation_degree}, "
-                f"max_iterations={ipopt_recovery_max_iterations})"
+                f"(seed=Radau-{ipopt_recovery_seed_collocation_degree}/"
+                f"{ipopt_recovery_seed_max_iterations} iterations, "
+                f"certifier=Radau-{ipopt_recovery_collocation_degree}/"
+                f"{ipopt_recovery_max_iterations} iterations)"
             )
 
     acados_window_diagnostics = []
@@ -17650,12 +17814,37 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             if can_attempt_recovery:
                 recovery_attempt += 1
                 recovery_attempts_by_target_rho[target_rho] = recovery_attempt
+                recovery_stage = select_ipopt_recovery_stage(
+                    recovery_attempt=recovery_attempt,
+                    maximum_attempts=args.max_consecutive_failing,
+                    seed_collocation_degree=(
+                        ipopt_recovery_seed_collocation_degree
+                    ),
+                    certifying_collocation_degree=(
+                        ipopt_recovery_collocation_degree
+                    ),
+                    seed_max_iterations=ipopt_recovery_seed_max_iterations,
+                    certifying_max_iterations=ipopt_recovery_max_iterations,
+                )
+                recovery_degree = int(recovery_stage["collocation_degree"])
+                recovery_iteration_budget = int(recovery_stage["max_iterations"])
+                active_ipopt_recovery_nmpc = ipopt_recovery_nmpcs[recovery_degree]
                 # Freeze this exact physical RHO before restoring it.  In
                 # particular, do not use an earlier IPOPT bound/target after
                 # the ACADOS transfer has advanced its absolute wheel angle.
-                _copy_periodic_runtime_settings(self, ipopt_recovery_nmpc)
-                _copy_initial_guesses_and_bounds(self, ipopt_recovery_nmpc)
-                _copy_objective_targets(self, ipopt_recovery_nmpc)
+                recovery_preparation_start = perf_counter()
+                stage_start = perf_counter()
+                _copy_periodic_runtime_settings(self, active_ipopt_recovery_nmpc)
+                runtime_settings_wall_time_s = perf_counter() - stage_start
+                stage_start = perf_counter()
+                _copy_initial_guesses_and_bounds(self, active_ipopt_recovery_nmpc)
+                primal_and_bounds_wall_time_s = perf_counter() - stage_start
+                stage_start = perf_counter()
+                _copy_objective_targets(self, active_ipopt_recovery_nmpc)
+                objective_targets_wall_time_s = perf_counter() - stage_start
+                recovery_preparation_total_wall_time_s = (
+                    perf_counter() - recovery_preparation_start
+                )
                 recovery_seed_source = "prepared_target_rho_primal"
                 if (
                     forced_recovery
@@ -17670,19 +17859,19 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                     # wiring without asking IPOPT to repair an unrelated,
                     # known-bad reduced-to-full bridge.
                     apply_solution_directly_to_periodic_nmpc_initial_guess(
-                        ipopt_recovery_nmpc, solution
+                        active_ipopt_recovery_nmpc, solution
                     )
-                    ipopt_recovery_nmpc._correct_init_guess_to_fit_bounds(
+                    active_ipopt_recovery_nmpc._correct_init_guess_to_fit_bounds(
                         corrected_input="states"
                     )
-                    ipopt_recovery_nmpc._correct_init_guess_to_fit_bounds(
+                    active_ipopt_recovery_nmpc._correct_init_guess_to_fit_bounds(
                         corrected_input="controls"
                     )
                     recovery_seed_source = "certified_target_solution"
                 recovery_solution, recovery_summary = run_periodic_ipopt_recovery(
-                    ipopt_recovery_nmpc,
+                    active_ipopt_recovery_nmpc,
                     self,
-                    max_iterations=ipopt_recovery_max_iterations,
+                    max_iterations=recovery_iteration_budget,
                     tolerance=window_feasibility_tolerance,
                     linear_solver=args.ipopt_linear_solver,
                     failed_target_solution=solution,
@@ -17696,24 +17885,63 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                         "attempt_window": int(self.total_optimization_run) + 1,
                         "target_rho": target_rho,
                         "recovery_attempt": recovery_attempt,
-                        "collocation_degree": ipopt_recovery_collocation_degree,
+                        "collocation_degree": recovery_degree,
+                        "recovery_role": recovery_stage["role"],
                         "target_failed_status": int(solution.status),
                         "target_failed_feasibility": dict(feasibility),
                         "forced_for_ci": forced_recovery,
+                        "preparation_timing": {
+                            "runtime_settings_wall_time_s": (
+                                runtime_settings_wall_time_s
+                            ),
+                            "primal_and_bounds_wall_time_s": (
+                                primal_and_bounds_wall_time_s
+                            ),
+                            "objective_targets_wall_time_s": (
+                                objective_targets_wall_time_s
+                            ),
+                            "total_wall_time_s": (
+                                recovery_preparation_total_wall_time_s
+                            ),
+                        },
                     }
                 )
                 if args.solver == "acados":
                     recovery_summary["acados_failed_status"] = int(solution.status)
                     recovery_summary["acados_failed_feasibility"] = dict(feasibility)
                 if recovery_summary["seed_injected"]:
+                    if (
+                        args.solver == "acados"
+                        and getattr(
+                            args, "acados_ipopt_recovery_irk_seed_audit", False
+                        )
+                    ):
+                        irk_audit_start = perf_counter()
+                        recovery_summary["acados_irk_seed_audit"] = (
+                            rollout_transferred_cycle_acados_irk(
+                                self,
+                                max_allowed_bound_violation=(
+                                    args.acados_transfer_rollout_max_bound_violation
+                                ),
+                                start_node=0,
+                                apply_result=False,
+                            )
+                        )
+                        recovery_summary["acados_irk_seed_audit"][
+                            "wall_time_s"
+                        ] = perf_counter() - irk_audit_start
                     # ACADOS keeps explicit SQP/QP memory, whereas the CasADi
                     # NLP interfaces reconstruct their solve from x_init.
                     # In both cases the target solver must certify the injected
                     # primal before the physical RHO advances.
+                    reset_start = perf_counter()
                     recovery_summary["target_solver_reset"] = bool(
                         reset_acados_solver_memory(self)
                         if args.solver == "acados"
                         else False
+                    )
+                    recovery_summary["target_solver_reset_wall_time_s"] = (
+                        perf_counter() - reset_start
                     )
                     if args.solver == "acados":
                         recovery_summary["acados_solver_reset"] = recovery_summary[
@@ -17723,7 +17951,7 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                 ipopt_recovery_summaries.append(recovery_summary)
                 fallback_eligible = bool(
                     args.acados_ipopt_fallback_advance
-                    and recovery_attempt >= args.max_consecutive_failing
+                    and recovery_stage["may_advance_as_fallback"]
                     and recovery_solution is not None
                     and recovery_summary.get("quality") == "converged"
                     and _rho_solution_is_certified(
@@ -19311,6 +19539,17 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                     bool(item.get("fallback_advanced"))
                     for item in ipopt_recovery_summaries
                 ),
+                "seed_only_attempt_count": sum(
+                    item.get("recovery_role") == "seed_only"
+                    for item in ipopt_recovery_summaries
+                ),
+                "certifying_attempt_count": sum(
+                    item.get("recovery_role") == "certifying_fallback_candidate"
+                    for item in ipopt_recovery_summaries
+                ),
+                "recovery_wall_time_s": float(
+                    sum(item.get("wall_time_s") or 0.0 for item in ipopt_recovery_summaries)
+                ),
             }
         elif getattr(args, "nlp_ipopt_recovery", False):
             summary["nlp_ipopt_recovery"] = {
@@ -19418,6 +19657,17 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                 "fallback_advanced_count": sum(
                     bool(item.get("fallback_advanced"))
                     for item in ipopt_recovery_summaries
+                ),
+                "seed_only_attempt_count": sum(
+                    item.get("recovery_role") == "seed_only"
+                    for item in ipopt_recovery_summaries
+                ),
+                "certifying_attempt_count": sum(
+                    item.get("recovery_role") == "certifying_fallback_candidate"
+                    for item in ipopt_recovery_summaries
+                ),
+                "recovery_wall_time_s": float(
+                    sum(item.get("wall_time_s") or 0.0 for item in ipopt_recovery_summaries)
                 ),
             }
         elif getattr(args, "nlp_ipopt_recovery", False):
@@ -19535,6 +19785,17 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             "fallback_advanced_count": sum(
                 bool(item.get("fallback_advanced"))
                 for item in ipopt_recovery_summaries
+            ),
+            "seed_only_attempt_count": sum(
+                item.get("recovery_role") == "seed_only"
+                for item in ipopt_recovery_summaries
+            ),
+            "certifying_attempt_count": sum(
+                item.get("recovery_role") == "certifying_fallback_candidate"
+                for item in ipopt_recovery_summaries
+            ),
+            "recovery_wall_time_s": float(
+                sum(item.get("wall_time_s") or 0.0 for item in ipopt_recovery_summaries)
             ),
         }
     elif getattr(args, "nlp_ipopt_recovery", False):

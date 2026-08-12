@@ -46,6 +46,7 @@ capacité musculaire :
 | `radau5_100` | IPOPT/MUMPS, MadNLP/MUMPS et FATROP, chacun en full et reduced, Radau 5, 100 RHO | certification stricte des 100 RHO; fonctions interprétées pour isoler l'effet du degré |
 | `radau35_comparison` | IPOPT/MUMPS et MadNLP/MUMPS reduced, SX et compilés, Radau 3 puis Radau 5 sur le même runner | comparaison longue appariée, par défaut 300 RHO; chaque degré doit certifier tout son horizon |
 | `acados_reduced_100` | ACADOS SQP-IRK reduced, 100 RHO, après un seed ACADOS-native | résultat sérialisé et audité, y compris si la chaîne s'arrête avant 100 |
+| `acados_recovery_speed` | ACADOS reduced, budget adaptatif `30 + 70`, recovery R5 puis R3 seed-only, transferts `extrapolate`/`repeat` et horizon de deux cycles | ablation séquentielle sur le même runner; avec un artefact source, reprise au cycle 430 |
 | `fatigue_endurance` | IPOPT, MadNLP/MUMPS et FATROP reduced, SX et compilés, Radau 3; ACADOS SQP-IRK full avec garde rapide `2.60` et Phase-I mécanique | horizon atteint ou arrêt candidat de fatigue après deux fenêtres non certifiées consécutives |
 | `fatigue_endurance_radau5` | IPOPT/MUMPS et MadNLP/MUMPS reduced, SX et compilés, Radau 5 | même contrat d'endurance, afin de vérifier que le stop MadNLP R3 n'est pas un artefact de transcription |
 
@@ -1387,6 +1388,70 @@ alors que le RHO repart d'un état certifié à chaque cycle. Avant de qualifier
 ACADOS de référence de production, il faut rejouer les mêmes PW avec un DOP853
 full réinitialisé à chaque RHO et dans la mécanique reduced, puis comparer coût,
 AUC et fatigue des quatre muscles.
+
+### 6.2.1 Coût du recovery et rôle limité de Radau-3
+
+La campagne ACADOS reduced avec couple signé `+0.15 N.m`, donc résistif pour
+la rotation attendue `qdot < 0`,
+[31589712434](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/31589712434)
+certifie `660` RHO et s'arrête après deux échecs du RHO `661`. L'arrêt est
+classé `fatigue_limited_candidate`; il constitue un résultat d'endurance et
+non une erreur d'infrastructure. La boucle RHO coûte `784.8 s`, soit
+`1.189 s/RHO`, alors que les appels ACADOS acceptés restent rapides
+(`0.301 s` en médiane et `0.641 s` au P90).
+
+| Poste après construction | Temps | Part de la boucle |
+|---|---:|---:|
+| ACADOS, appels certifiés | `188.3 s` | `24.0 %` |
+| ACADOS, appels échoués | `121.2 s` | `15.4 %` |
+| Recovery IPOPT/Radau-5 | `316.4 s` | `40.3 %` |
+| Transfert, copies, audits et orchestration | `158.8 s` | `20.2 %` |
+
+Les `152` appels IPOPT concernent `128` RHO distincts. Après le RHO `450`,
+`ACADOS_MINSTEP` apparaît presque un cycle sur deux. Cette alternance n'est
+pas compatible avec une dégradation physiologique monotone; elle désigne
+d'abord le transfert cyclique et la mémoire SQP/QP comme causes numériques.
+Les recoveries après `MAXITER` sont plus coûteux et déclenchent les `23`
+avancements hybrides, tandis que les `104` recoveries après `MINSTEP` sont
+recertifiés par ACADOS sans fallback.
+
+Radau-3 n'est donc introduit que comme restauration approximative. L'erreur
+isolée déjà mesurée sur le calcium périodique vaut environ `6.386 %` en R3,
+contre `0.0173 %` en R5. Le nouveau contrat impose :
+
+1. premier échec : IPOPT/R3 produit éventuellement un primal rapide;
+2. ce primal est comparé, sans mutation, au rollout de la carte IRK générée;
+3. ACADOS doit recertifier le même RHO;
+4. après un second échec, IPOPT/R5 est le seul fallback autorisé à certifier
+   et avancer le RHO.
+
+Le JSON enregistre désormais séparément la configuration IPOPT, le solve,
+l'audit de faisabilité, la compatibilité, l'injection, le reset ACADOS et les
+écarts IRK maximaux sur toute la trajectoire. Le mode
+`cycles=acados_recovery_speed` compare sur le même runner R5/extrapolation,
+R3-seed/extrapolation, R5/répétition et, si un préfixe certifié est fourni, un
+horizon de deux cycles extrait après le cycle 430. L'extracteur ne fait aucune
+interpolation : il conserve exactement les `31` états nodaux et `30` PW par
+cycle du préfixe certifié.
+
+Le smoke local isolé au checkpoint 430 constitue déjà un signal négatif pour
+R3. Avec 200 itérations, deux essais R3 restent à une infeasibility de
+`7.53e-2` (`109` et `128` itérations). Porter le budget à 2 000 ne change pas
+le bassin : IPOPT s'arrête après `178` itérations à `7.53e-2`. Le contrôle R5
+à 200 itérations n'est pas encore suffisant non plus (`4.95e-2` au meilleur
+premier essai), ce qui confirme que le certifieur R5 doit garder son budget de
+2 000. Ce test local ne possède pas la capsule ACADOS et utilise un profil
+reduced local ancien; la décision finale dépend donc encore de l'ablation
+Linux exacte. Le gate accepte explicitement que R3 soit rejeté, exige ensuite
+une recertification ACADOS et, seulement si celle-ci échoue encore, passe au
+certifieur R5. Tout fallback R3 reste interdit.
+
+Une capsule ACADOS de faisabilité séparée reste une étape ultérieure. Elle ne
+sera construite qu'après cette ablation : changer simultanément la
+transcription R3/R5, le transfert et l'objectif de la capsule empêcherait
+d'attribuer le gain. Sa solution devra rester un seed; seule la capsule
+fatigue-optimalité pourra certifier le RHO, sauf fallback R5 explicitement
+étiqueté.
 
 ### 6.3 Comparaison des contrôles reduced sur 145 RHO
 
