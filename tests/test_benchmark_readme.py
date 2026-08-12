@@ -130,3 +130,22 @@ def test_acados_hybrid_workflow_stays_below_github_expression_limit():
     assert "--acados-forced-iteration-cap-rhos" in dropout_script
     assert "--acados-forced-iteration-cap" in dropout_script
     assert "dropout-summary.json" in dropout_script
+
+
+def test_workflow_dispatch_respects_github_input_limit():
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "cycling_solver_benchmark_linux.yml"
+    ).read_text(encoding="utf-8")
+    dispatch_inputs = workflow.split("    inputs:\n", maxsplit=1)[1].split(
+        "\npermissions:", maxsplit=1
+    )[0]
+    input_names = re.findall(r"^      ([a-z][a-z0-9_]*):$", dispatch_inputs, re.MULTILINE)
+
+    assert len(input_names) <= 25
+    assert "acados_dropout_rhos" not in input_names
+    assert "acados_dropout_followup_rhos" not in input_names
+    assert 'ACADOS_DROPOUT_RHOS: "100,150,430"' in workflow
+    assert 'ACADOS_DROPOUT_FOLLOWUP_RHOS: "30"' in workflow

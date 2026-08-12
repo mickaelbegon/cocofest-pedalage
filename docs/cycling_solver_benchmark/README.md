@@ -370,9 +370,10 @@ gh workflow run cycling_solver_benchmark_linux.yml \
 gh workflow run cycling_solver_benchmark_linux.yml \
   --ref codex/full-horizon-homotopy \
   -f cycles=acados_dropout \
-  -f crank_assistance_nm=signed:+0.15 \
-  -f acados_dropout_rhos=100,150,430 \
-  -f acados_dropout_followup_rhos=30
+  -f crank_assistance_nm=signed:+0.15
+
+# Les interruptions sont figées aux RHO 100, 150 et 430, puis poursuivies
+# durant 30 RHO pour rendre les campagnes directement comparables.
 
 # Rejouer exactement le seed Intel du run 150 sur un nouveau runner
 gh workflow run cycling_solver_benchmark_linux.yml \

@@ -79,16 +79,6 @@ on:
         required: true
         default: "5"
         type: string
-      acados_dropout_rhos:
-        description: Increasing physical RHO indices receiving a forced first-attempt ACADOS iteration cap
-        required: true
-        default: "100,150,430"
-        type: string
-      acados_dropout_followup_rhos:
-        description: Certified RHO cycles continued after the final forced interruption
-        required: true
-        default: "30"
-        type: string
       refined_collocation_validation:
         description: Run reduced IPOPT and MadNLP with Radau degrees 4, 5, and 6 to audit the stiff calcium transcription
         required: true
@@ -157,6 +147,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  ACADOS_DROPOUT_RHOS: "100,150,430"
+  ACADOS_DROPOUT_FOLLOWUP_RHOS: "30"
   CASADI_VERSION: "3.7.2"
   CASADI_COMMIT: f959d3175a444d763e4eda4aece48f4c5f4a6f90
   # Same 3.7.2 version, with the post-release libMad ABI integration.
@@ -631,8 +623,8 @@ jobs:
               "${{ inputs.terminal_wheel_q_slack }}" \
               "${{ inputs.solver_max_iterations }}" \
               "${{ inputs.acados_reduced_fast_bound_margin }}" \
-              "${{ inputs.acados_dropout_rhos }}" \
-              "${{ inputs.acados_dropout_followup_rhos }}"
+              "$ACADOS_DROPOUT_RHOS" \
+              "$ACADOS_DROPOUT_FOLLOWUP_RHOS"
           elif [[ "${{ inputs.cycles }}" == "acados_recovery_speed" ]]; then
             if [[ "${{ inputs.crank_assistance_nm }}" != "signed:+0.15" ]]; then
               echo "acados_recovery_speed requires the explicit resistive torque signed:+0.15 N.m." >&2
