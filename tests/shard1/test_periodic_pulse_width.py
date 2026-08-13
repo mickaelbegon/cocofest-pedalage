@@ -4351,9 +4351,10 @@ def test_terminal_wheel_qdot_continuation_tightens_only_terminal_bounds(
     sync_calls = []
     nmpc = SimpleNamespace(
         # Reproduce the initialization-order alias observed in Linux CI: the
-        # reduced bounds are authoritative even when this cached key is stale.
+        # reduced bounds are authoritative even when both cached mechanical
+        # metadata fields still describe full q/qdot mechanics.
         velocity_state_key="qdot",
-        wheel_state_index=0,
+        wheel_state_index=2,
         nlp=[SimpleNamespace(x_bounds={"omega": bounds})],
         _sync_acados_state_bounds=lambda: sync_calls.append(True),
     )

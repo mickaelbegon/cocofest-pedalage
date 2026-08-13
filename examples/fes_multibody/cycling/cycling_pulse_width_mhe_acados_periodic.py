@@ -6205,11 +6205,14 @@ def set_terminal_wheel_qdot_bound_margin(
     # explicit scalar ``omega`` block unambiguously identifies the reduced
     # formulation for this continuation.
     velocity_key = "omega" if "omega" in x_bounds else None
-    wheel_index = int(getattr(periodic_nmpc, "wheel_state_index", 0))
     if velocity_key is None:
         raise ValueError(
             "Terminal wheel-velocity continuation requires reduced omega mechanics."
         )
+    # The reduced omega block is scalar.  ``wheel_state_index`` can be stale
+    # for the same initialization-order reason as ``velocity_state_key`` and
+    # still contain the full-model crank coordinate (2).
+    wheel_index = 0
     bounds = x_bounds[velocity_key]
     if bounds.min.shape[1] < 3 or bounds.max.shape[1] < 3:
         raise ValueError("Omega bounds require first, path and terminal columns.")
