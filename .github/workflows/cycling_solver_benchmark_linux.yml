@@ -1793,7 +1793,6 @@ jobs:
               --acados-sim-steps "$sim_steps" \
               --acados-newton-iter "$newton_iter" \
               --acados-stationarity-tolerance "$stationarity" \
-              --acados-diagnostics \
               --codegen-tag "ci-${variant}-${mechanics}" \
               --compact-rho-output \
               --print-traces \
