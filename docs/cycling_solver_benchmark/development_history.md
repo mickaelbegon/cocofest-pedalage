@@ -5555,3 +5555,73 @@ verbose. L'audit mécanique dense ne relève aucune violation de cadence ou de
 configuration. Ce résultat promeut le profil silencieux reduced/IRK/SQP avec
 borne terminale absolue `omega = -2*pi +/- 0.3 rad/s` comme chemin online de
 référence.
+
+## 41. Audit du warm-start dual et de l'hystérésis de recrutement (13 août 2026)
+
+L'interface MadNLP de la branche Bioptim épinglée possède bien les tampons
+`lam_g` et `lam_x`. L'appel générique les transmet à CasADi sous les noms
+`lam_g0` et `lam_x0`. Cela prouve que Cocofest peut **soumettre** des
+multiplicateurs, mais pas que le runtime `madnlp_c` les utilise.
+
+Un test discriminant a résolu le même petit NLP avec `max_iter=1`, le même
+primal initial et trois initialisations duales : zéro, `+/-1e6`, et signes
+inversés. Avec CasADi `3.8.0` et le runtime macOS installé, le premier pas, les
+multiplicateurs retournés, le résidu dual et le nombre d'itérations sont
+identiques, avec ou sans `dual_initialized=true`. Sur le test convergent, les
+quatre combinaisons avec ou sans `dual_initialized` et `mu_init` prennent
+toutes 23 itérations. Le runtime ignore donc effectivement `lam_g0/lam_x0`
+dans cette configuration. Le champ Cocofest `applied` signifie seulement
+« copié dans l'interface »; il ne prouve pas la consommation par MadNLP.
+
+Un **warm-start dual MadNLP réel** exige les quatre propriétés suivantes :
+
+1. MadNLP restitue les multiplicateurs de contraintes et de bornes du RHO
+   certifié;
+2. Cocofest les réordonne comme la primale phase-alignée, y compris les blocs
+   de collocation et les bornes terminales mobiles;
+3. libMad initialise effectivement le système primal-dual avec ces valeurs et
+   expose une option/barrière compatible;
+4. un test `max_iter=1` montre qu'une perturbation de `lam_g0/lam_x0` modifie
+   le premier pas, puis une ablation RHO montre un gain de P90 sans perte de
+   robustesse.
+
+La seconde analyse porte sur les PW certifiées de 100 RHO dont l'artefact
+enregistre un couple de pédalier constant signé `+0.15 N.m`, soit 12 000
+valeurs par solveur. Une classification de Schmitt avec
+`delta_off=2 us` et `delta_on=5 us` ne modifie que 5 classifications IPOPT et
+2 classifications MadNLP. Elle réduit les changements d'état du Biceps de
+170 à 168 pour IPOPT et de 122 à 118 pour MadNLP; les autres muscles ne
+changent pratiquement pas. Les sauts restants atteignent `468.6 us` et
+correspondent à de vrais déplacements de la phase recrutée, non à du bruit
+autour de `pd0`. L'hystérésis est donc retenue comme garde-fou du prédicteur,
+pas comme source principale d'accélération ni comme contrainte permanente.
+
+Le prédicteur advanced-step proposé traite un RHO comme le NLP paramétrique
+`min_z f(z,p)` sous `c(z,p)=0`, où `p` contient au minimum l'état initial de
+Ding, l'état mécanique initial et les bornes terminales absolues. Pour un
+ensemble actif fixé, la sensibilité est obtenue par
+
+$$
+\begin{bmatrix}
+\nabla_{zz}^2 L & J_A^T \\
+J_A & 0
+\end{bmatrix}
+\begin{bmatrix}
+\Delta z \\
+\Delta \lambda_A
+\end{bmatrix}
+=-
+\begin{bmatrix}
+\nabla_{zp}^2 L \\
+\partial c_A/\partial p
+\end{bmatrix}
+\Delta p.
+$$
+
+Le couple primal-dual prédit est ensuite limité par une trust region, projeté
+sur les bornes physiques et audité avant le correcteur. Toute projection ou
+Phase I qui modifie matériellement la primale invalide les multiplicateurs.
+Le calcul du RHO suivant peut être réalisé pendant l'exécution du cycle
+courant; c'est la composante *advanced-step NMPC*. Même sans entrée duale
+MadNLP fonctionnelle, la partie primale du prédicteur reste exploitable, et
+les multiplicateurs MadNLP sortants peuvent servir au calcul de sensibilité.

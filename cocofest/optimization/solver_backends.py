@@ -231,10 +231,10 @@ def configure_nlp_solver(
             else max(1, min(int(print_level), MADNLP_QUIET_PRINT_LEVEL))
         )
         solver.set_option_unsafe(madnlp_print_level, "print_level")
-        # The pinned madnlp_c runtime rejects both ``dual_initialized`` and
-        # ``mu_init``.  The reliable hot start is therefore the shifted,
-        # projected primal trajectory supplied by Cocofest, without a
-        # solver-specific barrier or multiplier initialization.
+        # The audited madnlp_c runtimes either reject or silently ignore
+        # ``dual_initialized``/``mu_init`` and lam_g0/lam_x0. The reliable hot
+        # start is therefore the shifted, projected primal trajectory supplied
+        # by Cocofest, without claiming a solver-level dual initialization.
         if madnlp_linear_solver is not None:
             runtime_linear_solver = MADNLP_LINEAR_SOLVER_RUNTIME_NAMES.get(
                 madnlp_linear_solver, madnlp_linear_solver

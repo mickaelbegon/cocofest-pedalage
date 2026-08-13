@@ -934,6 +934,38 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     cœurs physiques, sans parallélisme BLAS/OpenMP imbriqué. Après exécution,
     distinguer obligatoirement `fatigue_limited_candidate` de
     `unconfirmed_endurance_stop` et les succès natifs des fallbacks.
+49. [audit local négatif] Ne pas interpréter
+    `madnlp_dual_warm_start: applied=True` comme un warm-start dual effectif.
+    La branche Bioptim copie bien `lam_g/lam_x` vers `lam_g0/lam_x0`, mais le
+    runtime CasADi 3.8.0/libMad macOS testé produit exactement le même premier
+    pas avec des multiplicateurs nuls ou de norme `1e6`, même avec
+    `dual_initialized=true`. Ajouter au runtime libMad une vraie
+    initialisation primal-dual, puis exiger un test discriminant `max_iter=1`
+    avant l'ablation `off/constraints/bounds/all` sur le RHO. Tant que ce test
+    échoue, conserver MadNLP en warm-start primal seulement.
+50. [audit de données, faible priorité seule] Une hystérésis de Schmitt autour
+    de `pd0`, avec `delta_off=2 us` et `delta_on=5 us`, ne change que 5 valeurs
+    de classification sur 12 000 PW IPOPT et 2 sur 12 000 PW MadNLP dans les
+    trajectoires 100 RHO disponibles. Elle ne supprime pas les vraies
+    transitions de recrutement, dont les sauts atteignent `468.6 us`.
+    L'implémenter d'abord uniquement dans la construction de l'ensemble actif
+    **prévu** : un nœud inactif n'est libéré qu'au-dessus de
+    `pd0+delta_on`, un nœud actif n'est marqué inactif qu'en dessous de
+    `pd0+delta_off`. Ne jamais imposer ce verrou au solve final : relâcher les
+    bornes temporaires et certifier le NLP original. Journaliser transitions,
+    faux verrous, coût, fatigue et P90.
+51. [prochaine expérience structurante] Prototyper le prédicteur paramétrique
+    KKT sur le reduced/SX/Radau-5 avant de l'appliquer à ACADOS ou MadNLP :
+    (a) rendre explicite le vecteur `p` regroupant état initial et bornes
+    terminales; (b) extraire Hessienne de Lagrange, Jacobienne et ensemble
+    actif du dernier RHO certifié; (c) résoudre un seul système KKT pour
+    prédire la primale **et** les duaux; (d) appliquer trust region,
+    fraction-to-boundary et rollout; (e) rejeter le prédicteur si son résidu
+    initial dépasse celui de `repeat`; (f) comparer sur 30 puis 100 RHO les
+    résidus initiaux, itérations, médiane/P90, recoveries, coût et quatre AUC.
+    L'hystérésis du point 50 protège les changements d'ensemble actif; elle ne
+    remplace pas le prédicteur. Exploiter l'intervalle d'un cycle pour calculer
+    le RHO suivant en advanced-step.
 
 La question causale est maintenant resserrée : une seule projection au RHO 19
 ne suffit pas, mais la séquence 19--36 conserve le bassin franchissant le RHO

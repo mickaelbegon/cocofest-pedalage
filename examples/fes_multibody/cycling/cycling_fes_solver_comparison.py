@@ -5016,8 +5016,9 @@ def build_cli() -> argparse.ArgumentParser:
         choices=("off", "constraints", "bounds", "all"),
         default="off",
         help=(
-            "Reuse no MadNLP multipliers by default because multiplier blocks "
-            "are not yet shifted with the receding horizon."
+            "Experimentally submit MadNLP multipliers. Keep this off by default: "
+            "the audited libMad runtimes have not proven consumption of "
+            "CasADi's lam_g0/lam_x0 inputs."
         ),
     )
     parser.add_argument("--alpaqa-max-iter", type=int, default=2000)

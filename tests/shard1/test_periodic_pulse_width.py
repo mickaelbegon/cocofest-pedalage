@@ -6038,6 +6038,8 @@ def test_optional_nlp_dual_warm_starts_preserve_shifted_primal():
 
     assert madnlp["solver"] == "madnlp"
     assert madnlp["applied"] is True
+    assert madnlp["submitted_to_interface"] is True
+    assert madnlp["backend_consumption"] == "unverified_runtime_dependent"
     np.testing.assert_array_equal(nmpc.nlp[0].x_init["q"].init, shifted_primal)
     np.testing.assert_array_equal(nmpc.ocp_solver.lam_g, solution.lam_g)
     np.testing.assert_array_equal(nmpc.ocp_solver.lam_x, solution.lam_x)

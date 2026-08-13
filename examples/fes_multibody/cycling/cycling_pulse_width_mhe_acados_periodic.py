@@ -639,6 +639,15 @@ def apply_nlp_dual_warm_start(nmpc, solution, *, solver_name: str, mode: str) ->
     if summary["reason"] == "ipopt_interface_unavailable":
         summary["reason"] = f"{solver_name}_interface_unavailable"
     summary["solver"] = solver_name
+    summary["submitted_to_interface"] = bool(summary["applied"])
+    if solver_name == "madnlp":
+        # The pinned Bioptim interface forwards these buffers as lam_g0/lam_x0,
+        # but the libMad runtimes audited so far do not demonstrably consume
+        # them.  Keep "applied" for backward compatibility while preventing it
+        # from being mistaken for an effective primal-dual initialization.
+        summary["backend_consumption"] = "unverified_runtime_dependent"
+    else:
+        summary["backend_consumption"] = "not_audited"
     return summary
 
 
@@ -2294,9 +2303,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
         choices=("off", "constraints", "bounds", "all"),
         default="off",
         help=(
-            "Reuse MadNLP multipliers after Cocofest has shifted and projected "
-            "the primal MHE initial guess. Disabled by default until multiplier "
-            "blocks are shifted consistently with the receding horizon."
+            "Experimentally submit MadNLP multipliers after Cocofest has shifted "
+            "and projected the primal MHE initial guess. Disabled by default: "
+            "the audited libMad runtimes have not proven that they consume "
+            "CasADi's lam_g0/lam_x0 inputs."
         ),
     )
     parser.add_argument(
@@ -19076,7 +19086,8 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                     f"mode={dual_summary['mode']} applied={dual_summary['applied']} "
                     f"lam_g={dual_summary['lam_g_size']} "
                     f"lam_x={dual_summary['lam_x_size']} "
-                    f"reason={dual_summary['reason']}"
+                    f"reason={dual_summary['reason']} "
+                    f"backend_consumption={dual_summary['backend_consumption']}"
                 )
         feasibility = None
         if _sol is not None:
