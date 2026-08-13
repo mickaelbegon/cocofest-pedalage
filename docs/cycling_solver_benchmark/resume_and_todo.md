@@ -856,11 +856,15 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     `0.054 s`. `repeat` redevient plus précis que `lag2` (`0.082` contre
     `0.123 us` en moyenne groupée). Retenir provisoirement la borne terminale
     `+/-0.3`, sans cadence constante à l'intérieur du cycle.
-42. [implémenté, CI à lancer] Au premier RHO ACADOS non certifié, restaurer le
+42. [validé négatif, run `31742437770`] Au premier RHO ACADOS non certifié, restaurer le
     checkpoint préparé, remplacer uniquement le prédicteur PW `repeat` par
     `lag2`, réinitialiser la mémoire SQP/QP et réessayer le même RHO. Exiger
     que le résumé prouve l'exécution du chemin et qu'aucun RHO non certifié
-    n'avance la fatigue. Ce mécanisme reste un retry, pas le prédicteur nominal.
+    n'avance la fatigue. Le chemin s'exécute au RHO 10, mais `lag2` change une
+    PW de `468.6 us` et dégrade le résidu primal de `1.27e-3` à `9`; `MINSTEP`
+    survient après une itération et le préfixe reste `9/30`. Ne pas retenir ce
+    retry PW seul. Si cette piste est reprise, transférer une primale complète
+    phase-alignée puis corriger fatigue et état initial par rollout/sensibilité.
 43. [à faire après 42] Comparer avec la borne terminale `+/-0.3` une très faible
     régularisation proximale des PW et une faible pénalité terminale de cadence.
     Les tester séparément : elles changent l'objectif. Rejeter toute variante

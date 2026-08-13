@@ -5448,8 +5448,21 @@ non-convergence scientifique demeure un résultat; seules une erreur
 d'infrastructure, l'absence de tentative ou l'absence des traces demandées
 font échouer la CI.
 
-Le prochain run ajoute un cas causal `repeat -> lag2` uniquement après un RHO
-ACADOS non certifié. Il restaure le checkpoint exact, ne change que les PW du
-dernier cycle, réinitialise la mémoire SQP/QP et réessaie le même RHO. Ce test
-mesurera C sans modifier l'OCP nominal. La régularisation proximale E restera
-séparée, car elle modifie l'objectif numérique.
+Le run de validation C
+[`31742437770`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/31742437770)
+exécute bien le retry causal `repeat -> lag2` au RHO 10. Il restaure le
+checkpoint exact, ne change que les PW du dernier cycle et réinitialise la
+mémoire SQP/QP. Le changement maximal atteint toutefois `468.6 us`, presque
+toute la plage admissible. Le retry passe de `MAXITER` avec un résidu primal
+de `1.27e-3` à `MINSTEP` en une itération, avec un résidu primal ACADOS de `9`.
+Il ne récupère aucun cycle supplémentaire (`9/30`). Modifier seulement les PW
+est donc incohérent avec les états mécaniques et musculaires de l'autre branche
+de période deux. C est rejeté comme fallback nominal; une banque de primales
+complètes ou un rollout cohérent serait nécessaire pour revisiter cette idée.
+
+Le job est rouge parce que la couche compacte de comparaison ne sérialisait
+pas encore les deux nouveaux résumés, malgré leur présence dans le solveur.
+Cette perte d'information est corrigée et couverte par un test de bout en bout.
+La régularisation proximale E restera séparée, car elle modifie l'objectif
+numérique et la solution terminale contrainte converge déjà en une itération
+SQP sur la majorité des RHO.

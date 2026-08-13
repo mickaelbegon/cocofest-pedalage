@@ -3294,6 +3294,12 @@ def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
                 "acados_maxiter_retry_summaries": (
                     result.get("acados_maxiter_retry_summaries") or []
                 ),
+                "acados_alternate_pw_predictor_summaries": (
+                    result.get("acados_alternate_pw_predictor_summaries") or []
+                ),
+                "retry_same_rho_summaries": (
+                    result.get("retry_same_rho_summaries") or []
+                ),
                 "acados_forced_iteration_cap_summaries": (
                     result.get("acados_forced_iteration_cap_summaries") or []
                 ),

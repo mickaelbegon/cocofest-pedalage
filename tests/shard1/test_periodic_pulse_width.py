@@ -6348,6 +6348,17 @@ def test_benchmark_json_summary_contains_comparable_fatigue_metrics(tmp_path):
     result["acados_maxiter_retry_summaries"] = [
         {"window": 13, "retry_status": 2}
     ]
+    result["acados_alternate_pw_predictor_summaries"] = [
+        {
+            "target_rho": 10,
+            "source_mode": "repeat",
+            "alternate_mode": "lag2",
+            "solver_reset_applied": True,
+        }
+    ]
+    result["retry_same_rho_summaries"] = [
+        {"target_rho": 10, "recovery": "alternate_pw_predictor"}
+    ]
     result["acados_forced_iteration_cap_summaries"] = [
         {
             "target_rho": 100,
@@ -6442,6 +6453,17 @@ def test_benchmark_json_summary_contains_comparable_fatigue_metrics(tmp_path):
     ]
     assert row["acados_maxiter_retry_summaries"] == [
         {"window": 13, "retry_status": 2}
+    ]
+    assert row["acados_alternate_pw_predictor_summaries"] == [
+        {
+            "target_rho": 10,
+            "source_mode": "repeat",
+            "alternate_mode": "lag2",
+            "solver_reset_applied": True,
+        }
+    ]
+    assert row["retry_same_rho_summaries"] == [
+        {"target_rho": 10, "recovery": "alternate_pw_predictor"}
     ]
     assert row["state_boundary_jumps"]["boundary_count"] == 1
     assert row["state_boundary_jumps"]["by_state"]["omega"]["jump"] == [[0.0]]
