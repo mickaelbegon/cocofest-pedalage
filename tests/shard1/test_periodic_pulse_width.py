@@ -4350,7 +4350,9 @@ def test_terminal_wheel_qdot_continuation_tightens_only_terminal_bounds(
     )
     sync_calls = []
     nmpc = SimpleNamespace(
-        velocity_state_key="omega",
+        # Reproduce the initialization-order alias observed in Linux CI: the
+        # reduced bounds are authoritative even when this cached key is stale.
+        velocity_state_key="qdot",
         wheel_state_index=0,
         nlp=[SimpleNamespace(x_bounds={"omega": bounds})],
         _sync_acados_state_bounds=lambda: sync_calls.append(True),
@@ -4411,6 +4413,24 @@ def test_terminal_wheel_qdot_continuation_tightens_only_terminal_bounds(
     np.testing.assert_allclose(bounds.max[0, 2], -2.0 * np.pi + 0.5)
     assert nmpc._cocofest_dual_warm_start_mode == "preserve"
     assert len(sync_calls) == len(margins) + 1
+
+
+def test_terminal_wheel_qdot_continuation_rejects_full_mechanics_bounds():
+    bounds = SimpleNamespace(
+        min=np.zeros((3, 3)),
+        max=np.zeros((3, 3)),
+    )
+    nmpc = SimpleNamespace(
+        velocity_state_key="qdot",
+        wheel_state_index=2,
+        nlp=[SimpleNamespace(x_bounds={"qdot": bounds})],
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="requires reduced omega mechanics",
+    ):
+        periodic_example.set_terminal_wheel_qdot_bound_margin(nmpc, 0.5)
 
 
 def test_acados_residual_history_selects_one_feasible_iterate():

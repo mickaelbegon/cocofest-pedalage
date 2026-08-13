@@ -6198,13 +6198,19 @@ def set_terminal_wheel_qdot_bound_margin(
     margin_rad_s = float(margin_rad_s)
     if not np.isfinite(margin_rad_s) or margin_rad_s <= 0.0:
         raise ValueError("Terminal wheel-velocity margin must be finite and positive.")
-    velocity_key = getattr(periodic_nmpc, "velocity_state_key", "omega")
+    x_bounds = periodic_nmpc.nlp[0].x_bounds
+    # ``velocity_state_key`` is initialized before the reduced-mechanics
+    # bounds are fully materialized and can therefore still contain the full
+    # model alias ``qdot``.  The bounds are the runtime source of truth: an
+    # explicit scalar ``omega`` block unambiguously identifies the reduced
+    # formulation for this continuation.
+    velocity_key = "omega" if "omega" in x_bounds else None
     wheel_index = int(getattr(periodic_nmpc, "wheel_state_index", 0))
-    if velocity_key != "omega" or velocity_key not in periodic_nmpc.nlp[0].x_bounds:
+    if velocity_key is None:
         raise ValueError(
             "Terminal wheel-velocity continuation requires reduced omega mechanics."
         )
-    bounds = periodic_nmpc.nlp[0].x_bounds[velocity_key]
+    bounds = x_bounds[velocity_key]
     if bounds.min.shape[1] < 3 or bounds.max.shape[1] < 3:
         raise ValueError("Omega bounds require first, path and terminal columns.")
     center = getattr(periodic_nmpc, "_cocofest_terminal_wheel_qdot_center", None)
