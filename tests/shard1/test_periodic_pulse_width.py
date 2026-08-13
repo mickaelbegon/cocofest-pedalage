@@ -11425,10 +11425,14 @@ def test_acados_irk_transfer_rollout_uses_scaled_variables_and_stage_data():
         _cocofest_acados_sim_solver=simulator,
     )
 
-    summary = periodic_example.rollout_transferred_cycle_acados_irk(nmpc)
+    summary = periodic_example.rollout_transferred_cycle_acados_irk(
+        nmpc, compute_rk4_defects=False
+    )
 
     assert summary["applied"] is True
     assert summary["simulator_built"] is False
+    assert summary["rk4_defects_computed"] is False
+    assert summary["rk4_defects_after"] is None
     np.testing.assert_allclose(summary["simulation_time_s"], 0.002)
     np.testing.assert_allclose(x_init["q"].init, [[0.0, 1.0, 2.0, 6.0, 10.0]])
     np.testing.assert_allclose(x_init["qdot"].init, [[2.0, 2.0, 2.0, 14.0, 30.0]])

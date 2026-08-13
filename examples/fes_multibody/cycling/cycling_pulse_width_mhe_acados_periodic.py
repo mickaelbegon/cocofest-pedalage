@@ -10974,6 +10974,7 @@ def rollout_transferred_cycle_acados_irk(
     max_allowed_bound_violation: float | None = None,
     start_node: int | None = None,
     apply_result: bool = True,
+    compute_rk4_defects: bool = True,
 ) -> dict:
     """Roll out a trajectory suffix with the same generated IRK map as the OCP.
 
@@ -11105,7 +11106,9 @@ def rollout_transferred_cycle_acados_irk(
         for key, values in state_values.items():
             nlp.x_init[key].init[:, :] = values
     rk4_defects_after = (
-        _full_dynamics_rollout_defect_details(periodic_nmpc) if applied else None
+        _full_dynamics_rollout_defect_details(periodic_nmpc)
+        if applied and compute_rk4_defects
+        else None
     )
 
     return {
@@ -11123,6 +11126,7 @@ def rollout_transferred_cycle_acados_irk(
         "simulation_time_s": simulation_time_s,
         "interval_duration": interval_duration,
         "rk4_defects_after": rk4_defects_after,
+        "rk4_defects_computed": bool(applied and compute_rk4_defects),
     }
 
 
@@ -18457,6 +18461,7 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         "terminal_state_extraction": [],
         "bound_projection": [],
         "initial_guess_audit": [],
+        "acados_irk_rollout": [],
     }
 
     def advance_only_certified_window(self, solution, *advance_args, **advance_kwargs):
@@ -19402,6 +19407,7 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                     ),
                 )
             else:
+                irk_rollout_start = perf_counter()
                 rollout_summary = rollout_transferred_cycle_acados_irk(
                     _nmpc,
                     max_allowed_bound_violation=(
@@ -19409,6 +19415,15 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                         if args.acados_transfer_bound_homotopy
                         else args.acados_transfer_rollout_max_bound_violation
                     ),
+                    # The native IRK rollout prepares the actual primal. A
+                    # second Python/RK4 defect sweep used only for logging cost
+                    # about 0.5 s/RHO; scientific post-solve audits remain
+                    # enabled and the SQP certifies every prepared trajectory.
+                    compute_rk4_defects=False,
+                )
+                rollout_summary["wall_time_s"] = perf_counter() - irk_rollout_start
+                orchestration_timing_samples["acados_irk_rollout"].append(
+                    rollout_summary["wall_time_s"]
                 )
             transfer_rollout_applied = rollout_summary["applied"]
             transfer_rollout_summaries.append(rollout_summary)
