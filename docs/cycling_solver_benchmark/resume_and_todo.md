@@ -895,6 +895,14 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     restauration PW dans une base spline/Fourier/POD; (f) prédicteur appris
     seulement après constitution d'un jeu de solutions certifiées. Prioriser
     (a)--(c), qui conservent la structure et offrent des critères KKT audités.
+    Pour IPOPT/MadNLP, commencer toutefois par le contrôle moins coûteux :
+    comparer `off`, `bounds`, `constraints` et `all` pour le transfert de
+    `lam_x/lam_g` entre deux RHO de la **même** transcription Radau-5. Remettre
+    les multiplicateurs à zéro dès qu'une Phase I, une projection ou un
+    rollout modifie la primale. Mesurer le P90, le nombre d'itérations et les
+    échecs; un simple gain médian ne suffit pas. Tester ensuite le prédicteur
+    KKT complet. Une extrapolation limitée aux PW est déjà insuffisante parce
+    qu'elle casse la cohérence avec les états de Ding.
 46. [validé, run `31744177514`] Promouvoir le candidat ACADOS reduced sans biais : IRK/SQP,
     borne terminale absolue `omega = -2*pi +/- 0.3 rad/s`, répétition des PW et
     rayon Phase-I relâché. Exécuter seul `100` RHO via
