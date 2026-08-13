@@ -895,11 +895,20 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     restauration PW dans une base spline/Fourier/POD; (f) prédicteur appris
     seulement après constitution d'un jeu de solutions certifiées. Prioriser
     (a)--(c), qui conservent la structure et offrent des critères KKT audités.
-46. [CI à lancer] Promouvoir le candidat ACADOS reduced sans biais : IRK/SQP,
+46. [validé, run `31744177514`] Promouvoir le candidat ACADOS reduced sans biais : IRK/SQP,
     borne terminale absolue `omega = -2*pi +/- 0.3 rad/s`, répétition des PW et
     rayon Phase-I relâché. Exécuter seul `100` RHO via
     `cycles=acados_reduced_100`; comparer au témoin 30 RHO les temps, les
     itérations, l'angle absolu, la cadence, la fatigue et les quatre capacités.
+    Résultat : `100/100`, aucun recovery, 108 itérations, médiane/P90 solveur
+    `0.0401/0.0405 s`, médiane/P90 de l'appel `0.0583/0.0588 s`, aucun drift
+    angulaire et aucune violation mécanique. La boucle complète vaut toutefois
+    `0.693 s/RHO`, dont `0.632 s/RHO` d'orchestration hors solveur.
+47. [prochaine mesure] Instrumenter séparément l'audit de faisabilité, le
+    transfert de la primale, `advance_window`, `update_stim` et la mise à jour
+    des bornes/targets ACADOS. Réduire l'orchestration seulement après avoir
+    prouvé que les résidus, la phase absolue et l'audit mécanique sont
+    strictement inchangés.
 
 La question causale est maintenant resserrée : une seule projection au RHO 19
 ne suffit pas, mais la séquence 19--36 conserve le bassin franchissant le RHO

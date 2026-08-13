@@ -1686,12 +1686,27 @@ libres dans la boîte physique. Avec `±0.3`, la médiane/P90 chaude vaut
 moyenne de `repeat` vaut `0.082 us`, contre `0.123 us` pour `lag2` : le cycle
 précédent redevient le warm-start nominal pertinent.
 
-La marge `±0.3 rad/s` est retenue provisoirement, car ACADOS exploite la face
-rapide de la boîte (`omega_T` proche de `-2*pi-0.3`). Une marge plus stricte ou
-une faible pénalité vers la cadence cible doit encore être testée avant
-l'endurance. `lag2` est conservé uniquement comme retry du même RHO après
-restauration du checkpoint; il ne doit ni entretenir une orbite de période deux
-ni faire avancer un primal non certifié.
+La marge `±0.3 rad/s` est retenue : le run
+[`31744177514`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/31744177514)
+certifie `100/100` RHO sans recovery, avec une médiane/P90 murale chaude de
+`0.0583/0.0588 s` et 108 itérations SQP cumulées. ACADOS exploite la face
+rapide de la boîte (`omega_T` proche de `-2*pi-0.3`), mais l'angle terminal
+reste référencé de façon absolue à chaque cycle : l'erreur demeure voisine de
+`0.002 rad` et ne dérive pas. L'audit mécanique ne relève aucune violation de
+la boîte de vitesse.
+
+Une proximité permanente des PW de poids `100` ou `1000` a été rejetée : sur
+30 RHO elle ne change ni les contrôles, ni les capacités musculaires, ni les
+38 itérations cumulées, et n'améliore pas le P90 mural. `repeat` reste le
+warm-start nominal. Le retry isolé `lag2` est lui aussi rejeté dans sa forme
+PW seule, car il rend la primale incohérente avec les états et augmente le
+résidu au premier échec.
+
+Sur 100 RHO, le solveur ne cumule que `6.06 s`, alors que la boucle complète
+après construction de l'OCP prend `69.28 s` (`0.693 s/RHO`). Le prochain gain
+important n'est donc plus dans une itération SQP supplémentaire : il faut
+profiler puis réduire les `0.632 s/RHO` d'orchestration Python/Bioptim, en
+conservant les mêmes audits scientifiques.
 
 ## 7. Reproductibilité
 

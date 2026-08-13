@@ -5466,3 +5466,48 @@ Cette perte d'information est corrigée et couverte par un test de bout en bout.
 La régularisation proximale E restera séparée, car elle modifie l'objectif
 numérique et la solution terminale contrainte converge déjà en une itération
 SQP sur la majorité des RHO.
+
+## 39. Ablation proximale et endurance ACADOS reduced (13 août 2026)
+
+Le run apparié
+[`31743379091`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/31743379091)
+compare la borne terminale `omega_T = -2*pi +/- 0.3 rad/s` seule à deux
+pénalités de proximité des PW, de poids `100` et `1000` sur les contrôles
+scaled. La cible est recentrée à chaque RHO sur le cycle préparé précédent.
+Les trois variantes certifient `30/30` RHO et consomment 38 itérations SQP :
+
+| Variante | Médiane solveur | P90 solveur | Médiane murale | P90 mural | Fatigue exécutée |
+|---|---:|---:|---:|---:|---:|
+| sans proximité | 0.03757 s | 0.04008 s | 0.05302 s | 0.05553 s | 110.5988860 |
+| poids `100` | 0.03761 s | 0.03925 s | 0.05501 s | 0.05901 s | 110.5988860 |
+| poids `1000` | 0.03759 s | 0.03787 s | 0.05511 s | 0.05540 s | 110.5988862 |
+
+Les variations de PW, les ensembles actifs et les capacités finales des
+quatre muscles restent identiques à une précision utile. La faible proximité
+permanente ne stabilise donc rien qui ne le soit déjà et n'apporte aucun gain
+mural reproductible; elle est rejetée pour ne pas modifier inutilement la
+fonction objectif.
+
+Le candidat non biaisé est ensuite exécuté seul sur 100 RHO dans le run
+[`31744177514`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/31744177514).
+Il certifie `100/100` sans recovery, en 108 itérations cumulées. La médiane/P90
+chaude vaut `0.04008/0.04050 s` côté solveur et `0.05834/0.05883 s` pour
+l'appel mural du solveur. Les résidus dynamiques restent de l'ordre de
+`2e-10`; l'audit mécanique ne relève aucune violation de vitesse, ni aux
+nœuds ni sur les vitesses moyennes d'intervalle. La phase absolue ne dérive
+pas : l'erreur terminale reste sur la face autorisée à environ `0.002 rad`
+pour chacun des 100 cycles.
+
+La fatigue exécutée cumulée vaut `436.1384`, avec une AUC normalisée de
+`3.74736 cycles`. Les capacités finales sont `0.98196` (Biceps), `0.98768`
+(Delt_ant), `0.99202` (Delt_post) et `0.99515` (Triceps). Ces valeurs sont des
+résultats à assistance nulle; elles ne doivent pas être comparées directement
+aux anciennes campagnes à couple signé `+0.15 N.m`.
+
+Le profil révèle enfin le prochain goulot : les solveurs cumulent `6.06 s`,
+mais la boucle RHO complète prend `69.28 s`, soit `0.693 s/cycle`. Environ
+`0.632 s/cycle` est classé comme orchestration Python/Bioptim. L'objectif
+temps réel inférieur à une seconde est donc atteint sur ce runner, mais la
+prochaine optimisation doit profiler le transfert, l'audit de faisabilité et
+`advance_window`; améliorer encore le warm-start SQP ne peut économiser que
+quelques dizaines de millisecondes tant que cette orchestration domine.
