@@ -5541,5 +5541,17 @@ certifient `30/30`, consomment 38 itérations, donnent l'objectif
 `0.975886238819` et la même capacité minimale `0.985584515133`. Les résidus
 mécaniques et les bornes de cadence passent sans violation. Par rapport au
 pipeline 100 RHO initial à `0.693 s/RHO`, ces deux corrections représentent
-un gain cumulé d'environ `80 %`; une campagne silencieuse 100 RHO est requise
-avant de promouvoir ce temps comme résultat d'endurance.
+un gain cumulé d'environ `80 %`.
+
+Le gate silencieux
+[`31747174680`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/31747174680)
+confirme le résultat sur `100/100` RHO, sans échec ni recovery, en 108
+itérations cumulées. La boucle solveur plus orchestration prend `12.136 s`,
+soit `0.12136 s/RHO`; l'orchestration seule vaut `0.06580 s/RHO`. La
+médiane/P90 de l'appel solveur est `0.05305/0.05350 s`. L'objectif
+`450.645368375440`, la fatigue exécutée `436.138405743507`, l'AUC
+`3.747362255748` et les quatre capacités finales reproduisent la campagne
+verbose. L'audit mécanique dense ne relève aucune violation de cadence ou de
+configuration. Ce résultat promeut le profil silencieux reduced/IRK/SQP avec
+borne terminale absolue `omega = -2*pi +/- 0.3 rad/s` comme chemin online de
+référence.

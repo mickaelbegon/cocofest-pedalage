@@ -904,16 +904,18 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     `0.0401/0.0405 s`, médiane/P90 de l'appel `0.0583/0.0588 s`, aucun drift
     angulaire et aucune violation mécanique. La boucle complète vaut toutefois
     `0.693 s/RHO`, dont `0.632 s/RHO` d'orchestration hors solveur.
-47. [validé sur 30 RHO; gate 100 en cours, runs `31746256920` et
-    `31746803352`] Le profil attribue l'essentiel du temps résiduel à deux
+47. [validé sur 100 RHO, runs `31746256920`, `31746803352` et
+    `31747174680`] Le profil attribue l'essentiel du temps résiduel à deux
     diagnostics online redondants : un second sweep RK4 après le rollout IRK,
     puis l'impression détaillée de la primale à chaque RHO. Leur retrait ne
     change ni l'objectif ni la fatigue à environ `1e-11`, conserve `30/30`,
     38 itérations et le même audit mécanique. La boucle passe de `0.693` à
     `0.457`, puis à `0.138 s/RHO`; `update_functions` vaut maintenant
     `0.042 s/RHO`. Les résidus ACADOS et l'audit final restent calculés et
-    sérialisés. Certifier maintenant 100 RHO sans logging détaillé, puis
-    conserver `--acados-diagnostics` uniquement pour les runs causaux.
+    sérialisés. Le gate final certifie `100/100`, sans recovery, en 108
+    itérations : `0.121 s/RHO` pour la boucle après construction et
+    `0.0531/0.0535 s` pour la médiane/P90 de l'appel solveur. Conserver
+    `--acados-diagnostics` uniquement pour les runs causaux.
 
 La question causale est maintenant resserrée : une seule projection au RHO 19
 ne suffit pas, mais la séquence 19--36 conserve le bassin franchissant le RHO

@@ -1714,8 +1714,12 @@ ramène la boucle 30 RHO à `0.138 s/RHO`. `update_functions` passe de
 `0.402` à `0.042 s/RHO`; l'objectif, la fatigue, les 38 itérations et l'audit
 mécanique sont identiques. Les diagnostics numériques restent calculés et
 sérialisés; seule leur impression détaillée est réservée aux campagnes de
-diagnostic. La certification silencieuse 100 RHO reste le dernier gate de
-performance de ce chemin.
+diagnostic. Le gate silencieux
+[`31747174680`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/31747174680)
+certifie ensuite `100/100` sans recovery, en 108 itérations. La boucle mesurée
+après construction vaut `0.121 s/RHO`, et la médiane/P90 de l'appel solveur
+`0.0531/0.0535 s`. L'objectif, la fatigue et les quatre capacités reproduisent
+la campagne verbose; ce chemin est donc le candidat online actuel.
 
 ## 7. Reproductibilité
 
