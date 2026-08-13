@@ -166,10 +166,12 @@ elif [[ "$solver" == "madnlp" ]]; then
   solver_options+=(
     --madnlp-max-iter "$madnlp_fast_max_iterations"
     --madnlp-max-wall-time "$madnlp_fast_max_wall_time"
-    --madnlp-first-max-iter "$madnlp_first_max_iterations"
     --madnlp-linear-solver "$backend"
     --madnlp-dual-warm-start-mode "$dual_warm_start"
   )
+  if [[ "$madnlp_first_max_iterations" != "none" ]]; then
+    solver_options+=(--madnlp-first-max-iter "$madnlp_first_max_iterations")
+  fi
   if [[ "$compile_mode" == "true" ]]; then
     solver_options+=(--madnlp-c-compile)
   fi

@@ -816,6 +816,28 @@ def parse_terminal_wheel_q_slacks(raw_slacks: str) -> tuple[float, ...]:
     return slacks
 
 
+def parse_terminal_wheel_qdot_margins(raw_margins: str) -> tuple[float, ...]:
+    margins = tuple(
+        float(item.strip()) for item in raw_margins.split(",") if item.strip()
+    )
+    if not margins:
+        raise argparse.ArgumentTypeError(
+            "Terminal wheel-velocity continuation requires at least one margin."
+        )
+    if any(not np.isfinite(margin) or margin <= 0.0 for margin in margins):
+        raise argparse.ArgumentTypeError(
+            "Terminal wheel-velocity margins must be finite and strictly positive."
+        )
+    if any(
+        next_margin >= margin
+        for margin, next_margin in zip(margins, margins[1:])
+    ):
+        raise argparse.ArgumentTypeError(
+            "Terminal wheel-velocity margins must be strictly decreasing."
+        )
+    return margins
+
+
 def parse_positive_window_indices(raw_indices: str) -> tuple[int, ...]:
     """Parse unique, increasing one-based RHO checkpoint indices."""
 
@@ -1087,6 +1109,16 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "Optional absolute terminal-only omega margin around -2*pi rad/s. "
             "This does not constrain the velocity inside the cycle and is "
             "currently available only with reduced mechanics."
+        ),
+    )
+    parser.add_argument(
+        "--acados-terminal-wheel-qdot-homotopy-margins",
+        type=parse_terminal_wheel_qdot_margins,
+        default=None,
+        help=(
+            "Comma-separated decreasing terminal-only omega margins. ACADOS "
+            "starts from the relaxed first margin and solves every stage around "
+            "the fixed -2*pi rad/s target before the first RHO."
         ),
     )
     parser.add_argument(
@@ -3814,6 +3846,12 @@ def _common_initial_solution_metadata(args: argparse.Namespace) -> dict:
             else [float(slack) for slack in terminal_homotopy_slacks]
         ),
         "terminal_wheel_q_reference_mode": args.terminal_wheel_q_reference_mode,
+        "terminal_wheel_qdot_bound_margin": getattr(
+            args, "terminal_wheel_qdot_bound_margin", None
+        ),
+        "terminal_wheel_qdot_homotopy_margins": getattr(
+            args, "acados_terminal_wheel_qdot_homotopy_margins", None
+        ),
         "pulse_width_scaling": float(args.pulse_width_scaling),
         "pulse_width_active_set": args.pulse_width_active_set,
         "pulse_width_minimum_policy": "model_pd0",
@@ -4272,6 +4310,9 @@ def _continuation_cache_signature(args: argparse.Namespace) -> str:
         "terminal_wheel_qdot_bound_margin": (
             args.terminal_wheel_qdot_bound_margin
         ),
+        "acados_terminal_wheel_qdot_homotopy_margins": getattr(
+            args, "acados_terminal_wheel_qdot_homotopy_margins", None
+        ),
         "terminal_qdot_regularization_weight": (
             args.terminal_qdot_regularization_weight
         ),
@@ -4375,6 +4416,9 @@ def _horizon_seed_cache_signature(args: argparse.Namespace) -> str:
         "terminal_wheel_qdot_bound_margin": (
             args.terminal_wheel_qdot_bound_margin
         ),
+        "acados_terminal_wheel_qdot_homotopy_margins": getattr(
+            args, "acados_terminal_wheel_qdot_homotopy_margins", None
+        ),
         "terminal_qdot_regularization_weight": (
             args.terminal_qdot_regularization_weight
         ),
@@ -4458,6 +4502,9 @@ def _codegen_signature(args: argparse.Namespace) -> str:
         "wheel_qdot_slow_bound_margin": _effective_wheel_qdot_bound_margins(args)[1],
         "terminal_wheel_qdot_bound_margin": (
             args.terminal_wheel_qdot_bound_margin
+        ),
+        "acados_terminal_wheel_qdot_homotopy_margins": getattr(
+            args, "acados_terminal_wheel_qdot_homotopy_margins", None
         ),
         "terminal_qdot_regularization_weight": (
             args.terminal_qdot_regularization_weight
@@ -6141,6 +6188,144 @@ def run_acados_terminal_wheel_bound_continuation(
     if reached_target:
         periodic_nmpc._cocofest_dual_warm_start_mode = "preserve"
     return summaries
+
+
+def set_terminal_wheel_qdot_bound_margin(
+    periodic_nmpc, margin_rad_s: float
+) -> dict:
+    """Set one symmetric terminal omega band without changing path bounds."""
+
+    margin_rad_s = float(margin_rad_s)
+    if not np.isfinite(margin_rad_s) or margin_rad_s <= 0.0:
+        raise ValueError("Terminal wheel-velocity margin must be finite and positive.")
+    velocity_key = getattr(periodic_nmpc, "velocity_state_key", "omega")
+    wheel_index = int(getattr(periodic_nmpc, "wheel_state_index", 0))
+    if velocity_key != "omega" or velocity_key not in periodic_nmpc.nlp[0].x_bounds:
+        raise ValueError(
+            "Terminal wheel-velocity continuation requires reduced omega mechanics."
+        )
+    bounds = periodic_nmpc.nlp[0].x_bounds[velocity_key]
+    if bounds.min.shape[1] < 3 or bounds.max.shape[1] < 3:
+        raise ValueError("Omega bounds require first, path and terminal columns.")
+    center = getattr(periodic_nmpc, "_cocofest_terminal_wheel_qdot_center", None)
+    if center is None:
+        center = 0.5 * float(
+            bounds.min[wheel_index, 2] + bounds.max[wheel_index, 2]
+        )
+        periodic_nmpc._cocofest_terminal_wheel_qdot_center = center
+    bounds.min[wheel_index, 2] = center - margin_rad_s
+    bounds.max[wheel_index, 2] = center + margin_rad_s
+    periodic_nmpc._sync_acados_state_bounds()
+    return {
+        "center_rad_s": float(center),
+        "margin_rad_s": margin_rad_s,
+        "lower_rad_s": float(center - margin_rad_s),
+        "upper_rad_s": float(center + margin_rad_s),
+    }
+
+
+def run_acados_terminal_wheel_qdot_bound_continuation(
+    periodic_nmpc,
+    solver,
+    margins: tuple[float, ...],
+    convergence_tolerance: float,
+    stationarity_tolerance: float | None,
+    stage_iterations: int = 50,
+    echo: bool = True,
+    solve_stage=None,
+) -> list[dict]:
+    """Tighten only the terminal reduced-mechanics cadence band."""
+
+    margins = tuple(float(margin) for margin in margins)
+    if not margins or any(
+        not np.isfinite(margin) or margin <= 0.0 for margin in margins
+    ):
+        raise ValueError(
+            "Terminal wheel-velocity continuation margins must be finite and positive."
+        )
+    if any(
+        next_margin >= margin
+        for margin, next_margin in zip(margins, margins[1:])
+    ):
+        raise ValueError(
+            "Terminal wheel-velocity continuation margins must decrease strictly."
+        )
+    stationarity_tolerance = (
+        float(convergence_tolerance)
+        if stationarity_tolerance is None
+        else float(stationarity_tolerance)
+    )
+    if not np.isfinite(stationarity_tolerance) or stationarity_tolerance <= 0.0:
+        raise ValueError("The stationarity tolerance must be finite and positive.")
+
+    stage_solver = deepcopy(solver)
+    stage_solver.set_convergence_tolerance(convergence_tolerance)
+    stage_solver.set_nlp_solver_tol_stat(stationarity_tolerance)
+    if solve_stage is None:
+
+        def solve_stage():
+            return super(RecedingHorizonOptimization, periodic_nmpc).solve(
+                solver=stage_solver,
+                warm_start=None,
+            )
+
+    summaries = []
+    for stage_index, margin in enumerate(margins):
+        bound = set_terminal_wheel_qdot_bound_margin(periodic_nmpc, margin)
+        set_acados_runtime_max_iterations(periodic_nmpc, stage_iterations)
+        solution = solve_stage()
+        diagnostics = snapshot_acados_diagnostics(solution)
+        accepted = _status_is_success(
+            solution.status
+        ) or acados_diagnostics_meet_tolerances(
+            diagnostics,
+            convergence_tolerance=convergence_tolerance,
+            stationarity_tolerance=stationarity_tolerance,
+        )
+        residuals = diagnostics.get("residuals")
+        summary = {
+            "stage": stage_index,
+            **bound,
+            "status": solution.status,
+            "accepted": accepted,
+            "residuals": (
+                None if residuals is None else np.asarray(residuals, dtype=float).copy()
+            ),
+            "solver_time_s": solution.solver_time_to_optimize,
+            "wall_time_s": solution.real_time_to_optimize,
+        }
+        summaries.append(summary)
+        if echo:
+            print(
+                "acados_terminal_wheel_qdot_bound: "
+                f"stage={stage_index} margin={margin:.6g} "
+                f"bounds=[{bound['lower_rad_s']:.6g}, {bound['upper_rad_s']:.6g}] "
+                f"status={solution.status} accepted={accepted} "
+                f"residuals={_format_array(summary['residuals'])}"
+            )
+        if not accepted:
+            summary["solver_reset"] = reset_acados_solver_memory(periodic_nmpc)
+            break
+        apply_solution_directly_to_periodic_nmpc_initial_guess(periodic_nmpc, solution)
+
+    # The physical target is always restored. A failed relaxed stage is never
+    # allowed to leak into the measured RHO sequence.
+    set_terminal_wheel_qdot_bound_margin(periodic_nmpc, margins[-1])
+    if terminal_wheel_qdot_bound_continuation_reached_target(summaries, margins):
+        periodic_nmpc._cocofest_dual_warm_start_mode = "preserve"
+    return summaries
+
+
+def terminal_wheel_qdot_bound_continuation_reached_target(
+    summaries: list[dict], margins: tuple[float, ...]
+) -> bool:
+    return bool(
+        summaries
+        and summaries[-1].get("accepted") is True
+        and np.isclose(
+            float(summaries[-1]["margin_rad_s"]), float(margins[-1])
+        )
+    )
 
 
 def resolve_initial_fast_velocity_bound_margins(
@@ -16136,6 +16321,28 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             raise ValueError(
                 "--terminal-wheel-qdot-bound-margin must be finite and strictly positive."
             )
+    terminal_qdot_homotopy_margins = getattr(
+        args, "acados_terminal_wheel_qdot_homotopy_margins", None
+    )
+    if terminal_qdot_homotopy_margins is not None:
+        if args.solver != "acados" or args.mechanical_formulation != "reduced":
+            raise ValueError(
+                "Terminal wheel-velocity continuation requires ACADOS with "
+                "reduced mechanics."
+            )
+        if args.terminal_wheel_qdot_bound_margin is None:
+            raise ValueError(
+                "--acados-terminal-wheel-qdot-homotopy-margins requires "
+                "--terminal-wheel-qdot-bound-margin."
+            )
+        if not np.isclose(
+            terminal_qdot_homotopy_margins[-1],
+            args.terminal_wheel_qdot_bound_margin,
+        ):
+            raise ValueError(
+                "The last terminal wheel-velocity homotopy margin must equal "
+                "--terminal-wheel-qdot-bound-margin."
+            )
     if (
         not np.isfinite(args.wheel_qdot_bound_margin)
         or args.wheel_qdot_bound_margin <= 0
@@ -16473,7 +16680,9 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         "wheel_qdot_fast_bound_margin": _effective_wheel_qdot_bound_margins(args)[0],
         "wheel_qdot_slow_bound_margin": _effective_wheel_qdot_bound_margins(args)[1],
         "terminal_wheel_qdot_bound_margin": (
-            args.terminal_wheel_qdot_bound_margin
+            terminal_qdot_homotopy_margins[0]
+            if terminal_qdot_homotopy_margins is not None
+            else args.terminal_wheel_qdot_bound_margin
         ),
         # ACADOS path constraints are evaluated at shooting nodes.  Add an
         # inexpensive mechanical half-step guard in reduced IRK mode instead
@@ -18025,6 +18234,7 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
     control_homotopy_summaries = []
     proximal_control_summaries = []
     terminal_wheel_bound_summaries = []
+    terminal_wheel_qdot_bound_summaries = []
     initial_fast_velocity_bound_homotopy_summary = None
     inter_window_terminal_wheel_bound_summaries = []
     inter_window_proximal_control_summaries = []
@@ -19950,6 +20160,32 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         )
         set_acados_runtime_max_iterations(nmpc, args.max_acados_iterations)
 
+    if (
+        args.solver == "acados"
+        and args.acados_terminal_wheel_qdot_homotopy_margins is not None
+        and proximal_ready
+    ):
+        terminal_wheel_qdot_bound_summaries = (
+            run_acados_terminal_wheel_qdot_bound_continuation(
+                nmpc,
+                solver,
+                margins=args.acados_terminal_wheel_qdot_homotopy_margins,
+                convergence_tolerance=args.acados_proximal_control_tolerance,
+                stationarity_tolerance=args.acados_stationarity_tolerance,
+                stage_iterations=args.acados_proximal_control_stage_iterations,
+                echo=echo,
+            )
+        )
+        set_acados_runtime_max_iterations(nmpc, args.max_acados_iterations)
+        if not terminal_wheel_qdot_bound_continuation_reached_target(
+            terminal_wheel_qdot_bound_summaries,
+            args.acados_terminal_wheel_qdot_homotopy_margins,
+        ):
+            raise RuntimeError(
+                "ACADOS terminal wheel-velocity continuation did not reach "
+                f"the strict {args.terminal_wheel_qdot_bound_margin:.6g} rad/s margin."
+            )
+
     if args.single_shot:
         sol = super(RecedingHorizonOptimization, nmpc).solve(
             solver=solver,
@@ -20096,6 +20332,10 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             summary["cycle_boundary_homotopy_summary"] = cycle_boundary_homotopy_summary
         if terminal_wheel_bound_summaries:
             summary["terminal_wheel_bound_summaries"] = terminal_wheel_bound_summaries
+        if terminal_wheel_qdot_bound_summaries:
+            summary["terminal_wheel_qdot_bound_summaries"] = (
+                terminal_wheel_qdot_bound_summaries
+            )
         attach_exact_initial_nlp_audits(summary, nmpc)
         if build_mechanical_audit_profile:
             attach_mechanical_equivalence_audit(summary, reduced_cycling_dynamics)
@@ -20438,6 +20678,10 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         summary["proximal_control_summaries"] = proximal_control_summaries
     if terminal_wheel_bound_summaries:
         summary["terminal_wheel_bound_summaries"] = terminal_wheel_bound_summaries
+    if terminal_wheel_qdot_bound_summaries:
+        summary["terminal_wheel_qdot_bound_summaries"] = (
+            terminal_wheel_qdot_bound_summaries
+        )
     if inter_window_proximal_control_summaries:
         summary[
             "inter_window_proximal_control_summaries"

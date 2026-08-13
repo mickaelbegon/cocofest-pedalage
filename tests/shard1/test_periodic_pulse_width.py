@@ -1550,6 +1550,27 @@ def test_terminal_wheel_bound_slacks_are_parsed_as_a_decreasing_sequence():
     assert args.acados_terminal_wheel_q_homotopy_each_window is True
 
 
+def test_terminal_wheel_qdot_margins_are_parsed_as_a_decreasing_sequence():
+    args = periodic_example.build_argument_parser().parse_args(
+        [
+            "--terminal-wheel-qdot-bound-margin",
+            "0.5",
+            "--acados-terminal-wheel-qdot-homotopy-margins",
+            "3,2.5,2,1.5,1,0.5",
+        ]
+    )
+
+    assert args.terminal_wheel_qdot_bound_margin == 0.5
+    assert args.acados_terminal_wheel_qdot_homotopy_margins == (
+        3.0,
+        2.5,
+        2.0,
+        1.5,
+        1.0,
+        0.5,
+    )
+
+
 def test_transfer_bound_homotopy_fractions_are_parsed():
     args = periodic_example.build_argument_parser().parse_args(
         [
@@ -4311,6 +4332,85 @@ def test_terminal_wheel_bound_continuation_requires_the_final_target():
         ],
         slacks,
     )
+
+
+def test_terminal_wheel_qdot_continuation_tightens_only_terminal_bounds(
+    monkeypatch,
+):
+    class FakeSolver:
+        def set_convergence_tolerance(self, value):
+            self.tolerance = value
+
+        def set_nlp_solver_tol_stat(self, value):
+            self.stationarity = value
+
+    bounds = SimpleNamespace(
+        min=np.array([[-2.0 * np.pi, -2.0 * np.pi - 3.0, -2.0 * np.pi - 3.0]]),
+        max=np.array([[-2.0 * np.pi, -2.0 * np.pi + 3.0, -2.0 * np.pi + 3.0]]),
+    )
+    sync_calls = []
+    nmpc = SimpleNamespace(
+        velocity_state_key="omega",
+        wheel_state_index=0,
+        nlp=[SimpleNamespace(x_bounds={"omega": bounds})],
+        _sync_acados_state_bounds=lambda: sync_calls.append(True),
+    )
+    observed = []
+
+    def solve_stage():
+        observed.append((float(bounds.min[0, 2]), float(bounds.max[0, 2])))
+        return SimpleNamespace(
+            status=0,
+            residuals=np.zeros(4),
+            solver_time_to_optimize=0.01,
+            real_time_to_optimize=0.02,
+        )
+
+    monkeypatch.setattr(
+        periodic_example,
+        "set_acados_runtime_max_iterations",
+        lambda _nmpc, _iterations: None,
+    )
+    monkeypatch.setattr(
+        periodic_example,
+        "snapshot_acados_diagnostics",
+        lambda solution: {"residuals": solution.residuals},
+    )
+    monkeypatch.setattr(
+        periodic_example,
+        "apply_solution_directly_to_periodic_nmpc_initial_guess",
+        lambda _nmpc, _solution: None,
+    )
+
+    margins = (3.0, 2.0, 1.0, 0.5)
+    summaries = periodic_example.run_acados_terminal_wheel_qdot_bound_continuation(
+        nmpc,
+        FakeSolver(),
+        margins=margins,
+        convergence_tolerance=1e-3,
+        stationarity_tolerance=5e-3,
+        stage_iterations=20,
+        echo=False,
+        solve_stage=solve_stage,
+    )
+
+    assert [item["accepted"] for item in summaries] == [True] * 4
+    assert periodic_example.terminal_wheel_qdot_bound_continuation_reached_target(
+        summaries, margins
+    )
+    np.testing.assert_allclose(
+        observed,
+        [
+            (-2.0 * np.pi - margin, -2.0 * np.pi + margin)
+            for margin in margins
+        ],
+    )
+    np.testing.assert_allclose(bounds.min[0, 1], -2.0 * np.pi - 3.0)
+    np.testing.assert_allclose(bounds.max[0, 1], -2.0 * np.pi + 3.0)
+    np.testing.assert_allclose(bounds.min[0, 2], -2.0 * np.pi - 0.5)
+    np.testing.assert_allclose(bounds.max[0, 2], -2.0 * np.pi + 0.5)
+    assert nmpc._cocofest_dual_warm_start_mode == "preserve"
+    assert len(sync_calls) == len(margins) + 1
 
 
 def test_acados_residual_history_selects_one_feasible_iterate():
@@ -7382,6 +7482,19 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert "reference-full-feasible-seed.npz" in workflow
     assert "reference-reduced-feasible-seed.npz" in workflow
     assert "The PW-stability case requires its preceding reduced ACADOS seed." in workflow
+    assert "--acados-control-homotopy-release-final-radius" in workflow
+    assert (
+        "--acados-terminal-wheel-qdot-homotopy-margins "
+        "3,2.5,2,1.5,1,0.5"
+    ) in workflow
+    assert (
+        "--acados-terminal-wheel-qdot-homotopy-margins "
+        "3,2.5,2,1.5,1,0.5,0.3"
+    ) in workflow
+    assert 'ACADOS_PW_STABILITY_ONLY: ${{ inputs.cycles == \'acados_pw_stability\' }}' in workflow
+    assert "ACADOS PW stability case ${case_name} did not certify" in workflow
+    assert "export MADNLP_FAST_MAX_ITERATIONS=100" in workflow
+    assert "export MADNLP_FIRST_MAX_ITERATIONS=none" in workflow
     assert "The cadence-guard case requires its preceding ACADOS reference seed." in workflow
     assert "--common-initial-solution-output" in workflow
     assert '--common-initial-solution "$common_seed"' in workflow

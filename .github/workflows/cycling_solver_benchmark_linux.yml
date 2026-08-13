@@ -1422,9 +1422,21 @@ jobs:
               solver_options+=(--rho-pulse-width-transfer-mode lag2)
             fi
             if [[ "$variant" == *"terminal-omega-0p5"* ]]; then
-              solver_options+=(--terminal-wheel-qdot-bound-margin 0.5)
+              solver_options+=(
+                --terminal-wheel-qdot-bound-margin 0.5
+                --acados-terminal-wheel-qdot-homotopy-margins 3,2.5,2,1.5,1,0.5
+              )
             elif [[ "$variant" == *"terminal-omega-0p3"* ]]; then
-              solver_options+=(--terminal-wheel-qdot-bound-margin 0.3)
+              solver_options+=(
+                --terminal-wheel-qdot-bound-margin 0.3
+                --acados-terminal-wheel-qdot-homotopy-margins 3,2.5,2,1.5,1,0.5,0.3
+              )
+            fi
+            if [[ "$ACADOS_PW_STABILITY_ONLY" == "true" ]]; then
+              # The 2000-RHO production run released this Phase-I radius. A
+              # permanent +/-10 us box made both repeat and lag2 fail at RHO 2
+              # before their prediction quality could be compared.
+              solver_options+=(--acados-control-homotopy-release-final-radius)
             fi
             if [[ "$variant" == "sqp-irk-qp-hot" ]]; then
               solver_options+=(
@@ -2042,6 +2054,7 @@ jobs:
           ACADOS_LAZY_RECOVERY_ONLY: ${{ inputs.cycles == 'acados_lazy_recovery' }}
           ACADOS_REDUCED_100_ONLY: ${{ inputs.cycles == 'acados_reduced_100' }}
           ACADOS_FATIGUE_ENDURANCE_ONLY: ${{ inputs.cycles == 'fatigue_endurance' }}
+          ACADOS_PW_STABILITY_ONLY: ${{ inputs.cycles == 'acados_pw_stability' }}
           ACADOS_SMOKE_RHOS: ${{ inputs.acados_smoke_rhos }}
         run: |
           mapfile -t expected_cases < acados-smoke-results/expected-cases.txt
@@ -2075,7 +2088,8 @@ jobs:
             expected_reference_count=0
           elif [[ "$ACADOS_HOMOTOPY_ONLY" == "true" || "$ACADOS_RECOVERY_ONLY" == "true" || \
                   "$ACADOS_LAZY_RECOVERY_ONLY" == "true" || \
-                  "$ACADOS_REDUCED_100_ONLY" == "true" ]]; then
+                  "$ACADOS_REDUCED_100_ONLY" == "true" || \
+                  "$ACADOS_PW_STABILITY_ONLY" == "true" ]]; then
             expected_reference_count=1
           fi
           if [[ "${#reference_cases[@]}" -ne "$expected_reference_count" ]]; then
@@ -2113,6 +2127,22 @@ jobs:
               )
             ' "$result"
           done
+          if [[ "$ACADOS_PW_STABILITY_ONLY" == "true" ]]; then
+            for case_name in "${expected_cases[@]}"; do
+              result="acados-smoke-results/${case_name}/result.json"
+              jq -e --argjson expected "$ACADOS_SMOKE_RHOS" '
+                .results[0] |
+                (.error == null) and
+                ((.validated_cycles | . == $expected)) and
+                (.pulse_width_cycle_variation.available == true) and
+                (.pulse_width_cycle_variation.pooled_predictor_error_us.repeat.mean != null) and
+                (.pulse_width_cycle_variation.pooled_predictor_error_us.lag2.mean != null)
+              ' "$result" || {
+                echo "ACADOS PW stability case ${case_name} did not certify the requested predictor trace." >&2
+                exit 1
+              }
+            done
+          fi
           if [[ "$ACADOS_LAZY_RECOVERY_ONLY" == "true" ]]; then
             if (( ACADOS_SMOKE_RHOS <= 100 )); then
               result="acados-smoke-results/sqp-irk-fast-guard-2p6-phase-one-mechanical-target-19-35-full/result.json"
@@ -2958,6 +2988,13 @@ jobs:
       - name: Run the reduced Radau-5 PW-transfer ablation
         if: ${{ inputs.cycles == 'pw_transfer_ablation' && (matrix.solver == 'ipopt' || matrix.solver == 'madnlp') }}
         run: |
+          if [[ "${{ matrix.solver }}" == "madnlp" ]]; then
+            # A single 100-iteration capsule covers the 99-iteration first
+            # RHO and the initial transient. Changing max_iter after RHO 1
+            # rebuilt a 74 MB C evaluator inside the measured loop (~346 s).
+            export MADNLP_FAST_MAX_ITERATIONS=100
+            export MADNLP_FIRST_MAX_ITERATIONS=none
+          fi
           run_pw_case() {
             local suffix="$1"
             local mode="$2"

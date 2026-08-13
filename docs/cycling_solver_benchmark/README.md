@@ -48,6 +48,7 @@ capacité musculaire :
 | `acados_reduced_100` | ACADOS SQP-IRK reduced, 100 RHO, après un seed ACADOS-native | résultat sérialisé et audité, y compris si la chaîne s'arrête avant 100 |
 | `acados_recovery_speed` | ACADOS reduced, budget adaptatif `30 + 70`, recovery R5 puis R3 seed-only, transferts `extrapolate`/`repeat` et horizon de deux cycles | ablation séquentielle sur le même runner; avec un artefact source, reprise au cycle 430 |
 | `acados_dropout` | ACADOS reduced nominal puis interruptions contrôlées à 10, 20 et 30 SQP aux RHO configurés | quatre chaînes séquentielles sur le même runner; budget nominal restauré avant tout retry, fallback IPOPT/Radau-5 certifié et poursuite 30 RHO après la dernière interruption |
+| `acados_pw_stability` | ACADOS reduced, `repeat` et `lag2`, puis bornes terminales absolues sur $\omega$ de $\pm0.5$ et $\pm0.3\ \mathrm{rad\,s^{-1}}$ | 30/30 RHO exigés pour chaque cas, trace des erreurs de prédiction PW et comparaison de l'orbite paire/impaire |
 | `pw_transfer_ablation` | IPOPT et MadNLP/MUMPS reduced, SX compilé, Radau 5, 100 RHO | `repeat`, puis extrapolation PW phase-par-phase avec $\alpha=0.25$, $0.5$ et $1$ sur la même machine par solveur |
 | `fatigue_endurance` | IPOPT, MadNLP/MUMPS et FATROP reduced, SX et compilés, Radau 3; ACADOS SQP-IRK full avec garde rapide `2.60` et Phase-I mécanique | horizon atteint ou arrêt candidat de fatigue après deux fenêtres non certifiées consécutives |
 | `fatigue_endurance_radau5` | IPOPT/MUMPS et MadNLP/MUMPS reduced, SX et compilés, Radau 5 | même contrat d'endurance, afin de vérifier que le stop MadNLP R3 n'est pas un artefact de transcription |
@@ -118,6 +119,40 @@ algorithmique universelle. La CI doit republier P50/P90/P99, taux de première
 tentative, taux de récupération par seed et taux de fallback. Si plus de
 `10 %` des RHO exigent IPOPT ou si le temps pipeline augmente, il faudra
 recalculer le budget sur les seuls RHO chauds de la nouvelle transcription.
+
+Pour l'ablation courte des prédicteurs seulement, MadNLP utilise une capsule
+unique à `max_iter=100`, y compris au premier RHO. Le run `31710207813` montre
+que le premier solve demande `99` itérations, mais qu'un passage de `2000` à
+`73` après ce solve force la construction d'un second évaluateur C de `74 MB`
+dans la boucle mesurée, pour environ `346 s` d'orchestration. Cette variante à
+`100` ne remplace pas le protocole d'endurance `73 + IPOPT`; elle supprime un
+biais de compilation dans l'expérience de warm-start. Elle devra être
+recalibrée si le transient dépasse 100 itérations.
+
+### Stabilisation de l'orbite ACADOS
+
+La Phase I sur les PW peut utiliser une boîte étroite autour du seed pour
+construire un primal faisable. Cette boîte ne doit pas rester une contrainte du
+RHO optimal : dans le run `31710221449`, le rayon final permanent de
+$10\ \mathrm{\mu s}$ fait échouer `repeat` et `lag2` dès le RHO 2. Le run
+historique à 2000 RHO (`31522015468`) relâchait ce rayon avant la chaîne RHO.
+Le mode `acados_pw_stability` reproduit désormais ce comportement.
+
+Une borne terminale stricte sur la cadence n'est pas appliquée brutalement au
+seed. Elle est resserrée hors de la boucle mesurée, en conservant les bornes de
+vitesse internes inchangées :
+
+```math
+\left|\omega_N+2\pi\right|\leq
+3.0,\ 2.5,\ 2.0,\ 1.5,\ 1.0,\ 0.5
+\quad\left[\mathrm{rad\,s^{-1}}\right],
+```
+
+puis jusqu'à $0.3\ \mathrm{rad\,s^{-1}}$ pour la variante la plus stricte.
+Chaque palier doit satisfaire les tolérances ACADOS avant que le primal et les
+duals soient transmis au suivant. En cas d'échec, la cible physique finale est
+restaurée mais aucun RHO n'est compté : la continuation ne peut donc pas faire
+passer silencieusement une chaîne résolue avec une borne relâchée.
 
 ### Préparation adaptative des RHO IPOPT/MadNLP
 

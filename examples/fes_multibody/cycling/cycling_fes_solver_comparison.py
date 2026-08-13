@@ -36,6 +36,7 @@ try:
         parse_proximal_control_weights,
         parse_positive_window_indices,
         parse_terminal_wheel_q_slacks,
+        parse_terminal_wheel_qdot_margins,
         parse_transfer_bound_homotopy_fractions,
         solve_case,
     )
@@ -50,6 +51,7 @@ except ImportError:
         parse_proximal_control_weights,
         parse_positive_window_indices,
         parse_terminal_wheel_q_slacks,
+        parse_terminal_wheel_qdot_margins,
         parse_transfer_bound_homotopy_fractions,
         solve_case,
     )
@@ -124,6 +126,7 @@ BENCHMARK_CONFIGURATION_FIELDS = (
     "acados_wheel_qdot_fast_bound_margin",
     "acados_wheel_qdot_slow_bound_margin",
     "terminal_wheel_qdot_bound_margin",
+    "acados_terminal_wheel_qdot_homotopy_margins",
     "reduced_internal_crank_velocity_guard",
     "acados_wheel_q_slack",
     "acados_wheel_qdot_slack",
@@ -1472,6 +1475,7 @@ def _solver_config(
     acados_wheel_qdot_fast_bound_margin: float | None,
     acados_wheel_qdot_slow_bound_margin: float | None,
     terminal_wheel_qdot_bound_margin: float | None,
+    acados_terminal_wheel_qdot_homotopy_margins: tuple[float, ...] | None,
     terminal_qdot_regularization_weight: float,
     terminal_qdot_regularization_target_source: str,
     first_node_wheel_q_slack: float,
@@ -1609,6 +1613,9 @@ def _solver_config(
             ),
             terminal_wheel_qdot_bound_margin=(
                 terminal_wheel_qdot_bound_margin
+            ),
+            acados_terminal_wheel_qdot_homotopy_margins=(
+                acados_terminal_wheel_qdot_homotopy_margins
             ),
             terminal_qdot_regularization_weight=(terminal_qdot_regularization_weight),
             terminal_qdot_regularization_target_source=(
@@ -1762,6 +1769,9 @@ def _solver_config(
             ),
             terminal_wheel_qdot_bound_margin=(
                 terminal_wheel_qdot_bound_margin
+            ),
+            acados_terminal_wheel_qdot_homotopy_margins=(
+                acados_terminal_wheel_qdot_homotopy_margins
             ),
             terminal_qdot_regularization_weight=(terminal_qdot_regularization_weight),
             terminal_qdot_regularization_target_source=(
@@ -3567,6 +3577,7 @@ def main(
     acados_wheel_qdot_fast_bound_margin: float | None = None,
     acados_wheel_qdot_slow_bound_margin: float | None = None,
     terminal_wheel_qdot_bound_margin: float | None = None,
+    acados_terminal_wheel_qdot_homotopy_margins: tuple[float, ...] | None = None,
     terminal_qdot_regularization_weight: float = 0.0,
     terminal_qdot_regularization_target_source: str = "previous",
     first_node_wheel_q_slack: float = 0.0,
@@ -3843,6 +3854,7 @@ def main(
         acados_wheel_qdot_fast_bound_margin=None,
         acados_wheel_qdot_slow_bound_margin=None,
         terminal_wheel_qdot_bound_margin=None,
+        acados_terminal_wheel_qdot_homotopy_margins=None,
         terminal_qdot_regularization_weight=terminal_qdot_regularization_weight,
         terminal_qdot_regularization_target_source=(
             terminal_qdot_regularization_target_source
@@ -3965,6 +3977,9 @@ def main(
             acados_wheel_qdot_slow_bound_margin
         ),
         terminal_wheel_qdot_bound_margin=(terminal_wheel_qdot_bound_margin),
+        acados_terminal_wheel_qdot_homotopy_margins=(
+            acados_terminal_wheel_qdot_homotopy_margins
+        ),
         terminal_qdot_regularization_weight=terminal_qdot_regularization_weight,
         terminal_qdot_regularization_target_source=(
             terminal_qdot_regularization_target_source
@@ -5525,6 +5540,15 @@ def build_cli() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--acados-terminal-wheel-qdot-homotopy-margins",
+        type=parse_terminal_wheel_qdot_margins,
+        default=None,
+        help=(
+            "Decreasing terminal-only omega margins solved sequentially by "
+            "ACADOS before the first measured RHO."
+        ),
+    )
+    parser.add_argument(
         "--terminal-qdot-regularization-weight", type=float, default=0.0
     )
     parser.add_argument(
@@ -6181,6 +6205,9 @@ if __name__ == "__main__":
         ),
         terminal_wheel_qdot_bound_margin=(
             args.terminal_wheel_qdot_bound_margin
+        ),
+        acados_terminal_wheel_qdot_homotopy_margins=(
+            args.acados_terminal_wheel_qdot_homotopy_margins
         ),
         terminal_qdot_regularization_weight=(args.terminal_qdot_regularization_weight),
         terminal_qdot_regularization_target_source=(

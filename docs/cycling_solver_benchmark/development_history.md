@@ -5370,3 +5370,40 @@ demandés. ACADOS est désormais exclu de ce mode et le rapport attend seulement
 localement sur les artefacts et produit une matrice complète. Enfin, le budget
 MadNLP rapide ne s'applique plus au premier RHO : ce warm-up conserve le budget
 général, tandis que les RHO suivants utilisent le percentile calibré.
+
+## 37. Diagnostic CI des prédicteurs et correction des continuations (13 août 2026)
+
+Le run [`31710207813`](https://github.com/mickaelbegon/cocofest/actions/runs/31710207813)
+complète les quatre variantes IPOPT sur 100 RHO. Aucune extrapolation PW ne
+domine la répétition sur tous les critères : $\alpha=0.25$ réduit légèrement la
+médiane chaude (`2.6965 s` contre `2.7648 s`) mais augmente les itérations et
+le P90; $\alpha=1$ donne le meilleur P90 (`4.1138 s`) et le plus petit mur
+total (`703.87 s`), sans améliorer la médiane. Le choix robuste reste donc
+`repeat`; une extrapolation ne pourra être retenue que de façon adaptative.
+
+Les quatre cas MadNLP s'arrêtent au RHO 2. Le RHO 1 demande `99` itérations,
+puis le plafond chaud `73` est atteint deux fois avec une infaisabilité
+d'environ `0.246`. Ce n'est pas une comparaison des prédicteurs, car un seul
+cycle antérieur existe à ce stade. Le changement de budget `2000 -> 73` a en
+plus reconstruit une deuxième fois le même évaluateur C de `74 MB`, ajoutant
+environ `346 s` dans la période mesurée. La répétition corrective emploie une
+seule capsule `max_iter=100`; le protocole d'endurance conserve séparément son
+budget `73` et le fallback IPOPT.
+
+Le run ACADOS
+[`31710221449`](https://github.com/mickaelbegon/cocofest/actions/runs/31710221449)
+isole deux causes distinctes. La référence `repeat` et `lag2` résolvent le
+premier RHO, puis échouent en `MINSTEP` au deuxième avec un rayon PW permanent
+de seulement `10 us`. Les variantes de cadence terminale échouent avant le
+premier RHO parce que le seed à environ `-8.98 rad/s` est tronqué directement
+dans la boîte centrée en `-2 pi`; le défaut dynamique monte alors à `0.352` et
+la stationnarité à `153.7`. Le run historique `31522015468`, qui réussissait
+2000 RHO, relâchait la boîte PW après la Phase I et n'imposait pas ce saut de
+cadence.
+
+La campagne corrigée libère donc le rayon PW avant les RHO et resserre
+uniquement la borne terminale de `omega` par les marges
+`3,2.5,2,1.5,1,0.5[,0.3] rad/s`. Les bornes de chemin restent identiques et
+chaque palier doit être certifié. Le gate exige désormais les 30 cycles de
+chaque variante et la disponibilité des erreurs a posteriori `repeat` et
+`lag2`; une réussite isolée du premier RHO ne suffit plus.

@@ -823,20 +823,21 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     dynamiques de l'ordre de $10^{-13}$, mais l'ancien filtre concaténait des
     horizons superposés et créait artificiellement un saut de force Triceps de
     `57.55 N`.
-40. [CI partielle, répétition corrective à lancer] Comparer sur 100 RHO
+40. [CI analysée; répétition corrective préparée localement] Comparer sur 100 RHO
     reduced/SX/Radau-5 compilés la répétition des PW et leur extrapolation
     phase-par-phase avec $\alpha\in\{0.25,0.5,1\}$, séparément pour IPOPT et
     MadNLP/MUMPS. Le run `31654690299` certifie `100/100` RHO pour les quatre
     cas IPOPT. Les médianes sont proches (`2.475--2.549 s`); `alpha=1` améliore
     le P90 de `4.088` à `3.746 s`, mais ne réduit pas la médiane. Les quatre
     cas MadNLP sont invalides : le plafond rapide de `73` itérations a été
-    appliqué au premier RHO, qui doit rester un warm-up non contraint. Le code
-    sépare maintenant le budget du premier RHO de celui des RHO chauds. Le
-    routage CI exclut aussi ACADOS de cette ablation et le rapport attend
-    seulement les deux familles réellement demandées. Relancer avant toute
-    conclusion IPOPT--MadNLP. Si le seed PW seul est bénéfique, tester ensuite
-    un rollout des états de Ding cohérent avec ces contrôles.
-41. [implémenté localement, CI à lancer] Exécuter `cycles=acados_pw_stability`
+    appliqué au premier RHO. Le run correctif `31710207813` montre ensuite que
+    ce premier RHO consomme `99` itérations, mais que le passage `2000 -> 73`
+    reconstruit une seconde capsule C de `74 MB` et que tous les cas s'arrêtent
+    au RHO 2. La prochaine répétition utilise une capsule unique à `100`
+    itérations pour supprimer ce biais; le protocole d'endurance `73 + fallback
+    IPOPT` reste inchangé. Si le seed PW seul est bénéfique, tester ensuite un
+    rollout des états de Ding cohérent avec ces contrôles.
+41. [CI diagnostique analysée; correction locale validée] Exécuter `cycles=acados_pw_stability`
     sur 30 RHO reduced avec assistance nulle. Comparer la référence `repeat`,
     `lag2`, puis une borne terminale absolue sur `omega` de `±0.5` et
     `±0.3 rad/s`. Le résultat JSON calcule les erreurs a posteriori de
@@ -844,7 +845,13 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     seulement si elle supprime l'orbite paire/impaire et rend le cycle
     précédent proche sans augmenter le coût de fatigue, les recoveries ou la
     fatigue des quatre muscles. Tester ensuite, séparément, une faible
-    régularisation proximale des PW.
+    régularisation proximale des PW. Le run `31710221449` échoue au RHO 2 pour
+    `repeat` et `lag2` à cause du rayon PW permanent de `10 us`; les variantes
+    terminales échouent avant RHO 1 à cause de la troncature brutale du seed
+    de `-8.98` vers la cible `-2 pi rad/s`. La correction libère le rayon PW
+    après Phase I, puis resserre hors mesure la seule borne terminale de
+    `omega` selon `3,2.5,2,1.5,1,0.5[,0.3]`. Le gate exige maintenant 30/30 et
+    les deux traces de prédicteur. Tests locaux : `367 passed`; CI à relancer.
 
 La question causale est maintenant resserrée : une seule projection au RHO 19
 ne suffit pas, mais la séquence 19--36 conserve le bassin franchissant le RHO
