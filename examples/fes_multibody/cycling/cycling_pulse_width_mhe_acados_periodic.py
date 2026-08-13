@@ -6204,7 +6204,9 @@ def set_terminal_wheel_qdot_bound_margin(
     # model alias ``qdot``.  The bounds are the runtime source of truth: an
     # explicit scalar ``omega`` block unambiguously identifies the reduced
     # formulation for this continuation.
-    velocity_key = "omega" if "omega" in x_bounds else None
+    # Bioptim's BoundsList supports keyed access but its membership operator
+    # does not have dict semantics; use the explicit key view.
+    velocity_key = "omega" if "omega" in x_bounds.keys() else None
     if velocity_key is None:
         raise ValueError(
             "Terminal wheel-velocity continuation requires reduced omega mechanics."

@@ -4337,6 +4337,20 @@ def test_terminal_wheel_bound_continuation_requires_the_final_target():
 def test_terminal_wheel_qdot_continuation_tightens_only_terminal_bounds(
     monkeypatch,
 ):
+    class FakeBioptimBoundsList:
+        def __init__(self, values):
+            self.values = values
+
+        def keys(self):
+            return self.values.keys()
+
+        def __getitem__(self, key):
+            return self.values[key]
+
+        def __contains__(self, _key):
+            # BoundsList membership is not a reliable keyed-membership test.
+            return False
+
     class FakeSolver:
         def set_convergence_tolerance(self, value):
             self.tolerance = value
@@ -4355,7 +4369,11 @@ def test_terminal_wheel_qdot_continuation_tightens_only_terminal_bounds(
         # metadata fields still describe full q/qdot mechanics.
         velocity_state_key="qdot",
         wheel_state_index=2,
-        nlp=[SimpleNamespace(x_bounds={"omega": bounds})],
+        nlp=[
+            SimpleNamespace(
+                x_bounds=FakeBioptimBoundsList({"omega": bounds})
+            )
+        ],
         _sync_acados_state_bounds=lambda: sync_calls.append(True),
     )
     observed = []
