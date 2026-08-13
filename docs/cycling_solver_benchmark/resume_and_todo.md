@@ -865,13 +865,20 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     survient après une itération et le préfixe reste `9/30`. Ne pas retenir ce
     retry PW seul. Si cette piste est reprise, transférer une primale complète
     phase-alignée puis corriger fatigue et état initial par rollout/sensibilité.
-43. [implémenté, CI à lancer] Comparer avec la borne terminale `+/-0.3` une très faible
+43. [validé négatif, run `31743379091`] Comparer avec la borne terminale `+/-0.3` une très faible
     régularisation proximale des PW et une faible pénalité terminale de cadence.
     Les tester séparément : elles changent l'objectif. Rejeter toute variante
     qui n'améliore pas le P90 ou qui change matériellement le coût de fatigue,
     les quatre AUC ou les ensembles actifs. L'ablation emploie des poids `100`
     et `1000` sur les contrôles scaled, avec une cible recentrée sur la primale
     préparée à chaque RHO. Elle n'ajoute pas un second solve de continuation.
+    Les trois cas certifient `30/30` avec 38 itérations cumulées. La référence,
+    `100` et `1000` donnent respectivement des médianes/P90 muraux de
+    `0.0530/0.0555`, `0.0550/0.0590` et `0.0551/0.0554 s`. La fatigue exécutée
+    reste `110.598886` et les capacités finales des quatre muscles sont
+    identiques aux chiffres utiles; les PW et les ensembles actifs ne changent
+    pas matériellement. La proximité permanente est donc rejetée : elle
+    n'apporte ni vitesse ni stabilité mesurable.
 44. [à prototyper] Construire une capsule MadNLP/MUMPS reduced/SX/Radau-5 une
     seule fois avant la période online. Les états initiaux et les bornes
     terminales changent comme `lbx/ubx` à runtime; la bibliothèque C de
@@ -888,6 +895,11 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     restauration PW dans une base spline/Fourier/POD; (f) prédicteur appris
     seulement après constitution d'un jeu de solutions certifiées. Prioriser
     (a)--(c), qui conservent la structure et offrent des critères KKT audités.
+46. [CI à lancer] Promouvoir le candidat ACADOS reduced sans biais : IRK/SQP,
+    borne terminale absolue `omega = -2*pi +/- 0.3 rad/s`, répétition des PW et
+    rayon Phase-I relâché. Exécuter seul `100` RHO via
+    `cycles=acados_reduced_100`; comparer au témoin 30 RHO les temps, les
+    itérations, l'angle absolu, la cadence, la fatigue et les quatre capacités.
 
 La question causale est maintenant resserrée : une seule projection au RHO 19
 ne suffit pas, mais la séquence 19--36 conserve le bassin franchissant le RHO

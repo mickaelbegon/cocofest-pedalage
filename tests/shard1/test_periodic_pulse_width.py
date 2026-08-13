@@ -7563,6 +7563,8 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert "--acados-control-regularization-weight 100" in workflow
     assert "--acados-control-regularization-weight 1000" in workflow
     assert "--acados-control-regularization-target-source previous" in workflow
+    assert 'if [[ "$variant" == *"terminal-omega"* ]]; then' in workflow
+    assert "run_case sqp-irk-terminal-omega-0p3 reduced \"$ACADOS_SMOKE_RHOS\"" in workflow
     assert "export MADNLP_FAST_MAX_ITERATIONS=100" in workflow
     assert "export MADNLP_FIRST_MAX_ITERATIONS=none" in workflow
     assert "The cadence-guard case requires its preceding ACADOS reference seed." in workflow

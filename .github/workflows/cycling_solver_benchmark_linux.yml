@@ -1439,6 +1439,13 @@ jobs:
                 --acados-terminal-wheel-qdot-homotopy-margins 3,2.5,2,1.5,1,0.5,0.3
               )
             fi
+            if [[ "$variant" == *"terminal-omega"* ]]; then
+              # Both 30-RHO terminal-cadence candidates were validated only
+              # after releasing the Phase-I PW radius. Keeping a permanent
+              # +/-10 us box changes the physical optimum and previously
+              # stopped repeat/lag2 at RHO 2.
+              solver_options+=(--acados-control-homotopy-release-final-radius)
+            fi
             if [[ "$variant" == *"pw-prox-1e2"* ]]; then
               # Weak stagewise proximity to the prepared previous-cycle PW.
               # The target is recentered at every RHO; executed fatigue is
@@ -1813,13 +1820,15 @@ jobs:
             run_case sqp-irk-fast-guard-2p6-phase-one-mechanical full "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
           elif [[ "$ACADOS_REDUCED_100_ONLY" == "true" ]]; then
             # Keep the dedicated reduced 100-RHO measurement compact: create
-            # the ACADOS-native reduced seed once, then time the strongest
-            # tested bound-restoration/cadence regularization configuration.
+            # the ACADOS-native reduced seed once, then test the strongest
+            # unbiased 30-RHO candidate. The absolute terminal omega band
+            # removes the parity orbit without imposing constant cadence
+            # inside the cycle; no permanent PW proximity term is retained.
             printf '%s\n' \
               sqp-irk-reference-reduced \
               > acados-smoke-results/reference-cases.txt
             run_case sqp-irk-reference reduced 1 SQP IRK 5 5
-            run_case sqp-irk-two-stage-cadence-reg-0p1 reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
+            run_case sqp-irk-terminal-omega-0p3 reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
           elif [[ "$ACADOS_RECOVERY_ONLY" == "true" ]]; then
             # Paired recovery experiment for the first certified failure at
             # RHO 81. Build the reference seed once, then compare genuinely
