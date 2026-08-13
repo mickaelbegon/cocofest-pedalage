@@ -18453,6 +18453,10 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         "acados_diagnostics": [],
         "advance_window": [],
         "update_functions": [],
+        "completed_window_diagnostics": [],
+        "terminal_state_extraction": [],
+        "bound_projection": [],
+        "initial_guess_audit": [],
     }
 
     def advance_only_certified_window(self, solution, *advance_args, **advance_kwargs):
@@ -19019,7 +19023,11 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         if args.solver == "acados" and _sol is not None:
             # Auxiliary refinement and homotopy solves reuse the mutable Acados
             # backend. Snapshot the completed window before they overwrite it.
+            diagnostics_start = perf_counter()
             completed_window_diagnostics = snapshot_acados_diagnostics(_sol)
+            orchestration_timing_samples["completed_window_diagnostics"].append(
+                perf_counter() - diagnostics_start
+            )
             acados_window_diagnostics.append(completed_window_diagnostics)
             applied_dual_summary = dict(
                 getattr(
@@ -19035,7 +19043,11 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             applied_dual_summary["window"] = cycle_idx - 1
             acados_dual_warm_start_summaries.append(applied_dual_summary)
         if echo and _sol is not None:
+            state_extraction_start = perf_counter()
             states = _sol.decision_states(to_merge=SolutionMerge.NODES)
+            orchestration_timing_samples["terminal_state_extraction"].append(
+                perf_counter() - state_extraction_start
+            )
             position_key = _nmpc.position_state_key
             velocity_key = _nmpc.velocity_state_key
             wheel_index = _nmpc.wheel_state_index
@@ -19640,7 +19652,11 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                     f"{mechanical_summary.get('control_max_change_by_key')}"
                 )
         if continue_solving and _sol is not None:
+            bound_projection_start = perf_counter()
             bound_projection = project_transferred_initial_guess_to_bounds(_nmpc)
+            orchestration_timing_samples["bound_projection"].append(
+                perf_counter() - bound_projection_start
+            )
             bound_projection["window"] = cycle_idx
             transfer_bound_projection_summaries.append(bound_projection)
             if echo:
@@ -19866,7 +19882,11 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                             f"{item.get('node_count')}"
                         )
         if continue_solving and _sol is not None:
+            audit_start = perf_counter()
             next_audit = audit_initial_guess(_nmpc)
+            orchestration_timing_samples["initial_guess_audit"].append(
+                perf_counter() - audit_start
+            )
             next_audit.pop("snapshot")
             if initial_guess_diagnostics_requested:
                 next_diagnostics = collect_initial_guess_diagnostics(_nmpc)
