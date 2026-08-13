@@ -18475,7 +18475,7 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                         "target_rho": target_rho,
                         "target_failed_status": int(solution.status),
                         "target_failed_feasibility": dict(feasibility),
-                        "solver_reset": reset_acados_solver_memory(self),
+                        "solver_reset_applied": reset_acados_solver_memory(self),
                         "wall_time_s": perf_counter() - predictor_start,
                     }
                 )
@@ -18491,7 +18491,7 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                             f"maximum_change_s="
                             f"{predictor_summary['maximum_change_s']:.6g} "
                             f"solver_reset="
-                            f"{predictor_summary['solver_reset']['applied']}"
+                            f"{predictor_summary['solver_reset_applied']}"
                         )
                     retry_same_rho_summaries.append(
                         {

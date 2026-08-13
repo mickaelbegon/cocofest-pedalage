@@ -1,4 +1,5 @@
 import importlib.util
+import inspect
 import os
 import numpy as np
 import pytest
@@ -10290,6 +10291,14 @@ def test_alternate_pw_predictor_cli_is_explicit():
 
     assert periodic_args.acados_failed_rho_alternate_pw_predictor is True
     assert comparison_args.acados_failed_rho_alternate_pw_predictor is True
+
+
+def test_alternate_pw_retry_records_boolean_solver_reset_contract():
+    source = inspect.getsource(periodic_example.solve_case)
+
+    assert '"solver_reset_applied": reset_acados_solver_memory(self)' in source
+    assert "predictor_summary['solver_reset_applied']" in source
+    assert "predictor_summary['solver_reset']['applied']" not in source
 
 
 def test_historical_collocation_control_transfer_uses_control_cycle_length():
