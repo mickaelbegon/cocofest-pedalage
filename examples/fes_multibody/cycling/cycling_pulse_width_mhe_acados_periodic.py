@@ -19828,7 +19828,7 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                 print_acados_diagnostics(
                     f"window[{cycle_idx - 1}]", completed_window_diagnostics
                 )
-                if continue_solving:
+                if continue_solving and initial_guess_diagnostics_requested:
                     print(f"window[{cycle_idx}] transferred_initial_guess_diagnostics:")
                     print_initial_guess_diagnostics(_nmpc)
         retained_homotopy_radius = getattr(

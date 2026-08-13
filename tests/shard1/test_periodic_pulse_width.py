@@ -6832,6 +6832,12 @@ def test_timing_sample_summary_is_compact_and_ignores_nonfinite_values():
     }
 
 
+def test_acados_diagnostics_do_not_implicitly_enable_expensive_seed_diagnostics():
+    source = inspect.getsource(periodic_example.solve_case)
+
+    assert "if continue_solving and initial_guess_diagnostics_requested:" in source
+
+
 def test_feasibility_rejects_solution_without_constraint_metric():
     class FakeSolution:
         constraints = None
