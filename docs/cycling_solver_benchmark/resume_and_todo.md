@@ -924,6 +924,16 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     itérations : `0.121 s/RHO` pour la boucle après construction et
     `0.0531/0.0535 s` pour la médiane/P90 de l'appel solveur. Conserver
     `--acados-diagnostics` uniquement pour les runs causaux.
+48. [prêt à exécuter sur le Ryzen 9 5950X] Le protocole
+    `ryzen5950x_endurance.md` et le lanceur
+    `.github/scripts/run_ryzen5950x_endurance_sweep.sh` comparent reduced
+    Radau-5 IPOPT compilé, MadNLP/MUMPS compilé avec fallback IPOPT et ACADOS
+    SQP/IRK avec fallback IPOPT, pour les résistances signées `+0.10`, `+0.15`
+    et `+0.20 N.m`, jusqu'à 2 000 RHO ou deux échecs. Calibrer d'abord 16
+    contre 30 threads sur 30 RHO et trois répétitions; la baseline reste 16
+    cœurs physiques, sans parallélisme BLAS/OpenMP imbriqué. Après exécution,
+    distinguer obligatoirement `fatigue_limited_candidate` de
+    `unconfirmed_endurance_stop` et les succès natifs des fallbacks.
 
 La question causale est maintenant resserrée : une seule projection au RHO 19
 ne suffit pas, mais la séquence 19--36 conserve le bassin franchissant le RHO

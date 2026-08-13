@@ -14,7 +14,9 @@ considérer terminées.
 
 Pour déplacer la campagne sur un nouveau calculateur, utiliser le
 [prompt de continuation](continuation_prompt.md) et la
-[procédure Linux 32 cœurs](linux_32core_setup.md).
+[procédure Linux 32 cœurs](linux_32core_setup.md). Le benchmark d'endurance
+apparié par résistance pour un Ryzen 9 5950X possède un
+[protocole dédié et reprenable](ryzen5950x_endurance.md).
 
 ## Versions reproductibles du workflow actif
 

@@ -659,6 +659,16 @@ dense. La campagne 30/100 RHO et le sweep de threads viennent ensuite.
 
 ## 16. Références d'installation
 
+Pour la campagne d'endurance actuelle sur Ryzen 9 5950X, ne pas réutiliser
+directement les anciennes commandes de la section 14, qui pointent vers une
+branche et un dépôt historiques. Utiliser le protocole reprenable
+[`ryzen5950x_endurance.md`](ryzen5950x_endurance.md). Il conserve les deux
+environnements décrits ici, calibre `16` contre `30` threads, puis exécute
+séquentiellement IPOPT, MadNLP+IPOPT et ACADOS+IPOPT sur plusieurs couples
+résistants.
+
+## 17. Références externes
+
 - [Miniforge — installateurs et installation Linux](https://github.com/conda-forge/miniforge/blob/main/README.md)
 - [Juliaup — installation et sélection d'une version Julia](https://github.com/JuliaLang/juliaup)
 - [GitHub — ajouter un runner autohébergé](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/add-runners)
