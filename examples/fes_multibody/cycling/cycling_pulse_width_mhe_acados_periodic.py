@@ -7933,6 +7933,28 @@ def _window_feasibility_tolerance(args: argparse.Namespace) -> float:
     return args.nlp_tolerance
 
 
+def summarize_timing_samples(samples: list[float]) -> dict[str, float | int | None]:
+    """Return compact wall-time statistics without changing the measured path."""
+
+    values = np.asarray(samples, dtype=float).reshape(-1)
+    values = values[np.isfinite(values)]
+    if not values.size:
+        return {
+            "count": 0,
+            "total_wall_time_s": 0.0,
+            "median_wall_time_s": None,
+            "p90_wall_time_s": None,
+            "maximum_wall_time_s": None,
+        }
+    return {
+        "count": int(values.size),
+        "total_wall_time_s": float(np.sum(values)),
+        "median_wall_time_s": float(np.median(values)),
+        "p90_wall_time_s": float(np.percentile(values, 90)),
+        "maximum_wall_time_s": float(np.max(values)),
+    }
+
+
 def _wheel_cycle_diagnostic_tolerances(
     args: argparse.Namespace,
     wheel_q_scaling: float = 1.0,
@@ -18400,13 +18422,21 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         # feasibility while its lbx/ubx still describe this window; otherwise
         # post-processing compares old decisions with the final window bounds.
         compiled_nlp_tracker.record(_nmpc, _nmpc.total_optimization_run)
+        feasibility_start = perf_counter()
         feasibility = _solution_feasibility_summary(
             solution, window_feasibility_tolerance
         )
+        orchestration_timing_samples["feasibility_audit"].append(
+            perf_counter() - feasibility_start
+        )
         if args.solver == "acados":
+            diagnostics_start = perf_counter()
             feasibility = augment_feasibility_with_acados_residuals(
                 feasibility,
                 snapshot_acados_diagnostics(solution),
+            )
+            orchestration_timing_samples["acados_diagnostics"].append(
+                perf_counter() - diagnostics_start
             )
         solution._cocofest_feasibility_summary = feasibility
         save_common_initial_solution(solution)
@@ -18417,6 +18447,13 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
     completed_physical_rhos = 0
     recovery_attempts_by_target_rho: dict[int, int] = {}
     original_advance_window = nmpc.advance_window
+    orchestration_timing_samples = {
+        "snapshot_completed_window": [],
+        "feasibility_audit": [],
+        "acados_diagnostics": [],
+        "advance_window": [],
+        "update_functions": [],
+    }
 
     def advance_only_certified_window(self, solution, *advance_args, **advance_kwargs):
         """Do not contaminate the next RHO with an uncertified primal.
@@ -18434,7 +18471,11 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         solution._cocofest_attempt_index = int(self.total_optimization_run) + 1
         solution._cocofest_target_rho = target_rho
         solution._cocofest_advanced_physical_rho = False
+        snapshot_start = perf_counter()
         snapshot_completed_window(self, solution)
+        orchestration_timing_samples["snapshot_completed_window"].append(
+            perf_counter() - snapshot_start
+        )
         feasibility = getattr(solution, "_cocofest_feasibility_summary", {})
         certified = _rho_solution_is_certified(solution.status, feasibility)
         target_solution_was_certified = certified
@@ -18794,8 +18835,12 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                 original_before_window_advance = self.before_window_advance
                 self.before_window_advance = None
                 try:
+                    advance_start = perf_counter()
                     advance_result = original_advance_window(
                         fallback_adapter, *advance_args, **advance_kwargs
+                    )
+                    orchestration_timing_samples["advance_window"].append(
+                        perf_counter() - advance_start
                     )
                 finally:
                     self.before_window_advance = original_before_window_advance
@@ -18864,8 +18909,12 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         original_before_window_advance = self.before_window_advance
         self.before_window_advance = None
         try:
+            advance_start = perf_counter()
             advance_result = original_advance_window(
                 solution, *advance_args, **advance_kwargs
+            )
+            orchestration_timing_samples["advance_window"].append(
+                perf_counter() - advance_start
             )
         finally:
             self.before_window_advance = original_before_window_advance
@@ -19929,6 +19978,17 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                 )
         return continue_solving
 
+    untimed_update_functions = update_functions
+
+    def update_functions(_nmpc, cycle_idx, _sol):
+        update_start = perf_counter()
+        try:
+            return untimed_update_functions(_nmpc, cycle_idx, _sol)
+        finally:
+            orchestration_timing_samples["update_functions"].append(
+                perf_counter() - update_start
+            )
+
     solver_first_iter = None
     if args.solver == "acados":
         if args.acados_warm_start_first_qp_from_nlp and args.acados_qp_cond_n not in (
@@ -20608,6 +20668,10 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             "mechanical_audit_wall_time_s": 0.0,
             "high_accuracy_trace_rollout_wall_time_s": 0.0,
             "solution_export_wall_time_s": 0.0,
+            "rho_orchestration_profile": {
+                key: summarize_timing_samples(values)
+                for key, values in orchestration_timing_samples.items()
+            },
         }
         attach_exact_initial_nlp_audits(summary, nmpc)
         return summary
@@ -20929,6 +20993,10 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             high_accuracy_trace_rollout_wall_time_s
         ),
         "solution_export_wall_time_s": solution_export_wall_time_s,
+        "rho_orchestration_profile": {
+            key: summarize_timing_samples(values)
+            for key, values in orchestration_timing_samples.items()
+        },
     }
     return summary
 

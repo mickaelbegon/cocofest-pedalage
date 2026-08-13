@@ -6812,6 +6812,26 @@ def test_independent_bound_violation_accepts_infinite_bounds():
     assert violation == 0.0
 
 
+def test_timing_sample_summary_is_compact_and_ignores_nonfinite_values():
+    summary = periodic_example.summarize_timing_samples(
+        [0.1, 0.2, 0.3, np.nan, np.inf]
+    )
+    empty = periodic_example.summarize_timing_samples([])
+
+    assert summary["count"] == 3
+    assert summary["total_wall_time_s"] == pytest.approx(0.6)
+    assert summary["median_wall_time_s"] == pytest.approx(0.2)
+    assert summary["p90_wall_time_s"] == pytest.approx(0.28)
+    assert summary["maximum_wall_time_s"] == pytest.approx(0.3)
+    assert empty == {
+        "count": 0,
+        "total_wall_time_s": 0.0,
+        "median_wall_time_s": None,
+        "p90_wall_time_s": None,
+        "maximum_wall_time_s": None,
+    }
+
+
 def test_feasibility_rejects_solution_without_constraint_metric():
     class FakeSolution:
         constraints = None
