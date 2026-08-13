@@ -7532,6 +7532,9 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     ) in workflow
     assert 'ACADOS_PW_STABILITY_ONLY: ${{ inputs.cycles == \'acados_pw_stability\' }}' in workflow
     assert "ACADOS PW stability case ${case_name} did not certify" in workflow
+    assert "run_case sqp-irk-alternate-pw-retry reduced" in workflow
+    assert "--acados-failed-rho-alternate-pw-predictor" in workflow
+    assert "The alternate-PW retry case did not exercise" in workflow
     assert "export MADNLP_FAST_MAX_ITERATIONS=100" in workflow
     assert "export MADNLP_FIRST_MAX_ITERATIONS=none" in workflow
     assert "The cadence-guard case requires its preceding ACADOS reference seed." in workflow

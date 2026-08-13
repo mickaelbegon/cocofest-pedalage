@@ -837,7 +837,7 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     itérations pour supprimer ce biais; le protocole d'endurance `73 + fallback
     IPOPT` reste inchangé. Si le seed PW seul est bénéfique, tester ensuite un
     rollout des états de Ding cohérent avec ces contrôles.
-41. [CI diagnostique analysée; correction locale validée] Exécuter `cycles=acados_pw_stability`
+41. [validé, run `31740586301`] Exécuter `cycles=acados_pw_stability`
     sur 30 RHO reduced avec assistance nulle. Comparer la référence `repeat`,
     `lag2`, puis une borne terminale absolue sur `omega` de `±0.5` et
     `±0.3 rad/s`. Le résultat JSON calcule les erreurs a posteriori de
@@ -850,8 +850,38 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     terminales échouent avant RHO 1 à cause de la troncature brutale du seed
     de `-8.98` vers la cible `-2 pi rad/s`. La correction libère le rayon PW
     après Phase I, puis resserre hors mesure la seule borne terminale de
-    `omega` selon `3,2.5,2,1.5,1,0.5[,0.3]`. Le gate exige maintenant 30/30 et
-    les deux traces de prédicteur. Tests locaux : `367 passed`; CI à relancer.
+    `omega` selon `3,2.5,2,1.5,1,0.5[,0.3]`. Les variantes terminales
+    certifient toutes `30/30`; sans elles, `repeat` s'arrête à 9 et `lag2` à
+    24. La marge `0.3` conserve une médiane chaude de `0.053 s` et un P90 de
+    `0.054 s`. `repeat` redevient plus précis que `lag2` (`0.082` contre
+    `0.123 us` en moyenne groupée). Retenir provisoirement la borne terminale
+    `+/-0.3`, sans cadence constante à l'intérieur du cycle.
+42. [implémenté, CI à lancer] Au premier RHO ACADOS non certifié, restaurer le
+    checkpoint préparé, remplacer uniquement le prédicteur PW `repeat` par
+    `lag2`, réinitialiser la mémoire SQP/QP et réessayer le même RHO. Exiger
+    que le résumé prouve l'exécution du chemin et qu'aucun RHO non certifié
+    n'avance la fatigue. Ce mécanisme reste un retry, pas le prédicteur nominal.
+43. [à faire après 42] Comparer avec la borne terminale `+/-0.3` une très faible
+    régularisation proximale des PW et une faible pénalité terminale de cadence.
+    Les tester séparément : elles changent l'objectif. Rejeter toute variante
+    qui n'améliore pas le P90 ou qui change matériellement le coût de fatigue,
+    les quatre AUC ou les ensembles actifs.
+44. [à prototyper] Construire une capsule MadNLP/MUMPS reduced/SX/Radau-5 une
+    seule fois avant la période online. Les états initiaux et les bornes
+    terminales changent comme `lbx/ubx` à runtime; la bibliothèque C de
+    l'objectif et des contraintes doit rester identique. Au premier échec
+    ACADOS : MadNLP borné restaure le même RHO, ACADOS recertifie, puis IPOPT
+    R5 reste le certifieur final si nécessaire. Mesurer séparément compilation,
+    MadNLP, recertification et fallback; ne pas conclure à la robustesse sur la
+    seule médiane.
+45. [directions warm-start non testées, ordre recommandé] (a) prédicteur
+    advanced-step par sensibilité KKT primal-dual aux états de fatigue et aux
+    bornes; (b) hysteresis des ensembles actifs autour de `pd0`; (c) homotopie
+    sur charge/fatigue au seul RHO difficile; (d) banque de seeds par régime,
+    au minimum paire/impaire tant que l'orbite n'est pas éliminée; (e)
+    restauration PW dans une base spline/Fourier/POD; (f) prédicteur appris
+    seulement après constitution d'un jeu de solutions certifiées. Prioriser
+    (a)--(c), qui conservent la structure et offrent des critères KKT audités.
 
 La question causale est maintenant resserrée : une seule projection au RHO 19
 ne suffit pas, mais la séquence 19--36 conserve le bassin franchissant le RHO

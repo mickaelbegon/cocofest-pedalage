@@ -1674,15 +1674,24 @@ infaisable, tout en éliminant l'overshoot dense de `0.400 rad/s` observé avec
 les seules bornes nodales. Le prédicteur reste une approximation économique;
 l'audit dense demeure donc obligatoire.
 
-Une nouvelle ablation cible l'alternance paire/impaire observée dans les PW
-ACADOS. Elle compare le transfert du cycle précédent (`repeat`), le cycle de
-même parité (`lag2`) et une borne **seulement terminale** sur la vitesse du
-pédalier autour de `-2*pi rad/s` (`±0.5` puis `±0.3 rad/s`). Les vitesses
-internes au cycle restent libres dans la boîte physique; il ne s'agit donc pas
-d'imposer une cadence constante. `lag2` sert de diagnostic : le choix de
-production restera `repeat` si la borne terminale supprime correctement
-l'orbite. Le mode CI est `cycles=acados_pw_stability`; aucune conclusion de
-performance ne sera tirée avant cette campagne appariée.
+L'ablation appariée
+[`31740586301`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/31740586301)
+montre que l'alternance paire/impaire observée dans les PW ACADOS venait
+principalement de la cadence terminale trop libre. Sans nouvelle condition,
+`repeat` s'arrête à `9/30` RHO et `lag2` à `24/30`. Une borne **seulement
+terminale** sur la vitesse du pédalier autour de `-2*pi rad/s` permet `30/30`
+avec `±0.5` comme avec `±0.3 rad/s`; les vitesses internes au cycle restent
+libres dans la boîte physique. Avec `±0.3`, la médiane/P90 chaude vaut
+`0.0529/0.0544 s`, pour 38 itérations SQP cumulées sur 30 RHO. L'erreur PW
+moyenne de `repeat` vaut `0.082 us`, contre `0.123 us` pour `lag2` : le cycle
+précédent redevient le warm-start nominal pertinent.
+
+La marge `±0.3 rad/s` est retenue provisoirement, car ACADOS exploite la face
+rapide de la boîte (`omega_T` proche de `-2*pi-0.3`). Une marge plus stricte ou
+une faible pénalité vers la cadence cible doit encore être testée avant
+l'endurance. `lag2` est conservé uniquement comme retry du même RHO après
+restauration du checkpoint; il ne doit ni entretenir une orbite de période deux
+ni faire avancer un primal non certifié.
 
 ## 7. Reproductibilité
 

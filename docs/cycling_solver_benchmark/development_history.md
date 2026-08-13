@@ -5407,3 +5407,49 @@ uniquement la borne terminale de `omega` par les marges
 chaque palier doit être certifié. Le gate exige désormais les 30 cycles de
 chaque variante et la disponibilité des erreurs a posteriori `repeat` et
 `lag2`; une réussite isolée du premier RHO ne suffit plus.
+
+## 38. Suppression de l'orbite ACADOS par la cadence terminale (13 août 2026)
+
+Le run apparié
+[`31740586301`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/31740586301)
+établit que l'orbite paire/impaire venait principalement de la liberté sur la
+cadence terminale, et non du seul prédicteur PW. Sans borne terminale, la
+répétition s'arrête au RHO 10 (`9/30`) et `lag2` au RHO 25 (`24/30`). Avec la
+borne absolue centrée sur `-2*pi`, les trois variantes terminales certifient
+`30/30` RHO sans recovery :
+
+| Variante reduced IRK/SQP | RHO | Itérations totales | Médiane chaude | P90 chaud | Objectif fatigue, 30 RHO |
+|---|---:|---:|---:|---:|---:|
+| `repeat`, aucune borne terminale | 9/30 | 60 | 0.203 s | 0.259 s | non comparable |
+| `lag2`, aucune borne terminale | 24/30 | 79 | 0.077 s | 0.181 s | non comparable |
+| `repeat`, `omega_T = -2*pi +/- 0.5` | 30/30 | 37 | 0.053 s | 0.057 s | 113.047 |
+| `repeat`, `omega_T = -2*pi +/- 0.3` | 30/30 | 38 | 0.053 s | 0.054 s | 114.275 |
+| `lag2`, `omega_T = -2*pi +/- 0.5` | 30/30 | 42 | 0.053 s | 0.104 s | 113.041 |
+
+Avec `+/-0.5`, l'erreur PW moyenne a posteriori du prédicteur `repeat` tombe
+de `8.50 us` dans la référence partielle à `0.0765 us`; `lag2` vaut alors
+`0.112 us`. Le cycle précédent redevient donc le meilleur prédicteur. Ajouter
+`lag2` à la borne terminale ne change ni l'objectif (`-0.006 %`) ni les
+capacités musculaires à une précision utile, mais détériore le P90. Il reste un
+filet de récupération possible, pas le warm-start nominal.
+
+Le solveur exploite la face rapide de la boîte : au RHO 30, `omega_T` vaut
+environ `-6.783185 rad/s` pour la marge `0.5`, et `-6.583185 rad/s` pour la
+marge `0.3`. La marge `0.3` est donc retenue provisoirement : elle conserve la
+robustesse et le temps de `53 ms`, tout en réduisant l'écart de cadence et sans
+imposer `omega` constant à l'intérieur du cycle. Une marge plus stricte ou une
+faible pénalité terminale vers `-2*pi` devra être comparée avant la campagne
+d'endurance.
+
+Le job a été marqué rouge uniquement parce que son garde-fou exigeait à tort
+`30/30` pour les deux témoins volontairement susceptibles de s'arrêter. Les
+cinq JSON sont complets et sans erreur. Le gate est corrigé : une
+non-convergence scientifique demeure un résultat; seules une erreur
+d'infrastructure, l'absence de tentative ou l'absence des traces demandées
+font échouer la CI.
+
+Le prochain run ajoute un cas causal `repeat -> lag2` uniquement après un RHO
+ACADOS non certifié. Il restaure le checkpoint exact, ne change que les PW du
+dernier cycle, réinitialise la mémoire SQP/QP et réessaie le même RHO. Ce test
+mesurera C sans modifier l'OCP nominal. La régularisation proximale E restera
+séparée, car elle modifie l'objectif numérique.
