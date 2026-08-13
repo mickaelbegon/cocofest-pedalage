@@ -7288,6 +7288,16 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
         "inputs.cycles != 'fatigue_endurance_radau5'"
     ) in workflow
     assert "cycling-acados-smoke-${{ github.run_id }}" in workflow
+    assert "inputs.cycles != 'pw_transfer_ablation'" in workflow.split(
+        "prepare-acados-stack:", maxsplit=1
+    )[1].split("acados-smoke:", maxsplit=1)[0]
+    assert "inputs.cycles != 'pw_transfer_ablation'" in workflow.split(
+        "acados-smoke:", maxsplit=1
+    )[1].split("benchmark:", maxsplit=1)[0]
+    assert "expected_cases=\"ipopt-radau5/reduced,madnlp-mumps-radau5/reduced\"" in workflow
+    assert "PW predictor repeat MAE (us)" in workflow
+    assert "PW predictor lag2 MAE (us)" in workflow
+    assert "PW predictor extrapolation MAE (us)" in workflow
     assert workflow.count("name: Save the MadNLP numerical stack") == 2
     assert (
         "matrix.solver == 'madnlp' && "
@@ -7371,6 +7381,7 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert "--acados-wheel-qdot-regularization-weight 1" in workflow
     assert "reference-full-feasible-seed.npz" in workflow
     assert "reference-reduced-feasible-seed.npz" in workflow
+    assert "The PW-stability case requires its preceding reduced ACADOS seed." in workflow
     assert "The cadence-guard case requires its preceding ACADOS reference seed." in workflow
     assert "--common-initial-solution-output" in workflow
     assert '--common-initial-solution "$common_seed"' in workflow

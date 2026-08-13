@@ -823,12 +823,19 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     dynamiques de l'ordre de $10^{-13}$, mais l'ancien filtre concaténait des
     horizons superposés et créait artificiellement un saut de force Triceps de
     `57.55 N`.
-40. [implémenté localement, CI à lancer] Comparer sur 100 RHO reduced/SX/Radau-5
-    compilés la répétition des PW et leur extrapolation phase-par-phase avec
-    $\alpha\in\{0.25,0.5,1\}$, séparément pour IPOPT et MadNLP/MUMPS. Rapporter
-    somme et moyenne des itérations, temps hot médian/P90, échecs, coût et
-    fatigue. Si le seed PW seul est bénéfique, tester ensuite un rollout des
-    états de Ding cohérent avec ces contrôles.
+40. [CI partielle, répétition corrective à lancer] Comparer sur 100 RHO
+    reduced/SX/Radau-5 compilés la répétition des PW et leur extrapolation
+    phase-par-phase avec $\alpha\in\{0.25,0.5,1\}$, séparément pour IPOPT et
+    MadNLP/MUMPS. Le run `31654690299` certifie `100/100` RHO pour les quatre
+    cas IPOPT. Les médianes sont proches (`2.475--2.549 s`); `alpha=1` améliore
+    le P90 de `4.088` à `3.746 s`, mais ne réduit pas la médiane. Les quatre
+    cas MadNLP sont invalides : le plafond rapide de `73` itérations a été
+    appliqué au premier RHO, qui doit rester un warm-up non contraint. Le code
+    sépare maintenant le budget du premier RHO de celui des RHO chauds. Le
+    routage CI exclut aussi ACADOS de cette ablation et le rapport attend
+    seulement les deux familles réellement demandées. Relancer avant toute
+    conclusion IPOPT--MadNLP. Si le seed PW seul est bénéfique, tester ensuite
+    un rollout des états de Ding cohérent avec ces contrôles.
 41. [implémenté localement, CI à lancer] Exécuter `cycles=acados_pw_stability`
     sur 30 RHO reduced avec assistance nulle. Comparer la référence `repeat`,
     `lag2`, puis une borne terminale absolue sur `omega` de `±0.5` et

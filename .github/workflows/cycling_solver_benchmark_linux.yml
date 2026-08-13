@@ -1033,7 +1033,7 @@ jobs:
 
   prepare-acados-stack:
     name: Prepare the cached ACADOS numerical stack
-    if: ${{ inputs.cycles != 'screen' && inputs.cycles != 'full_horizon' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles_per_window == '1' }}
+    if: ${{ inputs.cycles != 'screen' && inputs.cycles != 'full_horizon' && inputs.cycles != 'pw_transfer_ablation' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles_per_window == '1' }}
     needs: prepare-seed
     runs-on: ${{ inputs.runner_label }}
     timeout-minutes: 120
@@ -1157,7 +1157,7 @@ jobs:
 
   acados-smoke:
     name: ACADOS — sequential full/reduced and option screen
-    if: ${{ inputs.cycles != 'screen' && inputs.cycles != 'full_horizon' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles != 'acados_dropout' && inputs.cycles_per_window == '1' }}
+    if: ${{ inputs.cycles != 'screen' && inputs.cycles != 'full_horizon' && inputs.cycles != 'pw_transfer_ablation' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles != 'acados_dropout' && inputs.cycles_per_window == '1' }}
     needs: [prepare-seed, prepare-acados-stack]
     runs-on: ${{ inputs.runner_label }}
     timeout-minutes: 240
@@ -1348,6 +1348,16 @@ jobs:
                   echo "The cadence-guard case requires its preceding ACADOS reference seed." >&2
                   return 2
                 fi
+              fi
+            elif [[ "$mechanics" == "reduced" && ( "$variant" == *"pw-lag2"* || "$variant" == *"terminal-omega"* ) ]]; then
+              # The stability ablation must change only the predictor or the
+              # terminal omega band. Reuse the first ACADOS-certified reduced
+              # primal rather than rebuilding every case from the less
+              # consistent collocation bridge.
+              common_seed="$GITHUB_WORKSPACE/acados-smoke-results/reference-reduced-feasible-seed.npz"
+              if [[ ! -f "$common_seed" ]]; then
+                echo "The PW-stability case requires its preceding reduced ACADOS seed." >&2
+                return 2
               fi
             elif [[ ( "$variant" == "sqp-irk-two-stage-cadence-reg-1" || "$variant" == "sqp-irk-cadence-reg-1-rollout-guard" || "$variant" == "sqp-irk-cadence-reg-1-best-retry" || "$variant" == "sqp-byrd-omojokun-cadence-reg-1-irk" || "$variant" == "sqp-byrd-terminal-homotopy-cadence-reg-1-irk" || "$variant" == "sqp-byrd-rollout-accept-cadence-reg-1-irk" || "$variant" == "sqp-byrd-projected-selector-cadence-reg-1-irk" ) && "$mechanics" == "full" ]]; then
               common_seed="$GITHUB_WORKSPACE/acados-smoke-results/reference-full-feasible-seed.npz"
@@ -1944,6 +1954,9 @@ jobs:
                 "| Hot RHO + Phase-I max (s) | \(.hot_effective_plus_phase_one_wall_time_max_s) |",
                 "| Conditional MAXITER retries | \((.acados_maxiter_retry_summaries // []) | length) |",
                 "| First failed RHO | \(.first_failed_rho) |",
+                "| PW predictor repeat MAE (us) | \(.pulse_width_cycle_variation.pooled_predictor_error_us.repeat.mean) |",
+                "| PW predictor lag2 MAE (us) | \(.pulse_width_cycle_variation.pooled_predictor_error_us.lag2.mean) |",
+                "| PW predictor extrapolation MAE (us) | \(.pulse_width_cycle_variation.pooled_predictor_error_us.linear_extrapolation.mean) |",
                 "| Stop | \(.stop.label) |",
                 "| Endurance outcome | \(.fatigue_endurance_outcome.label) |"
               ' "$result"
@@ -3043,6 +3056,9 @@ jobs:
                 "| Hot RHO median (s) | \(.hot_wall_time_median_s) |",
                 "| Hot RHO P90 (s) | \(.hot_wall_time_p90_s) |",
                 "| First failed RHO | \(.first_failed_rho) |",
+                "| PW predictor repeat MAE (us) | \(.pulse_width_cycle_variation.pooled_predictor_error_us.repeat.mean) |",
+                "| PW predictor lag2 MAE (us) | \(.pulse_width_cycle_variation.pooled_predictor_error_us.lag2.mean) |",
+                "| PW predictor extrapolation MAE (us) | \(.pulse_width_cycle_variation.pooled_predictor_error_us.linear_extrapolation.mean) |",
                 "| Minimum A/A_scale | \(.min_A_capacity_ratio) |",
                 "| Stop | \(.stop.label) |",
                 "| Endurance outcome | \(.fatigue_endurance_outcome.label) |"
@@ -3368,6 +3384,7 @@ jobs:
           path: benchmark-results-all
 
       - name: Download the ACADOS baseline and option artifacts
+        if: ${{ inputs.cycles != 'pw_transfer_ablation' }}
         uses: actions/download-artifact@v8
         continue-on-error: true
         with:
@@ -3376,6 +3393,8 @@ jobs:
           merge-multiple: true
 
       - name: Build the comparison report
+        env:
+          BENCHMARK_CAMPAIGN: ${{ inputs.cycles }}
         run: |
           mkdir -p benchmark-results-all benchmark-report
           select_acados_case() {
@@ -3415,8 +3434,10 @@ jobs:
           mapfile -t result_files < <(
             {
               find benchmark-results-all -name '*.json' -type f
-              select_acados_case full
-              select_acados_case reduced
+              if [[ "$BENCHMARK_CAMPAIGN" != "pw_transfer_ablation" ]]; then
+                select_acados_case full
+                select_acados_case reduced
+              fi
             } | sort
           )
           if [[ "${#result_files[@]}" -eq 0 ]]; then
@@ -3425,9 +3446,15 @@ jobs:
             echo "$message" > benchmark-report/NO_RESULTS.txt
             exit 1
           fi
+          expected_cases="ipopt/full,madnlp-mumps/full,fatrop-collocation/full,acados/full,ipopt/reduced,madnlp-mumps/reduced,fatrop-collocation/reduced,acados/reduced"
+          if [[ "$BENCHMARK_CAMPAIGN" == "pw_transfer_ablation" ]]; then
+            # The report intentionally strips the evaluator-codegen suffix:
+            # compilation changes execution, not the physical solver case.
+            expected_cases="ipopt-radau5/reduced,madnlp-mumps-radau5/reduced"
+          fi
           python .github/scripts/summarize_cycling_benchmark.py \
             --output-dir benchmark-report \
-            --expected-cases ipopt/full,madnlp-mumps/full,fatrop-collocation/full,acados/full,ipopt/reduced,madnlp-mumps/reduced,fatrop-collocation/reduced,acados/reduced \
+            --expected-cases "$expected_cases" \
             "${result_files[@]}"
           cat benchmark-report/benchmark-comparison.md >> "$GITHUB_STEP_SUMMARY"
 

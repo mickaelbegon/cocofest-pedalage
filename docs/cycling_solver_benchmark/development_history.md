@@ -5354,6 +5354,19 @@ terminale.
 
 Cette campagne est préparée mais pas encore exécutée. Les tests locaux couvrent
 la conservation de la borne terminale, le transfert `lag2` et les métriques des
-prédicteurs (`364 passed`). La machine locale ne possède pas de bibliothèque
-ACADOS compilée réutilisable et son disque est saturé; la mesure solveur doit
-donc être faite sur le runner Linux mis en cache.
+prédicteurs (`365 passed`). Toutes les variantes de cette ablation repartent
+maintenant du primal reduced certifié par le premier cas ACADOS; le seul facteur
+modifié est donc le prédicteur PW ou la borne terminale. La machine locale ne
+possède pas de bibliothèque ACADOS compilée réutilisable et son disque est
+saturé; la mesure solveur doit donc être faite sur le runner Linux mis en cache.
+
+Le run `31654690299` de l'ablation IPOPT--MadNLP des prédicteurs PW a révélé
+deux problèmes d'orchestration indépendants des solveurs. D'une part, la
+campagne construisait encore ACADOS alors qu'elle ne demandait que les cas
+IPOPT et MadNLP. D'autre part, le rapport exigeait la matrice standard
+full/reduced à quatre solveurs et échouait malgré la présence des huit JSON
+demandés. ACADOS est désormais exclu de ce mode et le rapport attend seulement
+`ipopt-radau5/reduced` et `madnlp-mumps-radau5/reduced`; ce chemin a été rejoué
+localement sur les artefacts et produit une matrice complète. Enfin, le budget
+MadNLP rapide ne s'applique plus au premier RHO : ce warm-up conserve le budget
+général, tandis que les RHO suivants utilisent le percentile calibré.

@@ -399,6 +399,13 @@ gh workflow run cycling_solver_benchmark_linux.yml \
   -f cycles=pw_transfer_ablation \
   -f crank_assistance_nm=signed:+0.15
 
+# Isoler l'orbite paire/impaire ACADOS sans couple externe
+gh workflow run cycling_solver_benchmark_linux.yml \
+  --ref codex/full-horizon-homotopy \
+  -f cycles=acados_pw_stability \
+  -f acados_smoke_rhos=30 \
+  -f crank_assistance_nm=0.00
+
 # Rejouer exactement le seed Intel du run 150 sur un nouveau runner
 gh workflow run cycling_solver_benchmark_linux.yml \
   --ref codex/full-horizon-homotopy \
