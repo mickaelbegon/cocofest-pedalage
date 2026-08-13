@@ -7558,6 +7558,11 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert "run_case sqp-irk-alternate-pw-retry reduced" in workflow
     assert "--acados-failed-rho-alternate-pw-predictor" in workflow
     assert "The alternate-PW retry case did not exercise" in workflow
+    assert "run_case sqp-irk-terminal-omega-0p3-pw-prox-1e2 reduced" in workflow
+    assert "run_case sqp-irk-terminal-omega-0p3-pw-prox-1e3 reduced" in workflow
+    assert "--acados-control-regularization-weight 100" in workflow
+    assert "--acados-control-regularization-weight 1000" in workflow
+    assert "--acados-control-regularization-target-source previous" in workflow
     assert "export MADNLP_FAST_MAX_ITERATIONS=100" in workflow
     assert "export MADNLP_FIRST_MAX_ITERATIONS=none" in workflow
     assert "The cadence-guard case requires its preceding ACADOS reference seed." in workflow

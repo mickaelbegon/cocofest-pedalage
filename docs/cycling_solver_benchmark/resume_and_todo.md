@@ -865,11 +865,13 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     survient après une itération et le préfixe reste `9/30`. Ne pas retenir ce
     retry PW seul. Si cette piste est reprise, transférer une primale complète
     phase-alignée puis corriger fatigue et état initial par rollout/sensibilité.
-43. [à faire après 42] Comparer avec la borne terminale `+/-0.3` une très faible
+43. [implémenté, CI à lancer] Comparer avec la borne terminale `+/-0.3` une très faible
     régularisation proximale des PW et une faible pénalité terminale de cadence.
     Les tester séparément : elles changent l'objectif. Rejeter toute variante
     qui n'améliore pas le P90 ou qui change matériellement le coût de fatigue,
-    les quatre AUC ou les ensembles actifs.
+    les quatre AUC ou les ensembles actifs. L'ablation emploie des poids `100`
+    et `1000` sur les contrôles scaled, avec une cible recentrée sur la primale
+    préparée à chaque RHO. Elle n'ajoute pas un second solve de continuation.
 44. [à prototyper] Construire une capsule MadNLP/MUMPS reduced/SX/Radau-5 une
     seule fois avant la période online. Les états initiaux et les bornes
     terminales changent comme `lbx/ubx` à runtime; la bibliothèque C de

@@ -1439,6 +1439,20 @@ jobs:
                 --acados-terminal-wheel-qdot-homotopy-margins 3,2.5,2,1.5,1,0.5,0.3
               )
             fi
+            if [[ "$variant" == *"pw-prox-1e2"* ]]; then
+              # Weak stagewise proximity to the prepared previous-cycle PW.
+              # The target is recentered at every RHO; executed fatigue is
+              # reported separately from this numerical regularization.
+              solver_options+=(
+                --acados-control-regularization-weight 100
+                --acados-control-regularization-target-source previous
+              )
+            elif [[ "$variant" == *"pw-prox-1e3"* ]]; then
+              solver_options+=(
+                --acados-control-regularization-weight 1000
+                --acados-control-regularization-target-source previous
+              )
+            fi
             if [[ "$ACADOS_PW_STABILITY_ONLY" == "true" ]]; then
               # The 2000-RHO production run released this Phase-I radius. A
               # permanent +/-10 us box made both repeat and lag2 fail at RHO 2
@@ -1862,6 +1876,8 @@ jobs:
             run_case sqp-irk-pw-lag2 reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
             run_case sqp-irk-terminal-omega-0p5 reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
             run_case sqp-irk-terminal-omega-0p3 reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
+            run_case sqp-irk-terminal-omega-0p3-pw-prox-1e2 reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
+            run_case sqp-irk-terminal-omega-0p3-pw-prox-1e3 reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
             run_case sqp-irk-pw-lag2-terminal-omega-0p5 reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
           elif [[ "$ACADOS_HOMOTOPY_ONLY" == "true" ]]; then
             # Focused causal A/B: one feasible reference seed, then the same
