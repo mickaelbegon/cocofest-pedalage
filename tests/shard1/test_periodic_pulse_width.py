@@ -10244,6 +10244,51 @@ def test_pulse_width_transfer_keeps_repeat_and_lag2_retry_candidates():
     np.testing.assert_allclose(candidates["extrapolate"], [2.5, 5.0, 7.5])
 
 
+def test_failed_rho_alternate_pw_predictor_restores_checkpoint_then_uses_lag2():
+    controls = SimpleNamespace(init=np.array([[99.0, 99.0, 99.0]]))
+    correction_calls = []
+    nmpc = SimpleNamespace(
+        nlp=[SimpleNamespace(u_init={"last_pulse_width_Biceps": controls})],
+        _pulse_width_transfer_candidates={
+            "last_pulse_width_Biceps": {
+                "repeat": np.array([4.0, 5.0, 6.0]),
+                "lag2": np.array([1.0, 2.0, 3.0]),
+            }
+        },
+        _correct_init_guess_to_fit_bounds=(
+            lambda corrected_input: correction_calls.append(corrected_input)
+        ),
+    )
+    checkpoint = {
+        "states": {},
+        "controls": {
+            "last_pulse_width_Biceps": np.array([[4.0, 5.0, 6.0]])
+        },
+    }
+
+    summary = periodic_example.apply_failed_rho_alternate_pulse_width_predictor(
+        nmpc, checkpoint, current_mode="repeat"
+    )
+
+    assert summary["applied"] is True
+    assert summary["alternate_mode"] == "lag2"
+    assert summary["maximum_change_s"] == pytest.approx(3.0)
+    np.testing.assert_allclose(controls.init, [[1.0, 2.0, 3.0]])
+    assert correction_calls == ["controls"]
+
+
+def test_alternate_pw_predictor_cli_is_explicit():
+    periodic_args = periodic_example.build_argument_parser().parse_args(
+        ["--acados-failed-rho-alternate-pw-predictor"]
+    )
+    comparison_args = comparison_example.build_cli().parse_args(
+        ["--acados-failed-rho-alternate-pw-predictor"]
+    )
+
+    assert periodic_args.acados_failed_rho_alternate_pw_predictor is True
+    assert comparison_args.acados_failed_rho_alternate_pw_predictor is True
+
+
 def test_historical_collocation_control_transfer_uses_control_cycle_length():
     source = np.arange(60, dtype=float)[None, :]
     nmpc = SimpleNamespace(

@@ -168,6 +168,7 @@ BENCHMARK_CONFIGURATION_FIELDS = (
     "acados_forced_iteration_cap_rhos",
     "acados_forced_iteration_cap",
     "acados_ipopt_fallback_advance",
+    "acados_failed_rho_alternate_pw_predictor",
     "nlp_ipopt_recovery",
     "nlp_ipopt_recovery_max_iterations",
     "nlp_ipopt_recovery_collocation_degree",
@@ -3646,6 +3647,7 @@ def main(
     acados_forced_iteration_cap_rhos: tuple[int, ...] = (),
     acados_forced_iteration_cap: int | None = None,
     acados_ipopt_fallback_advance: bool = False,
+    acados_failed_rho_alternate_pw_predictor: bool = False,
     nlp_ipopt_recovery: bool = False,
     nlp_ipopt_fallback_advance: bool = False,
     nlp_ipopt_recovery_max_iterations: int = 2000,
@@ -4212,6 +4214,9 @@ def main(
     )
     acados_args.acados_forced_iteration_cap = acados_forced_iteration_cap
     acados_args.acados_ipopt_fallback_advance = acados_ipopt_fallback_advance
+    acados_args.acados_failed_rho_alternate_pw_predictor = (
+        acados_failed_rho_alternate_pw_predictor
+    )
     acados_args.acados_failed_rho_phase_one_recovery = (
         acados_failed_rho_phase_one_recovery
     )
@@ -5821,6 +5826,14 @@ def build_cli() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--acados-failed-rho-alternate-pw-predictor",
+        action="store_true",
+        help=(
+            "Retry the first failed reduced ACADOS RHO from its frozen "
+            "checkpoint with repeat and lag2 PW predictors exchanged."
+        ),
+    )
+    parser.add_argument(
         "--acados-failed-rho-phase-one-recovery",
         action="store_true",
         help=(
@@ -6327,6 +6340,9 @@ if __name__ == "__main__":
         ),
         acados_forced_iteration_cap=args.acados_forced_iteration_cap,
         acados_ipopt_fallback_advance=args.acados_ipopt_fallback_advance,
+        acados_failed_rho_alternate_pw_predictor=(
+            args.acados_failed_rho_alternate_pw_predictor
+        ),
         acados_failed_rho_phase_one_recovery=(
             args.acados_failed_rho_phase_one_recovery
         ),

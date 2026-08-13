@@ -2467,6 +2467,16 @@ def build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--acados-failed-rho-alternate-pw-predictor",
+        action="store_true",
+        help=(
+            "On the first uncertified reduced ACADOS solve, restore the exact "
+            "prepared-RHO checkpoint, switch repeat<->lag2 pulse-width "
+            "prediction, reset native SQP/QP memory, and retry without "
+            "advancing the physical RHO."
+        ),
+    )
+    parser.add_argument(
         "--nlp-ipopt-fallback-advance",
         action="store_true",
         help=(
@@ -11104,6 +11114,43 @@ def _restore_initial_guess_snapshot(periodic_nmpc, snapshot: dict) -> None:
         nlp.u_init[key].init[:, :] = values
 
 
+def apply_failed_rho_alternate_pulse_width_predictor(
+    periodic_nmpc,
+    checkpoint: dict,
+    current_mode: str,
+) -> dict[str, object]:
+    """Restore one frozen RHO and replace only its PW predictor candidate."""
+
+    alternate_mode = "lag2" if current_mode == "repeat" else "repeat"
+    _restore_initial_guess_snapshot(periodic_nmpc, checkpoint)
+    candidate_bank = getattr(
+        periodic_nmpc, "_pulse_width_transfer_candidates", {}
+    )
+    changed = {}
+    for key, candidates in candidate_bank.items():
+        if key not in periodic_nmpc.nlp[0].u_init.keys():
+            continue
+        if alternate_mode not in candidates:
+            continue
+        candidate = np.asarray(candidates[alternate_mode], dtype=float).reshape(-1)
+        target = periodic_nmpc.nlp[0].u_init[key].init
+        if candidate.size == 0 or candidate.size > target.shape[1]:
+            continue
+        before = np.asarray(target[:, -candidate.size :], dtype=float).copy()
+        target[:, -candidate.size :] = candidate.reshape((1, -1))
+        changed[key] = float(np.max(np.abs(target[:, -candidate.size :] - before)))
+
+    if changed:
+        periodic_nmpc._correct_init_guess_to_fit_bounds(corrected_input="controls")
+    return {
+        "applied": bool(changed),
+        "source_mode": current_mode,
+        "alternate_mode": alternate_mode,
+        "changed_controls": changed,
+        "maximum_change_s": max(changed.values(), default=0.0),
+    }
+
+
 def _initial_guess_snapshot_max_difference(periodic_nmpc, snapshot: dict) -> dict:
     """Measure physical initial-guess differences against a detached snapshot."""
 
@@ -15781,6 +15828,16 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                 "--acados-ipopt-fallback-advance cannot be combined with the "
                 "artificial first-RHO recovery gate."
             )
+    if args.acados_failed_rho_alternate_pw_predictor:
+        if args.solver != "acados" or args.mechanical_formulation != "reduced":
+            raise ValueError(
+                "--acados-failed-rho-alternate-pw-predictor requires reduced ACADOS."
+            )
+        if args.single_shot or not args.retry_failed_rho_without_advance:
+            raise ValueError(
+                "--acados-failed-rho-alternate-pw-predictor requires the RHO "
+                "mode and --retry-failed-rho-without-advance."
+            )
     if getattr(args, "nlp_ipopt_recovery", False):
         if args.solver not in {"madnlp", "fatrop"}:
             raise ValueError(
@@ -18236,6 +18293,7 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
     ipopt_recovery_summaries = []
     nlp_failed_rho_phase_one_summaries = []
     acados_failed_rho_phase_one_summaries = []
+    acados_alternate_pw_predictor_summaries = []
     transfer_active_set_guard_summaries = []
     transfer_contact_projection_summaries = []
     transfer_bound_projection_summaries = []
@@ -18270,6 +18328,7 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
     rho_prepared_checkpoint_summaries = []
     prepared_rho_primal_checkpoint = snapshot_initial_guess(nmpc)
     phase_one_recovery_attempted_target_rhos: set[int] = set()
+    alternate_pw_predictor_attempted_target_rhos: set[int] = set()
 
     def save_common_initial_solution(solution) -> bool:
         if (
@@ -18397,6 +18456,59 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         if self._cocofest_retry_same_rho_pending:
             recovery_attempt = recovery_attempts_by_target_rho.get(target_rho, 0)
             self._cocofest_recovery_seed_pending = False
+            if (
+                getattr(
+                    args, "acados_failed_rho_alternate_pw_predictor", False
+                )
+                and target_rho not in alternate_pw_predictor_attempted_target_rhos
+            ):
+                alternate_pw_predictor_attempted_target_rhos.add(target_rho)
+                predictor_start = perf_counter()
+                predictor_summary = apply_failed_rho_alternate_pulse_width_predictor(
+                    self,
+                    prepared_rho_primal_checkpoint,
+                    current_mode=args.rho_pulse_width_transfer_mode,
+                )
+                predictor_summary.update(
+                    {
+                        "attempt_window": int(self.total_optimization_run) + 1,
+                        "target_rho": target_rho,
+                        "target_failed_status": int(solution.status),
+                        "target_failed_feasibility": dict(feasibility),
+                        "solver_reset": reset_acados_solver_memory(self),
+                        "wall_time_s": perf_counter() - predictor_start,
+                    }
+                )
+                acados_alternate_pw_predictor_summaries.append(predictor_summary)
+                if predictor_summary["applied"]:
+                    self._cocofest_recovery_seed_pending = True
+                    if echo:
+                        print(
+                            "acados_failed_rho_alternate_pw_predictor: "
+                            f"target_rho={target_rho} "
+                            f"mode={predictor_summary['source_mode']}->"
+                            f"{predictor_summary['alternate_mode']} "
+                            f"maximum_change_s="
+                            f"{predictor_summary['maximum_change_s']:.6g} "
+                            f"solver_reset="
+                            f"{predictor_summary['solver_reset']['applied']}"
+                        )
+                    retry_same_rho_summaries.append(
+                        {
+                            "attempt_window": int(self.total_optimization_run) + 1,
+                            "native_status": _native_solver_status(self),
+                            "status": int(solution.status),
+                            "primal_feasible": bool(
+                                feasibility.get("passes_tolerance")
+                            ),
+                            "forced_for_ci": forced_recovery,
+                            "target_rho": target_rho,
+                            "recovery_seed_pending": True,
+                            "advanced": False,
+                            "recovery": "alternate_pw_predictor",
+                        }
+                    )
+                    return None
             if (
                 getattr(args, "nlp_failed_rho_phase_one_recovery", False)
                 and target_rho not in phase_one_recovery_attempted_target_rhos
@@ -20646,6 +20758,10 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
     if acados_failed_rho_phase_one_summaries:
         summary["acados_failed_rho_phase_one_summaries"] = (
             acados_failed_rho_phase_one_summaries
+        )
+    if acados_alternate_pw_predictor_summaries:
+        summary["acados_alternate_pw_predictor_summaries"] = (
+            acados_alternate_pw_predictor_summaries
         )
     if transfer_bound_homotopy_summaries:
         summary["transfer_bound_homotopy_summaries"] = transfer_bound_homotopy_summaries
