@@ -189,6 +189,11 @@ class MyCyclicNMPC(FesNmpcMsk):
         self.pulse_width_transfer_mode = "repeat"
         self.pulse_width_extrapolation_factor = 1.0
         self._previous_pulse_width_cycle = {}
+        # Detached phase-aligned candidates for the *prepared* next RHO.
+        # Keeping them until that RHO is certified allows a failed fast solve
+        # to retry from another predictor without shifting the physical state
+        # or reconstructing the OCP.
+        self._pulse_width_transfer_candidates = {}
         self.project_full_transfer_contact = False
         self.project_full_transfer_contact_velocity = False
         self.last_transfer_contact_projection = None
@@ -656,12 +661,14 @@ class MyCyclicNMPC(FesNmpcMsk):
         mode = getattr(self, "pulse_width_transfer_mode", "repeat")
         factor = float(getattr(self, "pulse_width_extrapolation_factor", 1.0))
         is_pulse_width = key.startswith("last_pulse_width_")
+        previous = (
+            cycles[-2]
+            if is_pulse_width and cycles.shape[0] >= 2
+            else getattr(self, "_previous_pulse_width_cycle", {}).get(key)
+            if is_pulse_width
+            else None
+        )
         if mode in {"extrapolate", "lag2"} and is_pulse_width:
-            previous = (
-                cycles[-2]
-                if cycles.shape[0] >= 2
-                else getattr(self, "_previous_pulse_width_cycle", {}).get(key)
-            )
             if previous is not None:
                 previous = np.asarray(previous, dtype=float).reshape(-1)
                 if previous.shape != current.shape:
@@ -676,6 +683,18 @@ class MyCyclicNMPC(FesNmpcMsk):
                 )
         elif mode not in {"repeat", "extrapolate", "lag2"}:
             raise ValueError(f"Unsupported pulse-width transfer mode '{mode}'.")
+
+        if is_pulse_width:
+            previous_candidate = current if previous is None else previous
+            if not hasattr(self, "_pulse_width_transfer_candidates"):
+                self._pulse_width_transfer_candidates = {}
+            self._pulse_width_transfer_candidates[key] = {
+                "repeat": current.copy(),
+                "lag2": previous_candidate.copy(),
+                "extrapolate": (
+                    current + factor * (current - previous_candidate)
+                ).copy(),
+            }
 
         values = np.concatenate((retained, appended)) if retained.size else appended
         self.nlp[0].u_init[key].init[i, :] = values

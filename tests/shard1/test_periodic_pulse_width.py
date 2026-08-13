@@ -10183,6 +10183,47 @@ def test_one_cycle_pulse_width_lag2_reuses_same_parity_certified_cycle():
         nmpc._previous_pulse_width_cycle["last_pulse_width_Biceps"],
         [7.0, 8.0, 9.0],
     )
+    np.testing.assert_allclose(
+        nmpc._pulse_width_transfer_candidates["last_pulse_width_Biceps"]["repeat"],
+        [7.0, 8.0, 9.0],
+    )
+    np.testing.assert_allclose(
+        nmpc._pulse_width_transfer_candidates["last_pulse_width_Biceps"]["lag2"],
+        [1.0, 2.0, 3.0],
+    )
+
+
+def test_pulse_width_transfer_keeps_repeat_and_lag2_retry_candidates():
+    nmpc = SimpleNamespace(
+        control_nodes_per_cycle=3,
+        pulse_width_transfer_mode="repeat",
+        pulse_width_extrapolation_factor=0.5,
+        _previous_pulse_width_cycle={
+            "last_pulse_width_Biceps": np.array([1.0, 2.0, 3.0])
+        },
+        _pulse_width_transfer_candidates={},
+        nlp=[
+            SimpleNamespace(
+                u_init={
+                    "last_pulse_width_Biceps": SimpleNamespace(
+                        init=np.zeros((1, 3))
+                    )
+                }
+            )
+        ],
+    )
+    controls = {"last_pulse_width_Biceps": np.array([[2.0, 4.0, 6.0]])}
+
+    MyCyclicNMPC.set_init_cyclical_controls(
+        nmpc, controls, "last_pulse_width_Biceps", 0
+    )
+
+    candidates = nmpc._pulse_width_transfer_candidates[
+        "last_pulse_width_Biceps"
+    ]
+    np.testing.assert_allclose(candidates["repeat"], [2.0, 4.0, 6.0])
+    np.testing.assert_allclose(candidates["lag2"], [1.0, 2.0, 3.0])
+    np.testing.assert_allclose(candidates["extrapolate"], [2.5, 5.0, 7.5])
 
 
 def test_historical_collocation_control_transfer_uses_control_cycle_length():
