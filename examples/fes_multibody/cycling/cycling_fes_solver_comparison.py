@@ -123,6 +123,7 @@ BENCHMARK_CONFIGURATION_FIELDS = (
     "wheel_qdot_bound_margin",
     "acados_wheel_qdot_fast_bound_margin",
     "acados_wheel_qdot_slow_bound_margin",
+    "terminal_wheel_qdot_bound_margin",
     "reduced_internal_crank_velocity_guard",
     "acados_wheel_q_slack",
     "acados_wheel_qdot_slack",
@@ -272,6 +273,7 @@ BENCHMARK_CONFIGURATION_FIELDS = (
     "madnlp_linear_solver",
     "max_madnlp_iterations",
     "madnlp_max_wall_time",
+    "madnlp_first_max_iterations",
     "alpaqa_dual_warm_start_mode",
     "max_alpaqa_iterations",
     "alpaqa_alm_max_iterations",
@@ -1469,6 +1471,7 @@ def _solver_config(
     wheel_qdot_bound_margin: float,
     acados_wheel_qdot_fast_bound_margin: float | None,
     acados_wheel_qdot_slow_bound_margin: float | None,
+    terminal_wheel_qdot_bound_margin: float | None,
     terminal_qdot_regularization_weight: float,
     terminal_qdot_regularization_target_source: str,
     first_node_wheel_q_slack: float,
@@ -1603,6 +1606,9 @@ def _solver_config(
             ),
             acados_wheel_qdot_slow_bound_margin=(
                 acados_wheel_qdot_slow_bound_margin
+            ),
+            terminal_wheel_qdot_bound_margin=(
+                terminal_wheel_qdot_bound_margin
             ),
             terminal_qdot_regularization_weight=(terminal_qdot_regularization_weight),
             terminal_qdot_regularization_target_source=(
@@ -1754,6 +1760,9 @@ def _solver_config(
             acados_wheel_qdot_slow_bound_margin=(
                 acados_wheel_qdot_slow_bound_margin
             ),
+            terminal_wheel_qdot_bound_margin=(
+                terminal_wheel_qdot_bound_margin
+            ),
             terminal_qdot_regularization_weight=(terminal_qdot_regularization_weight),
             terminal_qdot_regularization_target_source=(
                 terminal_qdot_regularization_target_source
@@ -1837,6 +1846,7 @@ def _nlp_solver_config(
     alpaqa_alm_max_iterations: int | None = None,
     madnlp_linear_solver: str | None = None,
     madnlp_max_wall_time: float | None = None,
+    madnlp_first_max_iterations: int | None = None,
     alpaqa_initial_tolerance: float | None = None,
     alpaqa_penalty_update_factor: float | None = None,
     alpaqa_maximum_penalty: float | None = None,
@@ -1868,6 +1878,7 @@ def _nlp_solver_config(
     if solver_name == "madnlp":
         args.madnlp_linear_solver = madnlp_linear_solver
         args.madnlp_max_wall_time = madnlp_max_wall_time
+        args.madnlp_first_max_iterations = madnlp_first_max_iterations
     if solver_name == "alpaqa":
         args.alpaqa_lbfgs_memory = alpaqa_lbfgs_memory
         args.alpaqa_alm_max_iterations = alpaqa_alm_max_iterations
@@ -2626,6 +2637,19 @@ def isolated_window_checkpoint_snapshots(
     return snapshots
 
 
+def _absolute_error_percentiles(values: np.ndarray) -> dict:
+    absolute = np.asarray(values, dtype=float).reshape(-1)
+    return {
+        "sample_count": int(absolute.size),
+        "mean": float(np.mean(absolute)),
+        "median": float(np.median(absolute)),
+        "p90": float(np.percentile(absolute, 90)),
+        "p95": float(np.percentile(absolute, 95)),
+        "p99": float(np.percentile(absolute, 99)),
+        "maximum": float(np.max(absolute)),
+    }
+
+
 def pulse_width_cycle_variation(result: dict, cycle_count: int) -> dict:
     """Measure aligned pulse-width changes between consecutive executed cycles.
 
@@ -2642,6 +2666,7 @@ def pulse_width_cycle_variation(result: dict, cycle_count: int) -> dict:
         "stimulations_per_cycle": int(result["args"].stimulations_per_cycle),
         "muscles": [],
         "pooled_absolute_change_us": {},
+        "pooled_predictor_error_us": {},
     }
     if cycle_count < 2:
         summary["reason"] = "at_least_two_validated_cycles_are_required"
@@ -2650,6 +2675,11 @@ def pulse_width_cycle_variation(result: dict, cycle_count: int) -> dict:
     shooting_per_cycle = summary["stimulations_per_cycle"]
     limited = _truncate_result_to_cycles(result, cycle_count)
     pooled_changes = []
+    pooled_predictor_errors = {
+        "repeat": [],
+        "lag2": [],
+        "linear_extrapolation": [],
+    }
     for key, values in sorted(limited.get("control_traces", {}).items()):
         if not key.startswith("last_pulse_width_"):
             continue
@@ -2663,6 +2693,15 @@ def pulse_width_cycle_variation(result: dict, cycle_count: int) -> dict:
         changes_us = 1e6 * np.diff(cycles, axis=0)
         absolute_us = np.abs(changes_us)
         pooled_changes.append(absolute_us.reshape(-1))
+        predictor_errors_us = {
+            "repeat": absolute_us,
+            "lag2": 1e6 * np.abs(cycles[2:] - cycles[:-2]),
+            "linear_extrapolation": 1e6
+            * np.abs(cycles[2:] - (2.0 * cycles[1:-1] - cycles[:-2])),
+        }
+        for predictor, errors in predictor_errors_us.items():
+            if errors.size:
+                pooled_predictor_errors[predictor].append(errors.reshape(-1))
         transitions = []
         for index, transition in enumerate(changes_us):
             transitions.append(
@@ -2687,6 +2726,11 @@ def pulse_width_cycle_variation(result: dict, cycle_count: int) -> dict:
                 "p95_absolute_change_us": float(np.percentile(absolute_us, 95)),
                 "p99_absolute_change_us": float(np.percentile(absolute_us, 99)),
                 "maximum_absolute_change_us": float(np.max(absolute_us)),
+                "predictor_error_us": {
+                    predictor: _absolute_error_percentiles(errors)
+                    for predictor, errors in predictor_errors_us.items()
+                    if errors.size
+                },
                 "transitions": transitions,
             }
         )
@@ -2695,14 +2739,11 @@ def pulse_width_cycle_variation(result: dict, cycle_count: int) -> dict:
         summary["reason"] = "no_pulse_width_controls"
         return summary
     pooled = np.concatenate(pooled_changes)
-    summary["pooled_absolute_change_us"] = {
-        "sample_count": int(pooled.size),
-        "mean": float(np.mean(pooled)),
-        "median": float(np.median(pooled)),
-        "p90": float(np.percentile(pooled, 90)),
-        "p95": float(np.percentile(pooled, 95)),
-        "p99": float(np.percentile(pooled, 99)),
-        "maximum": float(np.max(pooled)),
+    summary["pooled_absolute_change_us"] = _absolute_error_percentiles(pooled)
+    summary["pooled_predictor_error_us"] = {
+        predictor: _absolute_error_percentiles(np.concatenate(errors))
+        for predictor, errors in pooled_predictor_errors.items()
+        if errors
     }
     summary["available"] = True
     return summary
@@ -3491,6 +3532,7 @@ def main(
     madnlp_c_compile: bool = False,
     madnlp_linear_solver: str | None = None,
     madnlp_max_wall_time: float | None = None,
+    madnlp_first_max_iter: int | None = None,
     alpaqa_max_iter: int = 2000,
     alpaqa_alm_max_iter: int | None = None,
     alpaqa_dual_warm_start_mode: str = "constraints",
@@ -3524,6 +3566,7 @@ def main(
     wheel_qdot_bound_margin: float = 3.0,
     acados_wheel_qdot_fast_bound_margin: float | None = None,
     acados_wheel_qdot_slow_bound_margin: float | None = None,
+    terminal_wheel_qdot_bound_margin: float | None = None,
     terminal_qdot_regularization_weight: float = 0.0,
     terminal_qdot_regularization_target_source: str = "previous",
     first_node_wheel_q_slack: float = 0.0,
@@ -3799,6 +3842,7 @@ def main(
         wheel_qdot_bound_margin=wheel_qdot_bound_margin,
         acados_wheel_qdot_fast_bound_margin=None,
         acados_wheel_qdot_slow_bound_margin=None,
+        terminal_wheel_qdot_bound_margin=None,
         terminal_qdot_regularization_weight=terminal_qdot_regularization_weight,
         terminal_qdot_regularization_target_source=(
             terminal_qdot_regularization_target_source
@@ -3920,6 +3964,7 @@ def main(
         acados_wheel_qdot_slow_bound_margin=(
             acados_wheel_qdot_slow_bound_margin
         ),
+        terminal_wheel_qdot_bound_margin=(terminal_wheel_qdot_bound_margin),
         terminal_qdot_regularization_weight=terminal_qdot_regularization_weight,
         terminal_qdot_regularization_target_source=(
             terminal_qdot_regularization_target_source
@@ -4395,6 +4440,7 @@ def main(
         dual_warm_start_mode=madnlp_dual_warm_start_mode,
         madnlp_linear_solver=madnlp_linear_solver,
         madnlp_max_wall_time=madnlp_max_wall_time,
+        madnlp_first_max_iterations=madnlp_first_max_iter,
         periodic_ipopt_hot_start=optional_nlp_periodic_ipopt_hot_start,
     )
     for optional_nlp_args in (fatrop_args, madnlp_args):
@@ -4915,6 +4961,7 @@ def build_cli() -> argparse.ArgumentParser:
     )
     parser.add_argument("--madnlp-max-iter", type=int, default=2000)
     parser.add_argument("--madnlp-max-wall-time", type=float, default=None)
+    parser.add_argument("--madnlp-first-max-iter", type=int, default=None)
     parser.add_argument(
         "--madnlp-linear-solver",
         default=None,
@@ -5045,9 +5092,12 @@ def build_cli() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--rho-pulse-width-transfer-mode",
-        choices=("repeat", "extrapolate"),
+        choices=("repeat", "extrapolate", "lag2"),
         default="repeat",
-        help="Shared phase-aligned PW predictor for every RHO solver.",
+        help=(
+            "Shared phase-aligned PW predictor for every RHO solver: previous "
+            "cycle, same-parity lag-2 cycle, or linear extrapolation."
+        ),
     )
     parser.add_argument(
         "--rho-pulse-width-extrapolation-factor",
@@ -5463,6 +5513,15 @@ def build_cli() -> argparse.ArgumentParser:
         help=(
             "Optional ACADOS upper/slow wheel-speed state margin; defaults "
             "to the physical audit margin."
+        ),
+    )
+    parser.add_argument(
+        "--terminal-wheel-qdot-bound-margin",
+        type=float,
+        default=None,
+        help=(
+            "Reduced-mechanics terminal-only omega margin around -2*pi; "
+            "internal cycle velocities retain their path bounds."
         ),
     )
     parser.add_argument(
@@ -6065,6 +6124,7 @@ if __name__ == "__main__":
         fatrop_state_scaling=args.fatrop_state_scaling,
         madnlp_max_iter=args.madnlp_max_iter,
         madnlp_max_wall_time=args.madnlp_max_wall_time,
+        madnlp_first_max_iter=args.madnlp_first_max_iter,
         madnlp_dual_warm_start_mode=args.madnlp_dual_warm_start_mode,
         madnlp_c_compile=args.madnlp_c_compile,
         madnlp_linear_solver=args.madnlp_linear_solver,
@@ -6118,6 +6178,9 @@ if __name__ == "__main__":
         ),
         acados_wheel_qdot_slow_bound_margin=(
             args.acados_wheel_qdot_slow_bound_margin
+        ),
+        terminal_wheel_qdot_bound_margin=(
+            args.terminal_wheel_qdot_bound_margin
         ),
         terminal_qdot_regularization_weight=(args.terminal_qdot_regularization_weight),
         terminal_qdot_regularization_target_source=(

@@ -656,7 +656,7 @@ class MyCyclicNMPC(FesNmpcMsk):
         mode = getattr(self, "pulse_width_transfer_mode", "repeat")
         factor = float(getattr(self, "pulse_width_extrapolation_factor", 1.0))
         is_pulse_width = key.startswith("last_pulse_width_")
-        if mode == "extrapolate" and is_pulse_width:
+        if mode in {"extrapolate", "lag2"} and is_pulse_width:
             previous = (
                 cycles[-2]
                 if cycles.shape[0] >= 2
@@ -669,8 +669,12 @@ class MyCyclicNMPC(FesNmpcMsk):
                         f"Previous control cycle '{key}' has shape "
                         f"{previous.shape}; expected {current.shape}."
                     )
-                appended = current + factor * (current - previous)
-        elif mode not in {"repeat", "extrapolate"}:
+                appended = (
+                    previous
+                    if mode == "lag2"
+                    else current + factor * (current - previous)
+                )
+        elif mode not in {"repeat", "extrapolate", "lag2"}:
             raise ValueError(f"Unsupported pulse-width transfer mode '{mode}'.")
 
         values = np.concatenate((retained, appended)) if retained.size else appended
@@ -1058,6 +1062,9 @@ def prepare_nmpc(
     wheel_qdot_slow_bound_margin = simulation_conditions.get(
         "wheel_qdot_slow_bound_margin", wheel_qdot_bound_margin
     )
+    terminal_wheel_qdot_bound_margin = simulation_conditions.get(
+        "terminal_wheel_qdot_bound_margin"
+    )
     enforce_reduced_internal_crank_velocity_guard = bool(
         simulation_conditions.get(
             "enforce_reduced_internal_crank_velocity_guard", False
@@ -1206,6 +1213,7 @@ def prepare_nmpc(
             init_file_path=initial_guess_path,
             omega_fast_bound_margin=wheel_qdot_fast_bound_margin,
             omega_slow_bound_margin=wheel_qdot_slow_bound_margin,
+            terminal_omega_bound_margin=terminal_wheel_qdot_bound_margin,
         )
     else:
         x_init = full_mechanical_init
@@ -1656,6 +1664,7 @@ def set_reduced_x_bounds(
     omega_bound_margin: float = 3.0,
     omega_fast_bound_margin: float | None = None,
     omega_slow_bound_margin: float | None = None,
+    terminal_omega_bound_margin: float | None = None,
 ) -> tuple[BoundsList, InitialGuessList]:
     """Set bounds for 20 Ding states and the reduced ``theta, omega`` pair."""
 
@@ -1669,6 +1678,20 @@ def set_reduced_x_bounds(
         raise ValueError("omega_fast_bound_margin must be strictly positive.")
     if omega_slow_bound_margin <= 0:
         raise ValueError("omega_slow_bound_margin must be strictly positive.")
+    if terminal_omega_bound_margin is not None:
+        if (
+            not np.isfinite(terminal_omega_bound_margin)
+            or terminal_omega_bound_margin <= 0
+        ):
+            raise ValueError(
+                "terminal_omega_bound_margin must be finite and strictly positive."
+            )
+        if terminal_omega_bound_margin > min(
+            omega_fast_bound_margin, omega_slow_bound_margin
+        ):
+            raise ValueError(
+                "terminal_omega_bound_margin must remain inside the path omega bounds."
+            )
     interpolation_type = InterpolationType.EACH_FRAME
     state_intervals = n_shooting
     if ode_solver.is_direct_collocation:
@@ -1721,14 +1744,19 @@ def set_reduced_x_bounds(
     # Match the full formulation exactly. The warm-start omega remains
     # variable, but it must not silently recenter the physical OCP bounds.
     expected_omega = -2.0 * np.pi
+    omega_min = np.array(
+        [[expected_omega - omega_fast_bound_margin] * 3], dtype=float
+    )
+    omega_max = np.array(
+        [[expected_omega + omega_slow_bound_margin] * 3], dtype=float
+    )
+    if terminal_omega_bound_margin is not None:
+        omega_min[0, -1] = expected_omega - terminal_omega_bound_margin
+        omega_max[0, -1] = expected_omega + terminal_omega_bound_margin
     x_bounds.add(
         "omega",
-        min_bound=np.array(
-            [[expected_omega - omega_fast_bound_margin] * 3]
-        ),
-        max_bound=np.array(
-            [[expected_omega + omega_slow_bound_margin] * 3]
-        ),
+        min_bound=omega_min,
+        max_bound=omega_max,
         interpolation=InterpolationType.CONSTANT_WITH_FIRST_AND_LAST_DIFFERENT,
     )
     return x_bounds, x_init

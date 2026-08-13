@@ -5238,16 +5238,50 @@ exacte, le 90e percentile du compteur `nlp_hess_l` vaut `73`. Cette valeur est
 retenue comme budget initial du fast path, avec la limite murale MadNLP native
 `max_wall_time=20 s`.
 
-La nouvelle stratégie conserve deux chances MadNLP sur le même RHO :
+La première version appliquait par erreur ce plafond rapide au premier RHO.
+L'ablation PW `31654690299` a alors terminé les quatre variantes à zéro cycle :
+chaque première résolution atteignait précisément 73 itérations. Ce résultat ne
+mesurait ni la qualité du transfert ni la performance en exercice. Le premier
+RHO est désormais explicitement hors budget temps réel : jusqu'à 2000
+itérations et aucune limite murale MadNLP. La limite rapide ne commence qu'au
+deuxième RHO.
 
-1. MadNLP s'arrête au plus tard à 73 itérations ou 20 secondes;
-2. après le premier échec, IPOPT sur le même degré Radau produit un seed si sa
+La nouvelle stratégie conserve ensuite deux chances MadNLP sur le même RHO :
+
+1. le premier RHO construit la trajectoire de travail sans plafond rapide;
+2. à partir du deuxième RHO, MadNLP s'arrête au plus tard à 73 itérations ou
+   20 secondes;
+3. après le premier échec, IPOPT sur le même degré Radau produit un seed si sa
    primale est admissible, puis MadNLP recertifie le même RHO;
-3. après le second échec MadNLP, IPOPT résout encore ce RHO avec le budget de
+4. après le second échec MadNLP, IPOPT résout encore ce RHO avec le budget de
    certification;
-4. seule une solution IPOPT convergée et faisable peut avancer la chaîne;
-5. le RHO est marqué hybride et les deux échecs MadNLP restent visibles dans
+5. seule une solution IPOPT convergée et faisable peut avancer la chaîne;
+6. le RHO est marqué hybride et les deux échecs MadNLP restent visibles dans
    `solver_attempt_accounting`.
+
+Le critère opérationnel est le temps mural des RHO chauds comparé à la durée
+physique du cycle. À `omega = -2 pi rad/s`, un tour dure `1 s`. Sur le run R5
+résistif `31589698184`, en excluant strictement `window[0]`, IPOPT a placé
+`0/1999` RHO sous `1 s` (temps mural moyen `2.914 s`) et MadNLP `0/998`
+(`1.630 s`). MadNLP est nettement plus proche, mais aucun des deux ne satisfait
+encore le contrat temps réel sur cette transcription.
+
+L'ablation IPOPT R5 résistive à 100 RHO du run `31654690299` confirme que
+l'extrapolation temporelle des PW n'est pas, seule, le levier manquant :
+
+| Transfert PW | RHO validés | Médiane chaude murale | P90 chaud mural | RHO chauds sous 1 s |
+|---|---:|---:|---:|---:|
+| répétition du cycle précédent | 100/100 | 2.511 s | 4.088 s | 0/99 |
+| extrapolation, alpha = 0.25 | 100/100 | 2.475 s | 4.377 s | 0/99 |
+| extrapolation, alpha = 0.50 | 100/100 | 2.543 s | 4.749 s | 0/99 |
+| extrapolation, alpha = 1.00 | 100/100 | 2.549 s | 3.746 s | 0/99 |
+
+`alpha=0.25` gagne 1.4 % sur la médiane mais détériore le P90 de 7.1 %;
+`alpha=1` améliore le P90 de 8.4 % mais détériore la médiane de 1.5 %. Ces
+écarts modestes et contradictoires ne justifient pas un prédicteur fixe. Un
+prédicteur adaptatif peut encore réduire les itérations dans certains régimes,
+mais atteindre 1 s exige surtout un solveur/transcription plus rapide ou une
+réduction supplémentaire du NLP.
 
 Cette règle copie le principe éprouvé ACADOS vers IPOPT sans prétendre qu'un
 fallback est une convergence MadNLP. Le percentile doit être recalibré après la
@@ -5273,3 +5307,53 @@ permettent une comparaison IPOPT--MadNLP--ACADOS sans confondre drift de
 l'intégrateur d'audit, changement de bassin des contrôles et fatigue physique.
 L'arrêt demeure `fatigue_limited_candidate`, jamais une preuve mathématique :
 une non-convergence seule, même répétée deux fois, reste insuffisante.
+
+## 36. Orbite paire/impaire ACADOS et warm-start de PW (13 août 2026)
+
+La trajectoire reduced ACADOS à assistance nulle du run `31522015468` montre
+que la grande variation de PW n'est pas une simple erreur d'indexation. Après
+le transient, la solution alterne entre deux branches mécaniques : la vitesse
+terminale du pédalier prend principalement environ `-8.70 rad/s` puis
+`-7.54 rad/s`, alors que la cible nominale vaut `-2 pi rad/s`. La boîte de
+vitesse de `±3 rad/s` autorise les deux branches et l'objectif de fatigue ne
+les départage pas directement.
+
+Sur les cycles 501--2000, l'erreur moyenne absolue des PW prédites par la
+répétition du cycle précédent est `9.87 us` sur tous les nœuds et `110.17 us`
+sur les nœuds recrutés. Le cycle de même parité (`lag2`) réduit ces valeurs à
+`0.46 us` et `9.16 us`. Les états confirment la même structure : pour `omega`,
+l'écart moyen passe de `0.305 rad/s` à lag 1 à `0.032 rad/s` à lag 2; pour les
+forces Biceps et Triceps, il passe respectivement de `5.03` à `0.22 N` et de
+`5.25` à `0.42 N`. Le warm-start `lag2` est donc un bon diagnostic ou filet de
+sécurité, mais il suivrait l'orbite paire/impaire au lieu de la supprimer.
+
+La correction principale testée est une borne **uniquement terminale** sur
+`omega`, centrée en `-2 pi rad/s`. Les vitesses internes conservent la boîte
+physique large : aucune vitesse constante n'est imposée pendant le tour. Deux
+marges, `±0.5` puis `±0.3 rad/s`, sont comparées. Si cette condition élimine
+l'orbite, la répétition du cycle précédent doit redevenir le meilleur guess et
+est préférable à `lag2`, car elle favorise une politique stationnaire et reste
+compatible avec une évolution lente de la fatigue.
+
+Le benchmark exporte maintenant, par muscle et de façon groupée, l'erreur a
+posteriori de trois prédicteurs phase-par-phase : `repeat`, `lag2` et
+extrapolation linéaire. Le mode CI ciblé `acados_pw_stability` exécute sur le
+même runner et avec la même capsule IRK/SQP :
+
+1. la référence avec `repeat` et sans nouvelle borne terminale;
+2. `lag2` seul, pour mesurer le gain maximal possible sans stabilisation;
+3. `repeat` avec les marges terminales `0.5` puis `0.3 rad/s`;
+4. `lag2` avec `±0.5 rad/s`, pour séparer l'effet de la borne de celui du seed.
+
+Le gate de décision exige simultanément : réduction de l'erreur `repeat`, de
+la dispersion paire/impaire de `omega`, et des itérations chaudes; absence de
+nouveaux recoveries; coût exécuté et fatigue des quatre muscles comparables.
+Une faible pénalité proximale sur les PW ne sera testée qu'ensuite. Elle change
+l'objectif numérique et ne doit pas masquer l'effet causal de la condition
+terminale.
+
+Cette campagne est préparée mais pas encore exécutée. Les tests locaux couvrent
+la conservation de la borne terminale, le transfert `lag2` et les métriques des
+prédicteurs (`364 passed`). La machine locale ne possède pas de bibliothèque
+ACADOS compilée réutilisable et son disque est saturé; la mesure solveur doit
+donc être faite sur le runner Linux mis en cache.

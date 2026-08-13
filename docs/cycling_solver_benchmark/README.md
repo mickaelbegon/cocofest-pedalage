@@ -430,7 +430,7 @@ gain important, même lorsqu'elle ne réduit pas le temps de calcul.
 | Force passive incluse et axe du pédalier maintenu sur la variété de contact | L'ancienne référence n'était pas une cible physique suffisamment sûre si ces termes étaient omis ou trop faiblement discrétisés | Évite de sous-estimer le couple musculaire et la fatigue; rend full et reduced comparables sur les mêmes équations | Correction scientifique; aucun gain de vitesse revendiqué |
 | PW bornées et seeds validées dans `[pd0 ≈ 131.405 µs, 600 µs]` | Dans Ding, `pd0` est le vrai zéro de recrutement; une PW à zéro ou sous `pd0` est incohérente avec le modèle utilisé | Plus de warm-start historique hors bornes et warning explicite lors d'une correction de seed | Améliore la reproductibilité; ne change pas les bornes finales de l'OCP |
 | Seed commun, projection mécanique et raffinement IPOPT préalable pour MadNLP | MadNLP était très sensible à la branche non convexe sélectionnée par le warm-start | À 100 RHO R3, le premier échec reduced a été déplacé du RHO 1 au RHO 99; médiane chaude `0.806 s` sur le préfixe | Le RHO 99 n'était pas une preuve de fatigue et doit être retesté avec la nouvelle politique de reprise |
-| Budget MadNLP P90 + fallback IPOPT/Radau cible | Borner le fast path sans confondre plafond d'itérations, blocage Julia/MUMPS et fatigue | Budget initial `73` itérations, garde murale `20 s`; premier échec restauré comme seed, second échec remplaçable seulement par un IPOPT convergé et faisable du même RHO | À valider en CI; rapporter séparément temps MadNLP, recovery IPOPT et pipeline, puis recalibrer le percentile si le taux de fallback dépasse `10 %` |
+| Budget MadNLP P90 + fallback IPOPT/Radau cible | Borner uniquement le fast path en exercice, sans pénaliser l'initialisation ni confondre plafond d'itérations, blocage Julia/MUMPS et fatigue | Premier RHO : jusqu'à `2000` itérations sans garde murale; RHO chauds : `73` itérations et `20 s`; premier échec chaud restauré comme seed, second échec remplaçable seulement par un IPOPT convergé et faisable du même RHO | La séparation initial/chaud est testée localement et reste à valider en CI; le critère principal est la proportion des RHO 2..N sous la durée physique d'un cycle, pas le temps du premier RHO |
 | MUMPS retenu pour IPOPT et MadNLP; PARDISO/MKL écarté | PARDISO n'a pas apporté le gain attendu dans les campagnes appariées, tandis que MUMPS est portable et reproductible en CI | Une pile Linux commune et stable; suppression d'une dépendance complexe sans perte de performance démontrée | MA57 peut rester une ablation IPOPT locale, mais n'est pas le backend CI portable |
 | Collocation du calcium raffinée | R3 sous-estime le calcium périodique isolé de `6.3864 %` | Erreur isolée ramenée à `0.0173 %` en R5 et `0.000415 %` en R6 | R5 est le compromis d'endurance en cours; le rollout DOP853 favorise provisoirement R6 pour la cible scientifique |
 | Comparaison longue R3/R5 appariée | Une comparaison à cinq cycles ne permet pas d'attribuer un écart de fatigue à la transcription plutôt qu'au transitoire du seed | Nouvelle campagne reduced, SX et compilée à 300 RHO par défaut, IPOPT/MUMPS et MadNLP/MUMPS séquentiellement sur la même machine | R3 et R5 emploient désormais le même contrat scientifique (SX, `periodic_node`, Radau, contraintes initiales, bridge primale cible et audit DOP853); seul le degré change |
@@ -1631,6 +1631,16 @@ marge nodale artificielle `2.55 rad/s`, qui rendait la fermeture angulaire
 infaisable, tout en éliminant l'overshoot dense de `0.400 rad/s` observé avec
 les seules bornes nodales. Le prédicteur reste une approximation économique;
 l'audit dense demeure donc obligatoire.
+
+Une nouvelle ablation cible l'alternance paire/impaire observée dans les PW
+ACADOS. Elle compare le transfert du cycle précédent (`repeat`), le cycle de
+même parité (`lag2`) et une borne **seulement terminale** sur la vitesse du
+pédalier autour de `-2*pi rad/s` (`±0.5` puis `±0.3 rad/s`). Les vitesses
+internes au cycle restent libres dans la boîte physique; il ne s'agit donc pas
+d'imposer une cadence constante. `lag2` sert de diagnostic : le choix de
+production restera `repeat` si la borne terminale supprime correctement
+l'orbite. Le mode CI est `cycles=acados_pw_stability`; aucune conclusion de
+performance ne sera tirée avant cette campagne appariée.
 
 ## 7. Reproductibilité
 

@@ -33,6 +33,7 @@ nlp_phase_one_mode="${NLP_PHASE_ONE_MODE:-mechanical}"
 nlp_failed_rho_phase_one_recovery="${NLP_FAILED_RHO_PHASE_ONE_RECOVERY:-false}"
 madnlp_fast_max_iterations="${MADNLP_FAST_MAX_ITERATIONS:-73}"
 madnlp_fast_max_wall_time="${MADNLP_FAST_MAX_WALL_TIME:-20}"
+madnlp_first_max_iterations="${MADNLP_FIRST_MAX_ITERATIONS:-${BENCHMARK_MAX_ITER}}"
 high_accuracy_trace_max_cycles="${HIGH_ACCURACY_TRACE_MAX_CYCLES:-30}"
 high_accuracy_trace_cycle_milestones="${HIGH_ACCURACY_TRACE_CYCLE_MILESTONES:-430,660,779}"
 rho_pulse_width_transfer_mode="${RHO_PULSE_WIDTH_TRANSFER_MODE:-repeat}"
@@ -67,8 +68,8 @@ case "$nlp_failed_rho_phase_one_recovery" in
   *) echo "NLP_FAILED_RHO_PHASE_ONE_RECOVERY must be true or false; got '$nlp_failed_rho_phase_one_recovery'." >&2; exit 2 ;;
 esac
 case "$rho_pulse_width_transfer_mode" in
-  repeat|extrapolate) ;;
-  *) echo "RHO_PULSE_WIDTH_TRANSFER_MODE must be repeat or extrapolate." >&2; exit 2 ;;
+  repeat|extrapolate|lag2) ;;
+  *) echo "RHO_PULSE_WIDTH_TRANSFER_MODE must be repeat, extrapolate, or lag2." >&2; exit 2 ;;
 esac
 
 if [[ "$ipopt_profile" =~ ^scientific[-_]radau[3456]$ ]]; then
@@ -165,6 +166,7 @@ elif [[ "$solver" == "madnlp" ]]; then
   solver_options+=(
     --madnlp-max-iter "$madnlp_fast_max_iterations"
     --madnlp-max-wall-time "$madnlp_fast_max_wall_time"
+    --madnlp-first-max-iter "$madnlp_first_max_iterations"
     --madnlp-linear-solver "$backend"
     --madnlp-dual-warm-start-mode "$dual_warm_start"
   )

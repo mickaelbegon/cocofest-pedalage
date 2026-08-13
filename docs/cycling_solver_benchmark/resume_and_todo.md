@@ -353,6 +353,12 @@ physique.
 
 ### P1 — Rendre MadNLP robuste au premier RHO difficile
 
+- [x] Exclure explicitement le premier RHO du budget temps réel : budget
+  MadNLP initial de 2000 itérations sans limite murale, puis capsule rapide à
+  73 itérations/20 s reconstruite une seule fois avant la séquence chaude.
+- [ ] Valider cette séparation en CI et vérifier dans les logs la présence du
+  reset de capsule, puis rapporter sur les RHO 2..N la médiane, les P90/P99, le
+  maximum et la proportion sous la durée physique du cycle.
 - [ ] Sauvegarder le dernier checkpoint physique avant l'échec full RHO 81 et
   reduced RHO 99.
 - [x] Ne jamais avancer la fenêtre depuis une solution non certifiée.
@@ -823,6 +829,15 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     somme et moyenne des itérations, temps hot médian/P90, échecs, coût et
     fatigue. Si le seed PW seul est bénéfique, tester ensuite un rollout des
     états de Ding cohérent avec ces contrôles.
+41. [implémenté localement, CI à lancer] Exécuter `cycles=acados_pw_stability`
+    sur 30 RHO reduced avec assistance nulle. Comparer la référence `repeat`,
+    `lag2`, puis une borne terminale absolue sur `omega` de `±0.5` et
+    `±0.3 rad/s`. Le résultat JSON calcule les erreurs a posteriori de
+    `repeat`, `lag2` et de l'extrapolation linéaire. Retenir la borne terminale
+    seulement si elle supprime l'orbite paire/impaire et rend le cycle
+    précédent proche sans augmenter le coût de fatigue, les recoveries ou la
+    fatigue des quatre muscles. Tester ensuite, séparément, une faible
+    régularisation proximale des PW.
 
 La question causale est maintenant resserrée : une seule projection au RHO 19
 ne suffit pas, mais la séquence 19--36 conserve le bassin franchissant le RHO

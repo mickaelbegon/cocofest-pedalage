@@ -1080,6 +1080,16 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="Quadratic Mayer weight retaining terminal joint velocities near their shifted reference.",
     )
     parser.add_argument(
+        "--terminal-wheel-qdot-bound-margin",
+        type=float,
+        default=None,
+        help=(
+            "Optional absolute terminal-only omega margin around -2*pi rad/s. "
+            "This does not constrain the velocity inside the cycle and is "
+            "currently available only with reduced mechanics."
+        ),
+    )
+    parser.add_argument(
         "--terminal-qdot-regularization-target-source",
         choices=("initial", "previous", "first_node"),
         default="previous",
@@ -1996,11 +2006,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--rho-pulse-width-transfer-mode",
-        choices=("repeat", "extrapolate"),
+        choices=("repeat", "extrapolate", "lag2"),
         default="repeat",
         help=(
-            "Predict the appended phase-aligned PW cycle by repetition or from "
-            "the trend between the last two certified cycles. Applies to "
+            "Predict the appended phase-aligned PW cycle by repetition, lag-2, "
+            "or from the trend between the last two certified cycles. Applies to "
             "IPOPT, MadNLP, FATROP, and ACADOS."
         ),
     )
@@ -2314,6 +2324,19 @@ def build_argument_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         help="Optional native MadNLP wall-time limit in seconds for each RHO solve.",
+    )
+    parser.add_argument(
+        "--madnlp-first-max-iter",
+        dest="madnlp_first_max_iterations",
+        type=int,
+        default=None,
+        help=(
+            "Optional iteration budget used only for the first MadNLP RHO. "
+            "When set, the first RHO is solved with this budget and without "
+            "the per-window --madnlp-max-wall-time limit; subsequent hot RHO "
+            "solves retain --max-madnlp-iterations and "
+            "--madnlp-max-wall-time."
+        ),
     )
     parser.add_argument(
         "--acados-ipopt-recovery",
@@ -4246,6 +4269,9 @@ def _continuation_cache_signature(args: argparse.Namespace) -> str:
         "wheel_qdot_bound_margin": args.wheel_qdot_bound_margin,
         "wheel_qdot_fast_bound_margin": _effective_wheel_qdot_bound_margins(args)[0],
         "wheel_qdot_slow_bound_margin": _effective_wheel_qdot_bound_margins(args)[1],
+        "terminal_wheel_qdot_bound_margin": (
+            args.terminal_wheel_qdot_bound_margin
+        ),
         "terminal_qdot_regularization_weight": (
             args.terminal_qdot_regularization_weight
         ),
@@ -4346,6 +4372,9 @@ def _horizon_seed_cache_signature(args: argparse.Namespace) -> str:
         "wheel_qdot_bound_margin": args.wheel_qdot_bound_margin,
         "wheel_qdot_fast_bound_margin": _effective_wheel_qdot_bound_margins(args)[0],
         "wheel_qdot_slow_bound_margin": _effective_wheel_qdot_bound_margins(args)[1],
+        "terminal_wheel_qdot_bound_margin": (
+            args.terminal_wheel_qdot_bound_margin
+        ),
         "terminal_qdot_regularization_weight": (
             args.terminal_qdot_regularization_weight
         ),
@@ -4427,6 +4456,9 @@ def _codegen_signature(args: argparse.Namespace) -> str:
         "wheel_qdot_bound_margin": args.wheel_qdot_bound_margin,
         "wheel_qdot_fast_bound_margin": _effective_wheel_qdot_bound_margins(args)[0],
         "wheel_qdot_slow_bound_margin": _effective_wheel_qdot_bound_margins(args)[1],
+        "terminal_wheel_qdot_bound_margin": (
+            args.terminal_wheel_qdot_bound_margin
+        ),
         "terminal_qdot_regularization_weight": (
             args.terminal_qdot_regularization_weight
         ),
@@ -4855,6 +4887,22 @@ def configure_cycle_nlp_solver(args: argparse.Namespace):
             alpaqa_max_no_progress=args.alpaqa_max_no_progress,
         )
     raise ValueError(f"Unsupported NLP solver '{args.solver}'.")
+
+
+def reset_cached_nlp_solver_for_option_change(nmpc) -> bool:
+    """Force CasADi to rebuild a cached NLP capsule with the current options.
+
+    Bioptim reuses ``shaked_ocp_solver`` while the symbolic objective and
+    constraints are unchanged. Solver options such as MadNLP ``max_iter`` and
+    ``max_wall_time`` are fixed when that capsule is created, so switching the
+    solver-options object alone does not update them.
+    """
+
+    interface = getattr(nmpc, "ocp_solver", None)
+    if interface is None or getattr(interface, "shaked_ocp_solver", None) is None:
+        return False
+    interface.shaked_ocp_solver = None
+    return True
 
 
 def _split_receding_solution(sol) -> tuple:
@@ -16075,6 +16123,19 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
     args.acados_terminal_wheel_q_target_slack = _terminal_wheel_q_target_slack(args)
     if args.terminal_qdot_regularization_weight < 0:
         raise ValueError("--terminal-qdot-regularization-weight must be non-negative.")
+    if args.terminal_wheel_qdot_bound_margin is not None:
+        if args.mechanical_formulation != "reduced":
+            raise ValueError(
+                "--terminal-wheel-qdot-bound-margin currently requires "
+                "--mechanical-formulation reduced."
+            )
+        if (
+            not np.isfinite(args.terminal_wheel_qdot_bound_margin)
+            or args.terminal_wheel_qdot_bound_margin <= 0
+        ):
+            raise ValueError(
+                "--terminal-wheel-qdot-bound-margin must be finite and strictly positive."
+            )
     if (
         not np.isfinite(args.wheel_qdot_bound_margin)
         or args.wheel_qdot_bound_margin <= 0
@@ -16097,6 +16158,15 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                 f"{cli_name} cannot exceed --wheel-qdot-bound-margin because "
                 "the ACADOS internal bound must remain inside the physical audit bound."
             )
+    if (
+        args.terminal_wheel_qdot_bound_margin is not None
+        and args.terminal_wheel_qdot_bound_margin
+        > min(_effective_wheel_qdot_bound_margins(args))
+    ):
+        raise ValueError(
+            "--terminal-wheel-qdot-bound-margin must remain inside the "
+            "effective ACADOS path omega bounds."
+        )
 
     if args.acados_proximal_control_weights is not None:
         args.control_regularization_weight = args.acados_proximal_control_weights[0]
@@ -16402,6 +16472,9 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         "wheel_qdot_bound_margin": args.wheel_qdot_bound_margin,
         "wheel_qdot_fast_bound_margin": _effective_wheel_qdot_bound_margins(args)[0],
         "wheel_qdot_slow_bound_margin": _effective_wheel_qdot_bound_margins(args)[1],
+        "terminal_wheel_qdot_bound_margin": (
+            args.terminal_wheel_qdot_bound_margin
+        ),
         # ACADOS path constraints are evaluated at shooting nodes.  Add an
         # inexpensive mechanical half-step guard in reduced IRK mode instead
         # of shrinking every nodal velocity bound and making exact angular
@@ -19477,6 +19550,22 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             prepared_rho_primal_checkpoint = snapshot_initial_guess(_nmpc)
         if (
             continue_solving
+            and cycle_idx == 1
+            and args.solver == "madnlp"
+            and getattr(args, "madnlp_first_max_iterations", None) is not None
+        ):
+            rebuilt_for_hot_options = reset_cached_nlp_solver_for_option_change(
+                _nmpc
+            )
+            if echo:
+                print(
+                    "madnlp_hot_solver_capsule_reset: "
+                    f"applied={rebuilt_for_hot_options} "
+                    f"max_iter={args.max_madnlp_iterations} "
+                    f"max_wall_time={args.madnlp_max_wall_time}"
+                )
+        if (
+            continue_solving
             and completed_physical_rhos in rho_prepared_checkpoint_windows
         ):
             target_rho = completed_physical_rhos + 1
@@ -19601,6 +19690,16 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             solver.set_only_first_options_has_changed(False)
     else:
         solver = configure_cycle_nlp_solver(args)
+        madnlp_first_max_iterations = getattr(
+            args, "madnlp_first_max_iterations", None
+        )
+        if args.solver == "madnlp" and madnlp_first_max_iterations is not None:
+            first_solver_args = deepcopy(args)
+            first_solver_args.max_madnlp_iterations = madnlp_first_max_iterations
+            # Initial graph construction and the first RHO are explicitly outside
+            # the online cycle budget. Do not inherit the hot-window wall-time cap.
+            first_solver_args.madnlp_max_wall_time = None
+            solver_first_iter = configure_cycle_nlp_solver(first_solver_args)
         if args.exact_initial_nlp_audit:
             enable_exact_initial_nlp_audit(nmpc, solver)
             if echo:

@@ -1161,6 +1161,8 @@ def test_nlp_ipopt_recovery_cli_is_opt_in():
             "--nlp-ipopt-fallback-advance",
             "--madnlp-max-wall-time",
             "20",
+            "--madnlp-first-max-iter",
+            "2000",
         ]
     )
 
@@ -1169,6 +1171,7 @@ def test_nlp_ipopt_recovery_cli_is_opt_in():
     assert args.nlp_ipopt_recovery_collocation_degree == 5
     assert args.nlp_ipopt_fallback_advance is True
     assert args.madnlp_max_wall_time == 20.0
+    assert args.madnlp_first_max_iter == 2000
 
     runner = (
         Path(__file__).resolve().parents[2]
@@ -1179,7 +1182,40 @@ def test_nlp_ipopt_recovery_cli_is_opt_in():
     assert "--nlp-ipopt-recovery" in runner
     assert 'MADNLP_FAST_MAX_ITERATIONS:-73' in runner
     assert 'MADNLP_FAST_MAX_WALL_TIME:-20' in runner
+    assert 'MADNLP_FIRST_MAX_ITERATIONS:-${BENCHMARK_MAX_ITER}' in runner
+    assert '--madnlp-first-max-iter "$madnlp_first_max_iterations"' in runner
     assert "--nlp-ipopt-fallback-advance" in runner
+
+
+def test_madnlp_first_rho_budget_is_distinct_from_hot_rho_budget():
+    args = periodic_example.build_argument_parser().parse_args(
+        [
+            "--max-madnlp-iterations",
+            "73",
+            "--madnlp-max-wall-time",
+            "20",
+            "--madnlp-first-max-iter",
+            "2000",
+        ]
+    )
+
+    assert args.max_madnlp_iterations == 73
+    assert args.madnlp_max_wall_time == 20.0
+    assert args.madnlp_first_max_iterations == 2000
+
+
+def test_reset_cached_nlp_solver_for_option_change_forces_rebuild_once():
+    cached_capsule = object()
+    nmpc = SimpleNamespace(
+        ocp_solver=SimpleNamespace(shaked_ocp_solver=cached_capsule)
+    )
+
+    assert periodic_example.reset_cached_nlp_solver_for_option_change(nmpc)
+    assert nmpc.ocp_solver.shaked_ocp_solver is None
+    assert not periodic_example.reset_cached_nlp_solver_for_option_change(nmpc)
+    assert not periodic_example.reset_cached_nlp_solver_for_option_change(
+        SimpleNamespace(ocp_solver=None)
+    )
 
 
 def test_failed_rho_phase_one_recovery_cli_is_opt_in():
@@ -4891,6 +4927,33 @@ def test_pulse_width_cycle_variation_reports_aligned_transition_percentiles():
         [150.0, 200.0],
     )
     assert variation["pooled_absolute_change_us"]["maximum"] == pytest.approx(200.0)
+    predictors = variation["pooled_predictor_error_us"]
+    assert predictors["repeat"]["mean"] == pytest.approx(175.0)
+    assert predictors["lag2"]["mean"] == pytest.approx(150.0)
+    assert predictors["linear_extrapolation"]["mean"] == pytest.approx(250.0)
+    assert muscle["predictor_error_us"]["lag2"]["sample_count"] == 2
+
+
+def test_pulse_width_predictor_audit_detects_period_two_orbit():
+    result = _benchmark_result([0, 0, 0, 0], solver_success=True, success=True)
+    result["covered_cycles"] = 4
+    result["exported_cycles"] = 4
+    result["wheel_angle_trace"] = np.arange(9, dtype=float)
+    result["state_traces"] = {
+        key: np.linspace(values[..., 0], values[..., -1], 9).T
+        for key, values in result["state_traces"].items()
+    }
+    result["control_traces"]["last_pulse_width_Biceps"] = 1e-6 * np.array(
+        [[100.0, 200.0, 500.0, 600.0, 101.0, 201.0, 501.0, 601.0]]
+    )
+
+    predictors = comparison_example.pulse_width_cycle_variation(
+        result, cycle_count=4
+    )["pooled_predictor_error_us"]
+
+    assert predictors["repeat"]["mean"] == pytest.approx(399.6666666667)
+    assert predictors["lag2"]["mean"] == pytest.approx(1.0)
+    assert predictors["linear_extrapolation"]["mean"] == pytest.approx(799.0)
 
 
 def test_benchmark_rejects_status_zero_window_above_feasibility_threshold():
@@ -7637,6 +7700,7 @@ def test_optional_nlp_config_clones_ipopt_transcription_exactly():
         dual_warm_start_mode="bounds",
         madnlp_linear_solver="umfpack",
         madnlp_max_wall_time=20.0,
+        madnlp_first_max_iterations=2000,
         periodic_ipopt_hot_start=True,
     )
     fatrop = comparison_example._nlp_solver_config(
@@ -7675,6 +7739,7 @@ def test_optional_nlp_config_clones_ipopt_transcription_exactly():
 
     assert madnlp.madnlp_linear_solver == "umfpack"
     assert madnlp.madnlp_max_wall_time == 20.0
+    assert madnlp.madnlp_first_max_iterations == 2000
     assert fatrop.fatrop_structure_detection == "auto"
     assert fatrop.fatrop_bound_tightening_factor == 2e-8
     assert fatrop.max_fatrop_iterations == 600
@@ -7878,6 +7943,46 @@ def test_reduced_wheel_speed_bounds_support_an_asymmetric_fast_guard(monkeypatch
 
     np.testing.assert_allclose(bounds["omega"].min, -2.0 * np.pi - 2.55)
     np.testing.assert_allclose(bounds["omega"].max, -2.0 * np.pi + 3.0)
+
+
+def test_reduced_terminal_wheel_speed_bound_does_not_constrain_internal_nodes(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        OcpFesMsk,
+        "set_x_bounds_fes",
+        staticmethod(lambda _model: (BoundsList(), InitialGuessList())),
+    )
+    x_init = InitialGuessList()
+    x_init.add(
+        "theta",
+        np.array([[0.0, -2.0 * np.pi]]),
+        interpolation=InterpolationType.EACH_FRAME,
+    )
+    x_init.add(
+        "omega",
+        np.array([[-2.0 * np.pi, -2.0 * np.pi]]),
+        interpolation=InterpolationType.EACH_FRAME,
+    )
+
+    bounds, _ = mhe_example.set_reduced_x_bounds(
+        model=SimpleNamespace(),
+        x_init=x_init,
+        n_shooting=1,
+        ode_solver=OdeSolver.RK4(),
+        init_file_path=None,
+        omega_fast_bound_margin=2.55,
+        omega_slow_bound_margin=3.0,
+        terminal_omega_bound_margin=0.5,
+    )
+
+    expected = -2.0 * np.pi
+    np.testing.assert_allclose(
+        bounds["omega"].min, [[expected - 2.55, expected - 2.55, expected - 0.5]]
+    )
+    np.testing.assert_allclose(
+        bounds["omega"].max, [[expected + 3.0, expected + 3.0, expected + 0.5]]
+    )
 
 
 def test_full_wheel_speed_bounds_support_an_asymmetric_fast_guard(monkeypatch):
@@ -9898,6 +10003,40 @@ def test_one_cycle_pulse_width_extrapolation_uses_previous_certified_cycle():
     np.testing.assert_allclose(
         nmpc._previous_pulse_width_cycle["last_pulse_width_Biceps"],
         [2.0, 4.0, 6.0],
+    )
+
+
+def test_one_cycle_pulse_width_lag2_reuses_same_parity_certified_cycle():
+    nmpc = SimpleNamespace(
+        control_nodes_per_cycle=3,
+        pulse_width_transfer_mode="lag2",
+        pulse_width_extrapolation_factor=1.0,
+        _previous_pulse_width_cycle={
+            "last_pulse_width_Biceps": np.array([1.0, 2.0, 3.0])
+        },
+        nlp=[
+            SimpleNamespace(
+                u_init={
+                    "last_pulse_width_Biceps": SimpleNamespace(
+                        init=np.zeros((1, 3))
+                    )
+                }
+            )
+        ],
+    )
+    controls = {"last_pulse_width_Biceps": np.array([[7.0, 8.0, 9.0]])}
+
+    MyCyclicNMPC.set_init_cyclical_controls(
+        nmpc, controls, "last_pulse_width_Biceps", 0
+    )
+
+    np.testing.assert_allclose(
+        nmpc.nlp[0].u_init["last_pulse_width_Biceps"].init[0],
+        [1.0, 2.0, 3.0],
+    )
+    np.testing.assert_allclose(
+        nmpc._previous_pulse_width_cycle["last_pulse_width_Biceps"],
+        [7.0, 8.0, 9.0],
     )
 
 
