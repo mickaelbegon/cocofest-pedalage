@@ -1702,11 +1702,20 @@ warm-start nominal. Le retry isolé `lag2` est lui aussi rejeté dans sa forme
 PW seule, car il rend la primale incohérente avec les états et augmente le
 résidu au premier échec.
 
-Sur 100 RHO, le solveur ne cumule que `6.06 s`, alors que la boucle complète
-après construction de l'OCP prend `69.28 s` (`0.693 s/RHO`). Le prochain gain
-important n'est donc plus dans une itération SQP supplémentaire : il faut
-profiler puis réduire les `0.632 s/RHO` d'orchestration Python/Bioptim, en
-conservant les mêmes audits scientifiques.
+Sur 100 RHO, le solveur ne cumule que `6.06 s`, alors que la première mesure
+de la boucle complète après construction de l'OCP prenait `69.28 s`
+(`0.693 s/RHO`). Le profilage a montré que ce surcoût ne venait pas du SQP :
+un calcul RK4 détaillé doublait inutilement le rollout IRK, puis
+`--acados-diagnostics` imprimait à chaque RHO des diagnostics déjà conservés
+dans le JSON. Après suppression du calcul redondant et désactivation de cette
+sortie dans les benchmarks de temps, le run apparié
+[`31746803352`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/31746803352)
+ramène la boucle 30 RHO à `0.138 s/RHO`. `update_functions` passe de
+`0.402` à `0.042 s/RHO`; l'objectif, la fatigue, les 38 itérations et l'audit
+mécanique sont identiques. Les diagnostics numériques restent calculés et
+sérialisés; seule leur impression détaillée est réservée aux campagnes de
+diagnostic. La certification silencieuse 100 RHO reste le dernier gate de
+performance de ce chemin.
 
 ## 7. Reproductibilité
 

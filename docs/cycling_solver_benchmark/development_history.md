@@ -5511,3 +5511,35 @@ temps réel inférieur à une seconde est donc atteint sur ce runner, mais la
 prochaine optimisation doit profiler le transfert, l'audit de faisabilité et
 `advance_window`; améliorer encore le warm-start SQP ne peut économiser que
 quelques dizaines de millisecondes tant que cette orchestration domine.
+
+## 40. Réduction de l'orchestration ACADOS (13 août 2026)
+
+Le profilage sépare désormais le temps solveur de chaque opération de la
+boucle RHO. Le run
+[`31746256920`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/31746256920)
+supprime le calcul de défaut RK4 effectué après le rollout natif IRK. Ce
+calcul ne préparait pas la primale et ne participait à aucun critère
+d'acceptation; l'audit mécanique post-solve reste actif. Sur 30 RHO,
+`update_functions` baisse à `0.402 s/RHO` et la boucle à `0.457 s/RHO`, mais
+la sortie console détaillée domine encore le profil.
+
+Le run apparié
+[`31746803352`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/31746803352)
+retire ensuite `--acados-diagnostics` du benchmark de performance. Les
+diagnostics ACADOS continuent d'être calculés et stockés dans l'artefact; ils
+ne sont simplement plus imprimés nœud par nœud pendant la période online.
+
+| Mesure, 30 RHO | Profil verbose allégé | Profil online silencieux | Gain |
+|---|---:|---:|---:|
+| `update_functions`, médiane | `0.40181 s` | `0.04242 s` | `-89.4 %` |
+| orchestration par RHO | `0.41139 s` | `0.07097 s` | `-82.7 %` |
+| boucle solve + orchestration par RHO | `0.45679 s` | `0.13783 s` | `-69.8 %` |
+
+La comparaison scientifique est exacte à la précision utile : les deux runs
+certifient `30/30`, consomment 38 itérations, donnent l'objectif
+`114.274828137865`, la fatigue exécutée `110.598886011924`, l'AUC
+`0.975886238819` et la même capacité minimale `0.985584515133`. Les résidus
+mécaniques et les bornes de cadence passent sans violation. Par rapport au
+pipeline 100 RHO initial à `0.693 s/RHO`, ces deux corrections représentent
+un gain cumulé d'environ `80 %`; une campagne silencieuse 100 RHO est requise
+avant de promouvoir ce temps comme résultat d'endurance.
