@@ -1220,6 +1220,16 @@ def build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--acados-transfer-active-set-hysteresis-off-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Optional Schmitt deactivation threshold above model pd0, in "
+            "seconds. It must not exceed --acados-transfer-active-set-threshold. "
+            "When omitted, the transition guard remains memoryless."
+        ),
+    )
+    parser.add_argument(
         "--acados-fes-state-trust-radius",
         type=float,
         default=None,
@@ -15261,6 +15271,7 @@ def apply_phase_aligned_pulse_width_transition_guard(
     radius: float,
     margin: int = 1,
     activation_threshold: float = 1e-6,
+    deactivation_threshold: float | None = None,
 ) -> dict[str, dict]:
     """
     Locally release a pulse-width trust region at recruitment transitions.
@@ -15285,6 +15296,15 @@ def apply_phase_aligned_pulse_width_transition_guard(
         raise ValueError(
             "--acados-transfer-active-set-threshold must be finite and " "non-negative."
         )
+    if deactivation_threshold is not None and (
+        not np.isfinite(deactivation_threshold)
+        or deactivation_threshold < 0.0
+        or deactivation_threshold > activation_threshold
+    ):
+        raise ValueError(
+            "The active-set hysteresis off threshold must be finite, "
+            "non-negative, and no larger than its activation threshold."
+        )
 
     nodewise_bounds = getattr(periodic_nmpc, "_cocofest_nodewise_control_bounds", {})
     trust_centers = getattr(periodic_nmpc, "_cocofest_control_trust_centers", {})
@@ -15294,6 +15314,10 @@ def apply_phase_aligned_pulse_width_transition_guard(
             "The active-set guard requires an existing pulse-width trust region."
         )
 
+    active_set_memory = getattr(
+        periodic_nmpc, "_cocofest_pulse_width_active_set_memory", {}
+    )
+    updated_active_set_memory = {}
     summaries = {}
     for key, (current_lower, current_upper) in nodewise_bounds.items():
         center = np.asarray(
@@ -15318,7 +15342,27 @@ def apply_phase_aligned_pulse_width_transition_guard(
         original_min, original_max = original_bounds[key]
         physical_lower = float(np.min(np.asarray(original_min, dtype=float)))
         physical_upper = float(np.max(np.asarray(original_max, dtype=float)))
-        active = center[0] > physical_lower + activation_threshold
+        memory = active_set_memory.get(key)
+        memory_is_compatible = (
+            deactivation_threshold is not None
+            and memory is not None
+            and np.asarray(memory).shape == (node_count,)
+        )
+        memory = (
+            np.asarray(memory, dtype=bool)
+            if memory_is_compatible
+            else None
+        )
+        memoryless_active = center[0] > physical_lower + activation_threshold
+        if memory is None:
+            active = memoryless_active
+        else:
+            active = np.where(
+                memory,
+                center[0] > physical_lower + deactivation_threshold,
+                memoryless_active,
+            )
+        updated_active_set_memory[key] = active.copy()
         transition_nodes = np.flatnonzero(active != np.roll(active, 1))
         released_nodes = sorted(
             {
@@ -15348,6 +15392,17 @@ def apply_phase_aligned_pulse_width_transition_guard(
             "released_nodes": released_nodes,
             "released_count": len(released_nodes),
             "active_count": int(np.count_nonzero(active)),
+            "hysteresis_enabled": deactivation_threshold is not None,
+            "hysteresis_memory_used": memory is not None,
+            "hysteresis_label_changes": int(
+                np.count_nonzero(active != memoryless_active)
+            ),
+            "activation_threshold": float(activation_threshold),
+            "deactivation_threshold": (
+                None
+                if deactivation_threshold is None
+                else float(deactivation_threshold)
+            ),
             "node_count": node_count,
             "radius": float(radius),
             "lower": float(np.min(lower)),
@@ -15356,6 +15411,9 @@ def apply_phase_aligned_pulse_width_transition_guard(
         }
 
     periodic_nmpc._cocofest_nodewise_control_bounds = nodewise_bounds
+    periodic_nmpc._cocofest_pulse_width_active_set_memory = (
+        updated_active_set_memory
+    )
     return summaries
 
 
@@ -16037,6 +16095,19 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
     if args.acados_transfer_active_set_guard_margin < 0:
         raise ValueError(
             "--acados-transfer-active-set-guard-margin must be non-negative."
+        )
+    if args.acados_transfer_active_set_hysteresis_off_threshold is not None and (
+        not np.isfinite(
+            args.acados_transfer_active_set_hysteresis_off_threshold
+        )
+        or args.acados_transfer_active_set_hysteresis_off_threshold < 0
+        or args.acados_transfer_active_set_hysteresis_off_threshold
+        > args.acados_transfer_active_set_threshold
+    ):
+        raise ValueError(
+            "--acados-transfer-active-set-hysteresis-off-threshold must be "
+            "finite, non-negative, and no larger than "
+            "--acados-transfer-active-set-threshold."
         )
     if (
         not np.isfinite(args.acados_transfer_active_set_threshold)
@@ -19883,6 +19954,9 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                     radius=args.acados_transfer_active_set_guard_radius,
                     margin=args.acados_transfer_active_set_guard_margin,
                     activation_threshold=args.acados_transfer_active_set_threshold,
+                    deactivation_threshold=(
+                        args.acados_transfer_active_set_hysteresis_off_threshold
+                    ),
                 )
                 transfer_active_set_guard_summaries.append(
                     {"window": cycle_idx, "controls": guard_summary}

@@ -1419,6 +1419,75 @@ def test_phase_aligned_active_set_guard_wraps_circular_margin():
     np.testing.assert_allclose(upper[:, 7], 0.3)
 
 
+def test_phase_aligned_active_set_guard_hysteresis_retains_previous_labels():
+    center = np.array([[0.1, 0.2]])
+    bounds = SimpleNamespace(
+        min=np.full(center.shape, 0.1),
+        max=np.full(center.shape, 0.6),
+    )
+    nmpc = SimpleNamespace(
+        nlp=[
+            SimpleNamespace(
+                u_init={
+                    "last_pulse_width_Biceps": SimpleNamespace(init=center.copy())
+                },
+                u_bounds={"last_pulse_width_Biceps": bounds},
+            )
+        ]
+    )
+
+    periodic_example.apply_pulse_width_control_trust_region(nmpc, radius=0.01)
+    first = periodic_example.apply_phase_aligned_pulse_width_transition_guard(
+        nmpc,
+        radius=0.2,
+        margin=0,
+        activation_threshold=0.05,
+        deactivation_threshold=0.02,
+    )["last_pulse_width_Biceps"]
+    assert first["hysteresis_memory_used"] is False
+    np.testing.assert_array_equal(
+        nmpc._cocofest_pulse_width_active_set_memory[
+            "last_pulse_width_Biceps"
+        ],
+        [False, True],
+    )
+
+    # Both nodes now lie inside the Schmitt band. The inactive node remains
+    # inactive and the active node remains active instead of chattering to the
+    # same memoryless label.
+    nmpc.nlp[0].u_init["last_pulse_width_Biceps"].init[:, :] = [0.13, 0.13]
+    periodic_example.apply_pulse_width_control_trust_region(nmpc, radius=0.01)
+    second = periodic_example.apply_phase_aligned_pulse_width_transition_guard(
+        nmpc,
+        radius=0.2,
+        margin=0,
+        activation_threshold=0.05,
+        deactivation_threshold=0.02,
+    )["last_pulse_width_Biceps"]
+
+    assert second["hysteresis_memory_used"] is True
+    assert second["hysteresis_label_changes"] == 1
+    assert second["transition_nodes"] == [0, 1]
+    np.testing.assert_array_equal(
+        nmpc._cocofest_pulse_width_active_set_memory[
+            "last_pulse_width_Biceps"
+        ],
+        [False, True],
+    )
+
+
+def test_phase_aligned_active_set_guard_rejects_inverted_hysteresis_band():
+    nmpc = SimpleNamespace()
+
+    with pytest.raises(ValueError, match="hysteresis off threshold"):
+        periodic_example.apply_phase_aligned_pulse_width_transition_guard(
+            nmpc,
+            radius=0.2,
+            activation_threshold=2e-6,
+            deactivation_threshold=5e-6,
+        )
+
+
 def test_control_homotopy_radii_are_parsed_as_an_increasing_sequence():
     parser = periodic_example.build_argument_parser()
     args = parser.parse_args(
@@ -1467,6 +1536,8 @@ def test_comparison_cli_forwards_acados_hot_start_homotopy_options():
             "2",
             "--acados-transfer-active-set-threshold",
             "2e-6",
+            "--acados-transfer-active-set-hysteresis-off-threshold",
+            "1e-6",
         ]
     )
 
@@ -1480,6 +1551,7 @@ def test_comparison_cli_forwards_acados_hot_start_homotopy_options():
     assert args.acados_transfer_active_set_guard_radius == 5e-4
     assert args.acados_transfer_active_set_guard_margin == 2
     assert args.acados_transfer_active_set_threshold == 2e-6
+    assert args.acados_transfer_active_set_hysteresis_off_threshold == 1e-6
 
 
 def test_control_homotopy_window_radius_growth_respects_its_physical_cap():
@@ -7443,7 +7515,13 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert "run_case sqp-irk-active-set-guard reduced" in workflow
     assert "--acados-transfer-active-set-guard-radius 5e-4" in workflow
     assert "--acados-transfer-active-set-guard-margin 1" in workflow
-    assert "--acados-transfer-active-set-threshold 1e-6" in workflow
+    assert "--acados-transfer-active-set-threshold 5e-6" in workflow
+    assert (
+        "--acados-transfer-active-set-hysteresis-off-threshold 2e-6"
+        in workflow
+    )
+    assert "Audit MadNLP dual-input consumption" in workflow
+    assert "tests/shard1/test_parametric_kkt.py" in workflow
     assert "--max-consecutive-failing 2" in workflow
     assert "--retry-failed-rho-without-advance" in workflow
     assert "fatigue_endurance_radau5" in workflow

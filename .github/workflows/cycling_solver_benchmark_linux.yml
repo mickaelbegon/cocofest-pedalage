@@ -1670,7 +1670,8 @@ jobs:
               solver_options+=(
                 --acados-transfer-active-set-guard-radius 5e-4
                 --acados-transfer-active-set-guard-margin 1
-                --acados-transfer-active-set-threshold 1e-6
+                --acados-transfer-active-set-threshold 5e-6
+                --acados-transfer-active-set-hysteresis-off-threshold 2e-6
               )
             fi
             if [[ "$variant" == *"phase-one-mechanical-lazy"* ]]; then
@@ -2798,11 +2799,33 @@ jobs:
             tests/test_cycling_benchmark_summary.py \
             tests/test_solver_option_screen_summary.py \
             tests/shard1/test_reduced_cycling.py \
+            tests/shard1/test_parametric_kkt.py \
             tests/shard1/test_periodic_pulse_width.py::test_stimulation_snapshots_use_one_based_cycles_and_real_crank_phase \
             tests/shard1/test_periodic_pulse_width.py::test_common_primal_threshold_is_independent_of_nlp_solver_tolerance \
             tests/shard1/test_periodic_pulse_width.py::test_solver_comparison_cli_relays_same_rho_retry_policy \
             tests/shard1/test_periodic_pulse_width.py::test_full_contact_stabilization_is_opt_in_on_both_clis \
             tests/shard1/test_periodic_pulse_width.py::test_github_benchmark_compares_physical_threshold_not_solver_tolerance
+
+      - name: Audit MadNLP dual-input consumption
+        if: matrix.solver == 'madnlp'
+        run: |
+          mkdir -p solver-audits
+          python .github/scripts/audit_madnlp_dual_warm_start.py \
+            --output-json solver-audits/madnlp-dual-warm-start.json
+          jq -e '
+            .schema == "cocofest-madnlp-dual-consumption-audit-v1" and
+            (.maximum_first_step_difference >= 0) and
+            (.dual_inputs_consumed | type == "boolean")
+          ' solver-audits/madnlp-dual-warm-start.json
+
+      - name: Upload MadNLP dual-input audit
+        if: always() && matrix.solver == 'madnlp'
+        uses: actions/upload-artifact@v7
+        with:
+          name: cycling-madnlp-dual-audit-${{ github.run_id }}
+          path: solver-audits/
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Prepare sequential case directories
         run: |

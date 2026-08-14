@@ -220,6 +220,7 @@ BENCHMARK_CONFIGURATION_FIELDS = (
     "acados_transfer_active_set_guard_radius",
     "acados_transfer_active_set_guard_margin",
     "acados_transfer_active_set_threshold",
+    "acados_transfer_active_set_hysteresis_off_threshold",
     "acados_cyclical_transfer_mode",
     "rho_pulse_width_transfer_mode",
     "rho_pulse_width_extrapolation_factor",
@@ -3618,6 +3619,7 @@ def main(
     acados_transfer_active_set_guard_radius: float | None = None,
     acados_transfer_active_set_guard_margin: int = 1,
     acados_transfer_active_set_threshold: float = 1e-6,
+    acados_transfer_active_set_hysteresis_off_threshold: float | None = None,
     acados_fes_state_trust_radius: float | None = None,
     acados_fatigue_warmstart_mode: str = "continuous",
     acados_tolerance: float | None = None,
@@ -4284,6 +4286,9 @@ def main(
     )
     acados_args.acados_transfer_active_set_threshold = (
         acados_transfer_active_set_threshold
+    )
+    acados_args.acados_transfer_active_set_hysteresis_off_threshold = (
+        acados_transfer_active_set_hysteresis_off_threshold
     )
     acados_args.acados_terminal_wheel_q_homotopy_slacks = (
         acados_terminal_wheel_q_homotopy_slacks
@@ -5683,6 +5688,15 @@ def build_cli() -> argparse.ArgumentParser:
         default=1e-6,
     )
     parser.add_argument(
+        "--acados-transfer-active-set-hysteresis-off-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Optional Schmitt deactivation threshold above pd0, in seconds; "
+            "must not exceed --acados-transfer-active-set-threshold."
+        ),
+    )
+    parser.add_argument(
         "--acados-terminal-wheel-q-homotopy-slacks",
         type=parse_terminal_wheel_q_slacks,
         default=None,
@@ -6295,6 +6309,9 @@ if __name__ == "__main__":
         ),
         acados_transfer_active_set_threshold=(
             args.acados_transfer_active_set_threshold
+        ),
+        acados_transfer_active_set_hysteresis_off_threshold=(
+            args.acados_transfer_active_set_hysteresis_off_threshold
         ),
         acados_fes_state_trust_radius=args.acados_fes_state_trust_radius,
         acados_fatigue_warmstart_mode=args.acados_fatigue_warmstart_mode,

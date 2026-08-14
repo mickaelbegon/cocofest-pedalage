@@ -5625,3 +5625,21 @@ Le calcul du RHO suivant peut être réalisé pendant l'exécution du cycle
 courant; c'est la composante *advanced-step NMPC*. Même sans entrée duale
 MadNLP fonctionnelle, la partie primale du prédicteur reste exploitable, et
 les multiplicateurs MadNLP sortants peuvent servir au calcul de sensibilité.
+
+Le premier incrément d'implémentation ajoute trois éléments reproductibles :
+
+- `.github/scripts/audit_madnlp_dual_warm_start.py` exécute le test du premier
+  pas et produit un JSON; la CI MadNLP l'archive sans transformer
+  l'absence de consommation en erreur d'infrastructure;
+- le garde de transitions ACADOS possède maintenant une mémoire de Schmitt
+  par muscle et par phase. Le cas CI utilise `delta_on=5 us` et
+  `delta_off=2 us`. Cette mémoire décide seulement quels voisinages voient
+  leur trust region élargie; elle ne fixe pas les contrôles du NLP final;
+- `cocofest.optimization.parametric_kkt` fournit le noyau numérique du
+  prédicteur fixed-active-set : assemblage et résolution du système KKT,
+  régularisation, limitation commune du pas primal-dual et garde sur le
+  résidu. Le test analytique d'un QP paramétrique retrouve exactement la
+  sensibilité attendue. Ce noyau n'est pas encore branché au vecteur de
+  décision Bioptim du RHO reduced; cette séparation est volontaire afin de
+  valider les conventions de signe et les safeguards avant le premier essai
+  biomécanique.
