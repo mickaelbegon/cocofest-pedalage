@@ -7090,6 +7090,74 @@ def test_feasibility_snapshot_is_not_recomputed_with_next_window_bounds():
     assert feasibility["passes_tolerance"] is True
 
 
+def test_canonical_solution_kkt_audit_reuses_sparse_derivative_graph():
+    from casadi import SX, vertcat
+
+    x = SX.sym("x", 2)
+    interface = SimpleNamespace(
+        nlp={
+            "x": x,
+            "f": x[0] ** 2 + 2 * x[1] ** 2,
+            "g": vertcat(x[0] + x[1]),
+        },
+        limits={
+            "lbx": np.full(2, -np.inf),
+            "ubx": np.full(2, np.inf),
+            "lbg": np.array([1.0]),
+            "ubg": np.array([1.0]),
+        },
+    )
+    solution = SimpleNamespace(
+        ocp=SimpleNamespace(ocp_solver=interface),
+        vector=np.array([2.0 / 3.0, 1.0 / 3.0]),
+        lam_g=np.array([-4.0 / 3.0]),
+        lam_x=np.zeros(2),
+    )
+
+    first = periodic_example.canonical_solution_kkt_audit(solution)
+    second = periodic_example.canonical_solution_kkt_audit(solution)
+
+    assert first["available"] is True
+    assert first["graph_reused"] is False
+    assert second["graph_reused"] is True
+    assert first["variable_count"] == 2
+    assert first["constraint_count"] == 1
+    assert first["active_row_count"] == 1
+    assert first["stationarity_inf_norm"] < 1e-14
+    assert first["factorization_used_least_squares"] is False
+    assert first["factorization_linear_residual_inf_norm"] == 0.0
+    no_factorization = periodic_example.canonical_solution_kkt_audit(
+        solution, test_zero_rhs_factorization=False
+    )
+    assert no_factorization["factorization_tested"] is False
+    assert no_factorization["factorization_used_least_squares"] is None
+
+    interface.dispatch_bounds = lambda: (
+        None,
+        SimpleNamespace(min=np.array([1.3]), max=np.array([1.3])),
+    )
+    nmpc = SimpleNamespace(
+        ocp_solver=interface,
+        bounds_vectors=(np.full(2, -np.inf), np.full(2, np.inf)),
+        init_vector=solution.vector.copy(),
+    )
+    prediction = periodic_example.parametric_kkt_next_rho_prediction_audit(nmpc)
+
+    assert prediction["available"] is True
+    assert prediction["moving_active_targets"] == 1
+    assert prediction["repeat_primal_residual"] == pytest.approx(0.3)
+    assert prediction["predicted_primal_residual"] < 1e-12
+    assert prediction["prediction_improves_primal_residual"] is True
+    assert prediction["corrected_repeat_primal_residual"] < 1e-12
+    assert prediction["repeat_correction_improves_primal_residual"] is True
+    fast_prediction = periodic_example.parametric_kkt_next_rho_prediction_audit(
+        nmpc, evaluate_bound_motion_prediction=False
+    )
+    assert fast_prediction["bound_motion_prediction_evaluated"] is False
+    assert fast_prediction["predicted_primal_residual"] is None
+    assert fast_prediction["corrected_repeat_primal_residual"] < 1e-12
+
+
 def test_acados_shooting_residuals_are_part_of_the_physical_feasibility_audit():
     base = {
         "passes_tolerance": True,
@@ -7484,10 +7552,10 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert "inputs.cycles != 'screen' && inputs.cycles != 'acados'" in workflow
     assert "prepare-acados-stack:" in workflow
     assert (
-        "BIOPTIM_PRODUCTION_COMMIT: " "045961b3efeeffe69272712ec65b53ef14eead64"
+        "BIOPTIM_PRODUCTION_COMMIT: " "f7a0d722526967d9a81a8ad596ddb911d32a0bfe"
     ) in workflow
     assert (
-        workflow.count("bioptim_commit: 045961b3efeeffe69272712ec65b53ef14eead64") == 3
+        workflow.count("bioptim_commit: f7a0d722526967d9a81a8ad596ddb911d32a0bfe") == 3
     )
     assert "a3499cab16d7605b8efa7255cf89f1af6a7c59c9" not in workflow
     assert "ACADOS_COMMIT: 59d93e17d2985fdd73fc58b8a83ed8f83a024171" in workflow
@@ -7570,6 +7638,13 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     )
     assert "Audit MadNLP dual-input consumption" in workflow
     assert "tests/shard1/test_parametric_kkt.py" in workflow
+    assert 'inputs.cycles == \'kkt_predictor\'' in workflow
+    assert "inputs.refined_collocation_rhos" in workflow
+    assert "Run IPOPT reduced with guarded parametric KKT predictor" in workflow
+    assert 'PARAMETRIC_KKT_PREDICTOR: "true"' in workflow
+    assert "Validate the paired IPOPT KKT ablation" in workflow
+    assert "parametric_kkt_prediction_audits" in workflow
+    assert "cycling-fatigue-linux-ipopt-kkt-predictor-reduced" in workflow
     assert "--max-consecutive-failing 2" in workflow
     assert "--retry-failed-rho-without-advance" in workflow
     assert "fatigue_endurance_radau5" in workflow
@@ -13037,6 +13112,9 @@ def test_comparison_forwards_solver_neutral_seed_diagnostics(monkeypatch):
         n_windows=1,
         initial_guess_diagnostics=True,
         exact_initial_nlp_audit=True,
+        parametric_kkt_audit=True,
+        parametric_kkt_predictor=True,
+        parametric_kkt_predictor_maximum_residual_ratio=0.8,
         shared_transfer_phase_one=True,
         acados_transfer_phase_one_mode="mechanical",
         acados_transfer_phase_one_lookback_nodes=12,
@@ -13057,6 +13135,14 @@ def test_comparison_forwards_solver_neutral_seed_diagnostics(monkeypatch):
     assert captured["madnlp"].initial_guess_diagnostics is True
     assert captured["ipopt"].exact_initial_nlp_audit is True
     assert captured["madnlp"].exact_initial_nlp_audit is True
+    assert captured["ipopt"].parametric_kkt_audit is True
+    assert captured["madnlp"].parametric_kkt_audit is True
+    assert captured["ipopt"].parametric_kkt_predictor is True
+    assert captured["madnlp"].parametric_kkt_predictor is True
+    assert (
+        captured["ipopt"].parametric_kkt_predictor_maximum_residual_ratio
+        == pytest.approx(0.8)
+    )
     assert captured["madnlp"].acados_diagnostics is False
     for solver_name in ("ipopt", "madnlp"):
         args = captured[solver_name]
@@ -13090,6 +13176,8 @@ def test_shared_transfer_rollout_cli_is_available_to_ipopt():
             "--solver",
             "ipopt",
             "--exact-initial-nlp-audit",
+            "--parametric-kkt-audit",
+            "--parametric-kkt-predictor",
             "--transfer-full-dynamics-rollout",
             "--transfer-phase-one",
             "--acados-transfer-phase-one-mode",
@@ -13112,6 +13200,8 @@ def test_shared_transfer_rollout_cli_is_available_to_ipopt():
         [
             "--shared-transfer-full-dynamics-rollout",
             "--exact-initial-nlp-audit",
+            "--parametric-kkt-audit",
+            "--parametric-kkt-predictor",
             "--compact-rho-output",
             "--shared-transfer-phase-one",
             "--acados-transfer-phase-one",
@@ -13199,6 +13289,8 @@ def test_shared_transfer_rollout_cli_is_available_to_ipopt():
 
     assert args.acados_transfer_full_dynamics_rollout is True
     assert args.exact_initial_nlp_audit is True
+    assert args.parametric_kkt_audit is True
+    assert args.parametric_kkt_predictor is True
     assert args.acados_transfer_phase_one is True
     assert args.acados_transfer_phase_one_mode == "mechanical"
     assert args.acados_transfer_phase_one_lookback_nodes == 15
@@ -13209,6 +13301,8 @@ def test_shared_transfer_rollout_cli_is_available_to_ipopt():
     assert args.full_dynamics_phase_one_max_fes_change == 3
     assert comparison_args.shared_transfer_full_dynamics_rollout is True
     assert comparison_args.exact_initial_nlp_audit is True
+    assert comparison_args.parametric_kkt_audit is True
+    assert comparison_args.parametric_kkt_predictor is True
     assert comparison_args.compact_rho_output is True
     assert comparison_args.shared_transfer_phase_one is True
     assert comparison_args.acados_transfer_phase_one is True

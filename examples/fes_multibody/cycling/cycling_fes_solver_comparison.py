@@ -1094,9 +1094,7 @@ def _fatigue_endurance_outcome(
     claim that the optimizer has mathematically proved muscle exhaustion.
     """
 
-    if success and (
-        requested_cycles is None or validated_cycles >= requested_cycles
-    ):
+    if success and (requested_cycles is None or validated_cycles >= requested_cycles):
         return {
             "label": "completed_endurance_horizon",
             "accepted": True,
@@ -1607,15 +1605,9 @@ def _solver_config(
             wheel_qdot_regularization_weight=wheel_qdot_regularization_weight,
             wheel_qdot_regularization_target=wheel_qdot_regularization_target,
             wheel_qdot_bound_margin=wheel_qdot_bound_margin,
-            acados_wheel_qdot_fast_bound_margin=(
-                acados_wheel_qdot_fast_bound_margin
-            ),
-            acados_wheel_qdot_slow_bound_margin=(
-                acados_wheel_qdot_slow_bound_margin
-            ),
-            terminal_wheel_qdot_bound_margin=(
-                terminal_wheel_qdot_bound_margin
-            ),
+            acados_wheel_qdot_fast_bound_margin=(acados_wheel_qdot_fast_bound_margin),
+            acados_wheel_qdot_slow_bound_margin=(acados_wheel_qdot_slow_bound_margin),
+            terminal_wheel_qdot_bound_margin=(terminal_wheel_qdot_bound_margin),
             acados_terminal_wheel_qdot_homotopy_margins=(
                 acados_terminal_wheel_qdot_homotopy_margins
             ),
@@ -1763,15 +1755,9 @@ def _solver_config(
             wheel_qdot_regularization_weight=wheel_qdot_regularization_weight,
             wheel_qdot_regularization_target=wheel_qdot_regularization_target,
             wheel_qdot_bound_margin=wheel_qdot_bound_margin,
-            acados_wheel_qdot_fast_bound_margin=(
-                acados_wheel_qdot_fast_bound_margin
-            ),
-            acados_wheel_qdot_slow_bound_margin=(
-                acados_wheel_qdot_slow_bound_margin
-            ),
-            terminal_wheel_qdot_bound_margin=(
-                terminal_wheel_qdot_bound_margin
-            ),
+            acados_wheel_qdot_fast_bound_margin=(acados_wheel_qdot_fast_bound_margin),
+            acados_wheel_qdot_slow_bound_margin=(acados_wheel_qdot_slow_bound_margin),
+            terminal_wheel_qdot_bound_margin=(terminal_wheel_qdot_bound_margin),
             acados_terminal_wheel_qdot_homotopy_margins=(
                 acados_terminal_wheel_qdot_homotopy_margins
             ),
@@ -2507,9 +2493,7 @@ def state_boundary_snapshots(
             snapshot["states"][key] = {
                 "start": boundary_values[:, 0].tolist(),
                 "end": boundary_values[:, 1].tolist(),
-                "delta": (
-                    boundary_values[:, 1] - boundary_values[:, 0]
-                ).tolist(),
+                "delta": (boundary_values[:, 1] - boundary_values[:, 0]).tolist(),
             }
         if invalid_key is not None:
             snapshot["states"] = {}
@@ -2540,9 +2524,8 @@ def isolated_window_checkpoint_snapshots(
     checkpoint_cycles = list(cycles)
     if cycles_per_window == 1:
         for window_index, solution in enumerate(windows):
-            feasibility_passes = (
-                window_index < len(feasibility)
-                and bool(feasibility[window_index].get("passes_tolerance", False))
+            feasibility_passes = window_index < len(feasibility) and bool(
+                feasibility[window_index].get("passes_tolerance", False)
             )
             if getattr(solution, "status", None) == 0 and feasibility_passes:
                 continue
@@ -2634,12 +2617,12 @@ def isolated_window_checkpoint_snapshots(
                 "lower_bound_us": 1e6 * lower,
                 "upper_bound_us": 1e6 * upper,
                 "classification_tolerance_us": 1e6 * tolerance,
-                "lower_active_indices": np.flatnonzero(
-                    trace <= lower + tolerance
-                ).astype(int).tolist(),
-                "upper_active_indices": np.flatnonzero(
-                    trace >= upper - tolerance
-                ).astype(int).tolist(),
+                "lower_active_indices": np.flatnonzero(trace <= lower + tolerance)
+                .astype(int)
+                .tolist(),
+                "upper_active_indices": np.flatnonzero(trace >= upper - tolerance)
+                .astype(int)
+                .tolist(),
             }
         snapshot["available"] = bool(
             snapshot["capacity_states"] or snapshot["pulse_width_us"]
@@ -2996,8 +2979,7 @@ def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
                 continue
             rollout_window = int(rollout_window)
             rollout_wall_time_by_window[rollout_window] = (
-                rollout_wall_time_by_window.get(rollout_window, 0.0)
-                + rollout_wall_time
+                rollout_wall_time_by_window.get(rollout_window, 0.0) + rollout_wall_time
             )
         transfer_preparation_wall_time_by_window = {
             window: phase_one_wall_time_by_window.get(window, 0.0)
@@ -3019,9 +3001,7 @@ def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
         ]
         strict_hot_effective_plus_transfer_preparation_wall_times = [
             window["effective_wall_time_s"]
-            + transfer_preparation_wall_time_by_window.get(
-                int(window["window"]), 0.0
-            )
+            + transfer_preparation_wall_time_by_window.get(int(window["window"]), 0.0)
             for window in window_rows[1 : performance["successful_prefix_windows"]]
             if window["validated"] and window["effective_wall_time_s"] is not None
         ]
@@ -3291,6 +3271,10 @@ def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
                     result, performance["validated_cycles"]
                 ),
                 "nlp_solver_stats": result.get("nlp_solver_stats") or [],
+                "parametric_kkt_audits": (result.get("parametric_kkt_audits") or []),
+                "parametric_kkt_prediction_audits": (
+                    result.get("parametric_kkt_prediction_audits") or []
+                ),
                 "compiled_nlp_reuse": result.get("compiled_nlp_reuse"),
                 "acados_maxiter_retry_summaries": (
                     result.get("acados_maxiter_retry_summaries") or []
@@ -3307,9 +3291,7 @@ def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
                 "acados_forced_iteration_cap_summaries": (
                     result.get("acados_forced_iteration_cap_summaries") or []
                 ),
-                "initial_acados_irk_rollout": result.get(
-                    "initial_acados_irk_rollout"
-                ),
+                "initial_acados_irk_rollout": result.get("initial_acados_irk_rollout"),
                 "acados_ipopt_recovery": result.get("acados_ipopt_recovery"),
                 "acados_ipopt_recovery_summaries": (
                     result.get("acados_ipopt_recovery_summaries") or []
@@ -3324,12 +3306,8 @@ def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
                 "acados_failed_rho_phase_one_summaries": (
                     result.get("acados_failed_rho_phase_one_summaries") or []
                 ),
-                "solver_attempt_accounting": result.get(
-                    "solver_attempt_accounting"
-                ),
-                "transfer_phase_one_summaries": (
-                    phase_one_summaries
-                ),
+                "solver_attempt_accounting": result.get("solver_attempt_accounting"),
+                "transfer_phase_one_summaries": (phase_one_summaries),
                 "transfer_phase_one_timing": transfer_phase_one_timing,
                 "transfer_preparation_timing": transfer_preparation_timing,
                 "terminal_wheel_bound_summaries": (
@@ -3741,6 +3719,9 @@ def main(
     acados_diagnostics: bool = False,
     initial_guess_diagnostics: bool = False,
     exact_initial_nlp_audit: bool = False,
+    parametric_kkt_audit: bool = False,
+    parametric_kkt_predictor: bool = False,
+    parametric_kkt_predictor_maximum_residual_ratio: float = 0.95,
     periodic_ipopt_refinement: bool = True,
     periodic_ipopt_refinement_iterations: int = 300,
     periodic_ipopt_refinement_use_sx: bool = True,
@@ -3783,18 +3764,14 @@ def main(
     # and C-compiled runs retain CLI-relative path semantics.
     standard_warmup_seed = resolve_invocation_path(standard_warmup_seed)
     common_initial_solution = resolve_invocation_path(common_initial_solution)
-    full_horizon_prefix_solution = resolve_invocation_path(
-        full_horizon_prefix_solution
-    )
+    full_horizon_prefix_solution = resolve_invocation_path(full_horizon_prefix_solution)
     common_initial_solution_output = resolve_invocation_path(
         common_initial_solution_output
     )
     receding_horizon_solution_output = resolve_invocation_path(
         receding_horizon_solution_output
     )
-    rho_replay_checkpoint_output = resolve_invocation_path(
-        rho_replay_checkpoint_output
-    )
+    rho_replay_checkpoint_output = resolve_invocation_path(rho_replay_checkpoint_output)
     rho_prepared_checkpoint_output_template = resolve_invocation_path(
         rho_prepared_checkpoint_output_template
     )
@@ -3983,12 +3960,8 @@ def main(
         ),
         wheel_qdot_regularization_target=wheel_qdot_regularization_target,
         wheel_qdot_bound_margin=wheel_qdot_bound_margin,
-        acados_wheel_qdot_fast_bound_margin=(
-            acados_wheel_qdot_fast_bound_margin
-        ),
-        acados_wheel_qdot_slow_bound_margin=(
-            acados_wheel_qdot_slow_bound_margin
-        ),
+        acados_wheel_qdot_fast_bound_margin=(acados_wheel_qdot_fast_bound_margin),
+        acados_wheel_qdot_slow_bound_margin=(acados_wheel_qdot_slow_bound_margin),
         terminal_wheel_qdot_bound_margin=(terminal_wheel_qdot_bound_margin),
         acados_terminal_wheel_qdot_homotopy_margins=(
             acados_terminal_wheel_qdot_homotopy_margins
@@ -4071,9 +4044,7 @@ def main(
     _set_rho_retry_without_advance(
         (ipopt_args, acados_args), retry_failed_rho_without_advance
     )
-    acados_args.disable_standard_ipopt_warmup = (
-        acados_disable_standard_ipopt_warmup
-    )
+    acados_args.disable_standard_ipopt_warmup = acados_disable_standard_ipopt_warmup
     ipopt_args.warmup_ipopt_linear_solver = warmup_ipopt_linear_solver
     ipopt_args.standard_warmup_seed = standard_warmup_seed
     acados_args.standard_warmup_seed = standard_warmup_seed
@@ -4314,9 +4285,7 @@ def main(
         # shared Phase-I path consumes them for every NLP solver.  Assign them
         # before cloning ``ipopt_args`` into MadNLP/FATROP configurations so a
         # CLI request cannot silently fall back to ``all`` with no screen.
-        solver_args.acados_transfer_phase_one_mode = (
-            acados_transfer_phase_one_mode
-        )
+        solver_args.acados_transfer_phase_one_mode = acados_transfer_phase_one_mode
         solver_args.acados_transfer_phase_one_lookback_nodes = (
             acados_transfer_phase_one_lookback_nodes
         )
@@ -4348,9 +4317,7 @@ def main(
             acados_transfer_phase_one_max_fes_change
         )
         solver_args.full_dynamics_phase_one = shared_initial_phase_one
-        solver_args.disable_full_dynamics_phase_one = (
-            disable_full_dynamics_phase_one
-        )
+        solver_args.disable_full_dynamics_phase_one = disable_full_dynamics_phase_one
         solver_args.acados_transfer_rollout_substeps = shared_transfer_rollout_substeps
         solver_args.acados_transfer_rollout_max_bound_violation = (
             shared_transfer_rollout_max_bound_violation
@@ -4479,9 +4446,7 @@ def main(
     )
     for optional_nlp_args in (fatrop_args, madnlp_args):
         optional_nlp_args.nlp_ipopt_recovery = nlp_ipopt_recovery
-        optional_nlp_args.nlp_ipopt_fallback_advance = (
-            nlp_ipopt_fallback_advance
-        )
+        optional_nlp_args.nlp_ipopt_fallback_advance = nlp_ipopt_fallback_advance
         optional_nlp_args.nlp_ipopt_recovery_max_iterations = (
             nlp_ipopt_recovery_max_iterations
         )
@@ -4489,9 +4454,7 @@ def main(
             nlp_ipopt_recovery_collocation_degree
         )
     for nlp_args in (ipopt_args, fatrop_args, madnlp_args):
-        nlp_args.nlp_failed_rho_phase_one_recovery = (
-            nlp_failed_rho_phase_one_recovery
-        )
+        nlp_args.nlp_failed_rho_phase_one_recovery = nlp_failed_rho_phase_one_recovery
     ipopt_args.ipopt_c_compile = ipopt_c_compile
     ipopt_args.ipopt_hsl_library = ipopt_hsl_library
     fatrop_args.ipopt_c_compile = False
@@ -4550,12 +4513,20 @@ def main(
     # manifold as the reduced theta/omega OCP before phase and cadence metrics
     # are computed.
     for solver_configuration in solver_args.values():
-        solver_configuration.initial_guess_diagnostics = bool(
-            initial_guess_diagnostics
-        )
+        solver_configuration.initial_guess_diagnostics = bool(initial_guess_diagnostics)
         solver_configuration.exact_initial_nlp_audit = bool(
-            exact_initial_nlp_audit
-            and solver_configuration.solver in NLP_SOLVER_NAMES
+            exact_initial_nlp_audit and solver_configuration.solver in NLP_SOLVER_NAMES
+        )
+        solver_configuration.parametric_kkt_audit = bool(
+            (parametric_kkt_audit or parametric_kkt_predictor)
+            and solver_configuration.solver in ("ipopt", "madnlp")
+        )
+        solver_configuration.parametric_kkt_predictor = bool(
+            parametric_kkt_predictor
+            and solver_configuration.solver in ("ipopt", "madnlp")
+        )
+        solver_configuration.parametric_kkt_predictor_maximum_residual_ratio = float(
+            parametric_kkt_predictor_maximum_residual_ratio
         )
         solver_configuration.mechanical_equivalence_audit = True
         solver_configuration.full_contact_constraints_terminal = bool(
@@ -5797,9 +5768,7 @@ def build_cli() -> argparse.ArgumentParser:
     parser.add_argument("--acados-ext-qp-res", action="store_true")
     parser.add_argument("--acados-store-iterates", action="store_true")
     parser.add_argument("--acados-maxiter-retries", type=int, default=0)
-    parser.add_argument(
-        "--acados-maxiter-retry-iterations", type=int, default=20
-    )
+    parser.add_argument("--acados-maxiter-retry-iterations", type=int, default=20)
     parser.add_argument(
         "--acados-maxiter-retry-feasibility-tolerance",
         type=float,
@@ -5826,9 +5795,7 @@ def build_cli() -> argparse.ArgumentParser:
     parser.add_argument(
         "--acados-ipopt-recovery-seed-max-iterations", type=int, default=None
     )
-    parser.add_argument(
-        "--acados-ipopt-recovery-irk-seed-audit", action="store_true"
-    )
+    parser.add_argument("--acados-ipopt-recovery-irk-seed-audit", action="store_true")
     parser.add_argument("--acados-ipopt-recovery-force-first-rho", action="store_true")
     parser.add_argument(
         "--acados-forced-iteration-cap-rhos",
@@ -5875,12 +5842,8 @@ def build_cli() -> argparse.ArgumentParser:
             "requested NLP solver before advancing."
         ),
     )
-    parser.add_argument(
-        "--nlp-ipopt-recovery-max-iterations", type=int, default=2000
-    )
-    parser.add_argument(
-        "--nlp-ipopt-recovery-collocation-degree", type=int, default=5
-    )
+    parser.add_argument("--nlp-ipopt-recovery-max-iterations", type=int, default=2000)
+    parser.add_argument("--nlp-ipopt-recovery-collocation-degree", type=int, default=5)
     parser.add_argument(
         "--nlp-ipopt-fallback-advance",
         action="store_true",
@@ -5926,6 +5889,27 @@ def build_cli() -> argparse.ArgumentParser:
             "Evaluate canonical g(x0) immediately before each CasADi NLP solve; "
             "disabled for ACADOS and excluded from solver timing."
         ),
+    )
+    parser.add_argument(
+        "--parametric-kkt-audit",
+        action="store_true",
+        help=(
+            "Evaluate exact sparse KKT blocks at certified IPOPT/MadNLP "
+            "solutions without modifying the following RHO initial guess."
+        ),
+    )
+    parser.add_argument(
+        "--parametric-kkt-predictor",
+        action="store_true",
+        help=(
+            "Inject a guarded sparse-KKT correction into the next IPOPT or "
+            "MadNLP initial decision vector."
+        ),
+    )
+    parser.add_argument(
+        "--parametric-kkt-predictor-maximum-residual-ratio",
+        type=float,
+        default=0.95,
     )
     parser.add_argument("--disable-periodic-fes-warmup-projection", action="store_true")
     parser.add_argument(
@@ -6049,9 +6033,7 @@ def build_cli() -> argparse.ArgumentParser:
             "DOP853 audit used by the scientific collocation gate."
         ),
     )
-    parser.add_argument(
-        "--high-accuracy-trace-max-cycles", type=int, default=30
-    )
+    parser.add_argument("--high-accuracy-trace-max-cycles", type=int, default=30)
     parser.add_argument(
         "--high-accuracy-trace-cycle-milestones",
         type=parse_positive_window_indices,
@@ -6234,15 +6216,9 @@ if __name__ == "__main__":
         acados_wheel_qdot_regularization_weight=args.acados_wheel_qdot_regularization_weight,
         wheel_qdot_regularization_target=args.wheel_qdot_regularization_target,
         wheel_qdot_bound_margin=args.wheel_qdot_bound_margin,
-        acados_wheel_qdot_fast_bound_margin=(
-            args.acados_wheel_qdot_fast_bound_margin
-        ),
-        acados_wheel_qdot_slow_bound_margin=(
-            args.acados_wheel_qdot_slow_bound_margin
-        ),
-        terminal_wheel_qdot_bound_margin=(
-            args.terminal_wheel_qdot_bound_margin
-        ),
+        acados_wheel_qdot_fast_bound_margin=(args.acados_wheel_qdot_fast_bound_margin),
+        acados_wheel_qdot_slow_bound_margin=(args.acados_wheel_qdot_slow_bound_margin),
+        terminal_wheel_qdot_bound_margin=(args.terminal_wheel_qdot_bound_margin),
         acados_terminal_wheel_qdot_homotopy_margins=(
             args.acados_terminal_wheel_qdot_homotopy_margins
         ),
@@ -6362,9 +6338,7 @@ if __name__ == "__main__":
         acados_ipopt_recovery_force_first_rho=(
             args.acados_ipopt_recovery_force_first_rho
         ),
-        acados_forced_iteration_cap_rhos=(
-            args.acados_forced_iteration_cap_rhos
-        ),
+        acados_forced_iteration_cap_rhos=(args.acados_forced_iteration_cap_rhos),
         acados_forced_iteration_cap=args.acados_forced_iteration_cap,
         acados_ipopt_fallback_advance=args.acados_ipopt_fallback_advance,
         acados_failed_rho_alternate_pw_predictor=(
@@ -6375,15 +6349,11 @@ if __name__ == "__main__":
         ),
         nlp_ipopt_recovery=args.nlp_ipopt_recovery,
         nlp_ipopt_fallback_advance=args.nlp_ipopt_fallback_advance,
-        nlp_ipopt_recovery_max_iterations=(
-            args.nlp_ipopt_recovery_max_iterations
-        ),
+        nlp_ipopt_recovery_max_iterations=(args.nlp_ipopt_recovery_max_iterations),
         nlp_ipopt_recovery_collocation_degree=(
             args.nlp_ipopt_recovery_collocation_degree
         ),
-        nlp_failed_rho_phase_one_recovery=(
-            args.nlp_failed_rho_phase_one_recovery
-        ),
+        nlp_failed_rho_phase_one_recovery=(args.nlp_failed_rho_phase_one_recovery),
         acados_initial_irk_rollout=args.acados_initial_irk_rollout,
         acados_reset_solver_before_solve=args.acados_reset_solver_before_solve,
         acados_check_reuse_possible=args.acados_check_reuse_possible,
@@ -6542,6 +6512,11 @@ if __name__ == "__main__":
         acados_diagnostics=args.acados_diagnostics,
         initial_guess_diagnostics=args.initial_guess_diagnostics,
         exact_initial_nlp_audit=args.exact_initial_nlp_audit,
+        parametric_kkt_audit=args.parametric_kkt_audit,
+        parametric_kkt_predictor=args.parametric_kkt_predictor,
+        parametric_kkt_predictor_maximum_residual_ratio=(
+            args.parametric_kkt_predictor_maximum_residual_ratio
+        ),
         periodic_ipopt_refinement=args.periodic_ipopt_refinement,
         periodic_ipopt_refinement_iterations=args.periodic_ipopt_refinement_iterations,
         periodic_ipopt_refinement_use_sx=args.periodic_ipopt_refinement_use_sx,

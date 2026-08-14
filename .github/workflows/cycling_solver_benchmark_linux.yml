@@ -10,7 +10,7 @@ on:
         default: ubuntu-24.04
         type: string
       cycles:
-        description: Number of RHO solves, or "screen", "acados", "acados_guard", "acados_active_set", "acados_pw_stability", "acados_recovery", "acados_lazy_recovery", "acados_homotopy", "acados_reduced_100", "acados_hybrid", "acados_reduced_recovery", "acados_reduced_fallback", "acados_recovery_speed", "acados_dropout", "pw_transfer_ablation", "radau5_100", "radau35_comparison", "fatigue_endurance", "fatigue_endurance_radau5", or "full_horizon"
+        description: Number of RHO solves, or "screen", "acados", "acados_guard", "acados_active_set", "acados_pw_stability", "acados_recovery", "acados_lazy_recovery", "acados_homotopy", "acados_reduced_100", "acados_hybrid", "acados_reduced_recovery", "acados_reduced_fallback", "acados_recovery_speed", "acados_dropout", "pw_transfer_ablation", "kkt_predictor", "radau5_100", "radau35_comparison", "fatigue_endurance", "fatigue_endurance_radau5", or "full_horizon"
         required: true
         default: "100"
         type: string
@@ -158,7 +158,7 @@ env:
   BIOPTIM_REPOSITORY: mickaelbegon/BiorbdOptim
   # Dedicated multi-solver integration branch:
   # codex/cocofest-acados-v055-exploration
-  BIOPTIM_PRODUCTION_COMMIT: 045961b3efeeffe69272712ec65b53ef14eead64
+  BIOPTIM_PRODUCTION_COMMIT: f7a0d722526967d9a81a8ad596ddb911d32a0bfe
   BIOPTIM_ALPAQA_COMMIT: d84e7e43534360fc048e0be26a3bd69a2abc2d77
   ACADOS_COMMIT: 59d93e17d2985fdd73fc58b8a83ed8f83a024171
   ACADOS_INSTALL_SCRIPT_BLOB: 5ac8064ab613251e62560b5de8cbbb9550f5c5d0
@@ -1157,7 +1157,7 @@ jobs:
 
   acados-smoke:
     name: ACADOS — sequential full/reduced and option screen
-    if: ${{ inputs.cycles != 'screen' && inputs.cycles != 'full_horizon' && inputs.cycles != 'pw_transfer_ablation' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles != 'acados_dropout' && inputs.cycles_per_window == '1' }}
+    if: ${{ inputs.cycles != 'screen' && inputs.cycles != 'full_horizon' && inputs.cycles != 'pw_transfer_ablation' && inputs.cycles != 'kkt_predictor' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles != 'acados_dropout' && inputs.cycles_per_window == '1' }}
     needs: [prepare-seed, prepare-acados-stack]
     runs-on: ${{ inputs.runner_label }}
     timeout-minutes: 240
@@ -2596,9 +2596,9 @@ jobs:
             case_slug: ipopt
             benchmark_mode: main
             timeout_minutes: 300
-            benchmark_rhos: ${{ inputs.cycles == 'pw_transfer_ablation' && '100' || inputs.cycles == 'radau5_100' && inputs.radau5_endurance_rhos || inputs.cycles == 'radau35_comparison' && inputs.radau35_comparison_rhos || (inputs.cycles == 'fatigue_endurance' || inputs.cycles == 'fatigue_endurance_radau5') && inputs.fatigue_endurance_max_rhos || inputs.cycles }}
+            benchmark_rhos: ${{ inputs.cycles == 'pw_transfer_ablation' && '100' || inputs.cycles == 'kkt_predictor' && inputs.refined_collocation_rhos || inputs.cycles == 'radau5_100' && inputs.radau5_endurance_rhos || inputs.cycles == 'radau35_comparison' && inputs.radau35_comparison_rhos || (inputs.cycles == 'fatigue_endurance' || inputs.cycles == 'fatigue_endurance_radau5') && inputs.fatigue_endurance_max_rhos || inputs.cycles }}
             cycles_per_window: ${{ inputs.cycles_per_window }}
-            bioptim_commit: 045961b3efeeffe69272712ec65b53ef14eead64
+            bioptim_commit: f7a0d722526967d9a81a8ad596ddb911d32a0bfe
             integration_branch: codex/cocofest-acados-v055-exploration
             casadi_cxx_abi: 0
           - solver: madnlp
@@ -2606,9 +2606,9 @@ jobs:
             case_slug: madnlp
             benchmark_mode: main
             timeout_minutes: 420
-            benchmark_rhos: ${{ inputs.cycles == 'pw_transfer_ablation' && '100' || inputs.cycles == 'radau5_100' && inputs.radau5_endurance_rhos || inputs.cycles == 'radau35_comparison' && inputs.radau35_comparison_rhos || (inputs.cycles == 'fatigue_endurance' || inputs.cycles == 'fatigue_endurance_radau5') && inputs.fatigue_endurance_max_rhos || inputs.cycles }}
+            benchmark_rhos: ${{ inputs.cycles == 'pw_transfer_ablation' && '100' || inputs.cycles == 'kkt_predictor' && inputs.refined_collocation_rhos || inputs.cycles == 'radau5_100' && inputs.radau5_endurance_rhos || inputs.cycles == 'radau35_comparison' && inputs.radau35_comparison_rhos || (inputs.cycles == 'fatigue_endurance' || inputs.cycles == 'fatigue_endurance_radau5') && inputs.fatigue_endurance_max_rhos || inputs.cycles }}
             cycles_per_window: ${{ inputs.cycles_per_window }}
-            bioptim_commit: 045961b3efeeffe69272712ec65b53ef14eead64
+            bioptim_commit: f7a0d722526967d9a81a8ad596ddb911d32a0bfe
             integration_branch: codex/cocofest-acados-v055-exploration
             casadi_cxx_abi: 1
           - solver: fatrop
@@ -2616,9 +2616,9 @@ jobs:
             case_slug: fatrop-collocation
             benchmark_mode: main
             timeout_minutes: 420
-            benchmark_rhos: ${{ inputs.cycles == 'pw_transfer_ablation' && '100' || inputs.cycles == 'radau5_100' && inputs.radau5_endurance_rhos || inputs.cycles == 'radau35_comparison' && inputs.radau35_comparison_rhos || (inputs.cycles == 'fatigue_endurance' || inputs.cycles == 'fatigue_endurance_radau5') && inputs.fatigue_endurance_max_rhos || inputs.cycles }}
+            benchmark_rhos: ${{ inputs.cycles == 'pw_transfer_ablation' && '100' || inputs.cycles == 'kkt_predictor' && inputs.refined_collocation_rhos || inputs.cycles == 'radau5_100' && inputs.radau5_endurance_rhos || inputs.cycles == 'radau35_comparison' && inputs.radau35_comparison_rhos || (inputs.cycles == 'fatigue_endurance' || inputs.cycles == 'fatigue_endurance_radau5') && inputs.fatigue_endurance_max_rhos || inputs.cycles }}
             cycles_per_window: ${{ inputs.cycles_per_window }}
-            bioptim_commit: 045961b3efeeffe69272712ec65b53ef14eead64
+            bioptim_commit: f7a0d722526967d9a81a8ad596ddb911d32a0bfe
             integration_branch: codex/cocofest-acados-v055-exploration
             casadi_cxx_abi: 0
     env:
@@ -2968,6 +2968,50 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
+      - name: Run IPOPT reduced with guarded parametric KKT predictor
+        if: ${{ matrix.solver == 'ipopt' && inputs.cycles == 'kkt_predictor' }}
+        env:
+          PARAMETRIC_KKT_PREDICTOR: "true"
+        run: bash .github/scripts/run_cycling_benchmark_case.sh ipopt-kkt-predictor ipopt reduced mumps collocation benchmark-results "$BENCHMARK_CYCLES" "${{ inputs.compile_nlp_evaluators }}"
+
+      - name: Validate the paired IPOPT KKT ablation
+        if: ${{ matrix.solver == 'ipopt' && inputs.cycles == 'kkt_predictor' }}
+        run: |
+          baseline="benchmark-results/ipopt-reduced/result.json"
+          predictor="benchmark-results/ipopt-kkt-predictor-reduced/result.json"
+          jq -e '
+            .results[0] |
+            (.success == true) and
+            (.parametric_kkt_prediction_audits | length > 0) and
+            any(.parametric_kkt_prediction_audits[]; .injected == true)
+          ' "$predictor"
+          python - "$baseline" "$predictor" <<'PY'
+          import json
+          import math
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              baseline = json.load(stream)["results"][0]
+          with open(sys.argv[2], encoding="utf-8") as stream:
+              predictor = json.load(stream)["results"][0]
+          baseline_cost = float(baseline["executed_fatigue_objective"])
+          predictor_cost = float(predictor["executed_fatigue_objective"])
+          relative_cost = abs(predictor_cost - baseline_cost) / max(1.0, abs(baseline_cost))
+          if not math.isfinite(relative_cost) or relative_cost > 1e-7:
+              raise SystemExit(f"KKT predictor changed the executed cost by {relative_cost:.3e}")
+          print(f"KKT predictor relative executed-cost difference: {relative_cost:.3e}")
+          PY
+
+      - name: Checkpoint IPOPT reduced KKT predictor
+        if: ${{ always() && matrix.solver == 'ipopt' && inputs.cycles == 'kkt_predictor' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: cycling-fatigue-linux-ipopt-kkt-predictor-reduced-${{ github.run_id }}
+          path: benchmark-results/ipopt-kkt-predictor-reduced/
+          if-no-files-found: warn
+          retention-days: 30
+
       - name: Run IPOPT reduced Radau degree 4
         if: ${{ matrix.solver == 'ipopt' && inputs.refined_collocation_validation }}
         continue-on-error: true
@@ -3252,11 +3296,15 @@ jobs:
           BENCHMARK_MODE: ${{ matrix.benchmark_mode }}
           BENCHMARK_CAMPAIGN: ${{ inputs.cycles }}
           COMPILE_NLP_EVALUATORS: ${{ inputs.compile_nlp_evaluators }}
+          PARAMETRIC_KKT_ABLATION: ${{ inputs.cycles == 'kkt_predictor' }}
         run: |
           case "$BENCHMARK_SOLVER" in
             ipopt|madnlp|fatrop) expected=2 ;;
             *) echo "Unexpected benchmark solver: $BENCHMARK_SOLVER" >&2; exit 1 ;;
           esac
+          if [[ "$PARAMETRIC_KKT_ABLATION" == "true" && "$BENCHMARK_SOLVER" == "ipopt" ]]; then
+            expected=$((expected + 1))
+          fi
           if [[ "$BENCHMARK_CAMPAIGN" == "fatigue_endurance" ]]; then
             expected=1
           elif [[ "$BENCHMARK_CAMPAIGN" == "fatigue_endurance_radau5" ]]; then
@@ -3388,7 +3436,7 @@ jobs:
       COCOFEST_BENCHMARK_COMMIT: ${{ github.sha }}
       # Job-level env entries cannot reference another env entry. Keep this
       # literal synchronized with BIOPTIM_PRODUCTION_COMMIT above.
-      BIOPTIM_BENCHMARK_COMMIT: 045961b3efeeffe69272712ec65b53ef14eead64
+      BIOPTIM_BENCHMARK_COMMIT: f7a0d722526967d9a81a8ad596ddb911d32a0bfe
       BIOPTIM_INTEGRATION_BRANCH: codex/cocofest-acados-v055-exploration
     defaults:
       run:

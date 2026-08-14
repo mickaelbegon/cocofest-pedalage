@@ -1717,6 +1717,32 @@ def build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--parametric-kkt-audit",
+        action="store_true",
+        help=(
+            "Evaluate sparse Hessian/Jacobian blocks and the KKT residual at "
+            "every certified IPOPT/MadNLP solution. Diagnostic only: no "
+            "predicted primal is injected into the following RHO."
+        ),
+    )
+    parser.add_argument(
+        "--parametric-kkt-predictor",
+        action="store_true",
+        help=(
+            "Inject the sparse KKT correction centered on the transferred "
+            "repeat candidate when its audited primal residual improves."
+        ),
+    )
+    parser.add_argument(
+        "--parametric-kkt-predictor-maximum-residual-ratio",
+        type=float,
+        default=0.95,
+        help=(
+            "Maximum corrected/repeat primal-residual ratio required before "
+            "the one-shot KKT initial guess is injected."
+        ),
+    )
+    parser.add_argument(
         "--acados-print-level",
         type=int,
         default=0,
@@ -8106,6 +8132,281 @@ def attach_exact_initial_nlp_audits(summary: dict, nmpc) -> None:
     audits = getattr(getattr(nmpc, "ocp_solver", None), "initial_nlp_audits", None)
     if audits:
         summary["exact_initial_nlp_audits"] = deepcopy(audits)
+
+
+def canonical_solution_kkt_audit(
+    solution, *, test_zero_rhs_factorization: bool = True
+) -> dict[str, object]:
+    """Audit sparse derivatives of the exact canonical CasADi NLP.
+
+    This is intentionally read-only. It establishes that the derivative graph
+    is numerically usable at a converged RHO before an advanced-step predictor
+    is allowed to alter the next initial primal.
+    """
+
+    from cocofest.optimization.parametric_kkt import (
+        CanonicalNlpKktEvaluator,
+        assemble_sparse_active_kkt_rows,
+        solve_sparse_bound_kkt_sensitivity,
+    )
+
+    start = perf_counter()
+    interface = getattr(getattr(solution, "ocp", None), "ocp_solver", None)
+    nlp = getattr(interface, "nlp", None)
+    limits = getattr(interface, "limits", None)
+    decision_vector = getattr(solution, "vector", None)
+    lam_g = getattr(solution, "lam_g", None)
+    lam_x = getattr(solution, "lam_x", None)
+    if not isinstance(nlp, dict) or not isinstance(limits, dict):
+        return {"available": False, "reason": "canonical_nlp_unavailable"}
+    if decision_vector is None or lam_g is None or lam_x is None:
+        return {"available": False, "reason": "primal_or_dual_unavailable"}
+
+    graph_reused = getattr(interface, "_cocofest_kkt_evaluator_nlp", None) is nlp
+    evaluator = getattr(interface, "_cocofest_kkt_evaluator", None)
+    graph_build_start = perf_counter()
+    if evaluator is None or not graph_reused:
+        evaluator = CanonicalNlpKktEvaluator(nlp)
+        interface._cocofest_kkt_evaluator = evaluator
+        interface._cocofest_kkt_evaluator_nlp = nlp
+    graph_build_wall_time_s = perf_counter() - graph_build_start
+
+    z = np.asarray(decision_vector, dtype=float).reshape(-1)
+    constraint_multipliers = np.asarray(lam_g, dtype=float).reshape(-1)
+    variable_multipliers = np.asarray(lam_x, dtype=float).reshape(-1)
+    evaluation_start = perf_counter()
+    blocks = evaluator.evaluate(z, constraint_multipliers)
+    evaluation_wall_time_s = perf_counter() - evaluation_start
+    active = assemble_sparse_active_kkt_rows(
+        variable_values=z,
+        constraint_values=blocks.constraint_values,
+        constraint_jacobian=blocks.constraint_jacobian,
+        variable_lower_bounds=limits["lbx"],
+        variable_upper_bounds=limits["ubx"],
+        constraint_lower_bounds=limits["lbg"],
+        constraint_upper_bounds=limits["ubg"],
+        variable_multipliers=variable_multipliers,
+        constraint_multipliers=constraint_multipliers,
+    )
+    stationarity = (
+        blocks.objective_gradient
+        + np.asarray(
+            blocks.constraint_jacobian.T @ constraint_multipliers,
+            dtype=float,
+        ).reshape(-1)
+        + variable_multipliers
+    )
+    source_counts: dict[str, int] = {}
+    for kind, _index, side in active.sources:
+        key = f"{kind}_{side}"
+        source_counts[key] = source_counts.get(key, 0) + 1
+    zero_prediction = None
+    factorization_wall_time_s = 0.0
+    if test_zero_rhs_factorization:
+        factorization_start = perf_counter()
+        zero_prediction = solve_sparse_bound_kkt_sensitivity(
+            blocks.lagrangian_hessian,
+            active.jacobian,
+            np.zeros(active.jacobian.shape[0]),
+            primal_regularization=1e-8,
+        )
+        factorization_wall_time_s = perf_counter() - factorization_start
+    interface._cocofest_last_kkt_snapshot = {
+        "evaluator": evaluator,
+        "decision_vector": z.copy(),
+        "constraint_multipliers": constraint_multipliers.copy(),
+        "variable_multipliers": variable_multipliers.copy(),
+        "blocks": blocks,
+        "active": active,
+        "lbx": np.asarray(limits["lbx"], dtype=float).reshape(-1).copy(),
+        "ubx": np.asarray(limits["ubx"], dtype=float).reshape(-1).copy(),
+        "lbg": np.asarray(limits["lbg"], dtype=float).reshape(-1).copy(),
+        "ubg": np.asarray(limits["ubg"], dtype=float).reshape(-1).copy(),
+    }
+    return {
+        "available": True,
+        "graph_reused": bool(graph_reused),
+        "variable_count": int(evaluator.variable_count),
+        "constraint_count": int(evaluator.constraint_count),
+        "lagrangian_hessian_nnz": int(blocks.lagrangian_hessian.nnz),
+        "constraint_jacobian_nnz": int(blocks.constraint_jacobian.nnz),
+        "active_row_count": int(active.jacobian.shape[0]),
+        "active_row_counts": source_counts,
+        "stationarity_inf_norm": float(np.linalg.norm(stationarity, ord=np.inf)),
+        "factorization_tested": bool(test_zero_rhs_factorization),
+        "factorization_used_least_squares": (
+            bool(zero_prediction.used_least_squares)
+            if zero_prediction is not None
+            else None
+        ),
+        "factorization_linear_residual_inf_norm": (
+            float(zero_prediction.linear_residual_inf_norm)
+            if zero_prediction is not None
+            else None
+        ),
+        "graph_build_wall_time_s": float(graph_build_wall_time_s),
+        "evaluation_wall_time_s": float(evaluation_wall_time_s),
+        "factorization_wall_time_s": float(factorization_wall_time_s),
+        "total_wall_time_s": float(perf_counter() - start),
+    }
+
+
+def parametric_kkt_next_rho_prediction_audit(
+    nmpc, *, evaluate_bound_motion_prediction: bool = True
+) -> dict[str, object]:
+    """Predict the next RHO from moving bounds, without injecting the result."""
+
+    from cocofest.optimization.parametric_kkt import (
+        active_kkt_rhs_from_bound_changes,
+        active_kkt_rhs_to_bound_targets,
+        solve_sparse_bound_kkt_sensitivity,
+    )
+
+    start = perf_counter()
+    interface = getattr(nmpc, "ocp_solver", None)
+    snapshot = getattr(interface, "_cocofest_last_kkt_snapshot", None)
+    if not isinstance(snapshot, dict):
+        return {"available": False, "reason": "previous_kkt_snapshot_unavailable"}
+    new_lbx, new_ubx = nmpc.bounds_vectors
+    _raw_constraints, new_constraint_bounds = interface.dispatch_bounds()
+    new_lbx = np.asarray(new_lbx, dtype=float).reshape(-1)
+    new_ubx = np.asarray(new_ubx, dtype=float).reshape(-1)
+    new_lbg = np.asarray(new_constraint_bounds.min, dtype=float).reshape(-1)
+    new_ubg = np.asarray(new_constraint_bounds.max, dtype=float).reshape(-1)
+    target_step = active_kkt_rhs_from_bound_changes(
+        snapshot["active"].sources,
+        snapshot["lbx"],
+        snapshot["ubx"],
+        new_lbx,
+        new_ubx,
+        snapshot["lbg"],
+        snapshot["ubg"],
+        new_lbg,
+        new_ubg,
+    )
+    prediction = None
+    solve_wall_time_s = 0.0
+    predicted = None
+    if evaluate_bound_motion_prediction:
+        solve_start = perf_counter()
+        prediction = solve_sparse_bound_kkt_sensitivity(
+            snapshot["blocks"].lagrangian_hessian,
+            snapshot["active"].jacobian,
+            target_step,
+            primal_regularization=1e-8,
+            maximum_primal_step_inf_norm=100.0,
+        )
+        solve_wall_time_s = perf_counter() - solve_start
+        predicted = snapshot["decision_vector"] + prediction.primal_step
+        predicted = np.maximum(
+            predicted, np.where(np.isfinite(new_lbx), new_lbx, -np.inf)
+        )
+        predicted = np.minimum(
+            predicted, np.where(np.isfinite(new_ubx), new_ubx, np.inf)
+        )
+    repeat = np.asarray(nmpc.init_vector, dtype=float).reshape(-1)
+    evaluator = snapshot["evaluator"]
+    repeat_constraints = evaluator.evaluate_constraints(repeat)
+    predicted_constraints = (
+        evaluator.evaluate_constraints(predicted) if predicted is not None else None
+    )
+    repeat_target_residual = active_kkt_rhs_to_bound_targets(
+        snapshot["active"].sources,
+        repeat,
+        repeat_constraints,
+        new_lbx,
+        new_ubx,
+        new_lbg,
+        new_ubg,
+    )
+    correction_start = perf_counter()
+    repeat_correction = solve_sparse_bound_kkt_sensitivity(
+        snapshot["blocks"].lagrangian_hessian,
+        snapshot["active"].jacobian,
+        repeat_target_residual,
+        primal_regularization=1e-8,
+        maximum_primal_step_inf_norm=100.0,
+    )
+    correction_wall_time_s = perf_counter() - correction_start
+    corrected_repeat = repeat + repeat_correction.primal_step
+    corrected_repeat = np.maximum(
+        corrected_repeat, np.where(np.isfinite(new_lbx), new_lbx, -np.inf)
+    )
+    corrected_repeat = np.minimum(
+        corrected_repeat, np.where(np.isfinite(new_ubx), new_ubx, np.inf)
+    )
+    corrected_repeat_constraints = evaluator.evaluate_constraints(corrected_repeat)
+    interface._cocofest_kkt_corrected_repeat_candidate = corrected_repeat.copy()
+
+    def combined_violation(candidate, constraints):
+        variable_violation = _maximum_bound_violation(candidate, new_lbx, new_ubx)
+        constraint_violation = _maximum_bound_violation(
+            constraints, new_lbg, new_ubg
+        )
+        return max(float(variable_violation or 0.0), float(constraint_violation or 0.0))
+
+    repeat_residual = combined_violation(repeat, repeat_constraints)
+    predicted_residual = (
+        combined_violation(predicted, predicted_constraints)
+        if predicted is not None
+        else None
+    )
+    corrected_repeat_residual = combined_violation(
+        corrected_repeat, corrected_repeat_constraints
+    )
+    moving_targets = int(np.count_nonzero(np.abs(target_step) > 0.0))
+    return {
+        "available": True,
+        "moving_active_targets": moving_targets,
+        "active_target_step_inf_norm": float(
+            np.linalg.norm(target_step, ord=np.inf) if target_step.size else 0.0
+        ),
+        "bound_motion_prediction_evaluated": bool(evaluate_bound_motion_prediction),
+        "primal_step_inf_norm": (
+            float(np.linalg.norm(prediction.primal_step, ord=np.inf))
+            if prediction is not None
+            else None
+        ),
+        "applied_step_scale": (
+            float(prediction.applied_step_scale) if prediction is not None else None
+        ),
+        "linear_residual_inf_norm": (
+            float(prediction.linear_residual_inf_norm)
+            if prediction is not None
+            else None
+        ),
+        "used_least_squares": (
+            bool(prediction.used_least_squares) if prediction is not None else None
+        ),
+        "repeat_primal_residual": float(repeat_residual),
+        "predicted_primal_residual": (
+            float(predicted_residual) if predicted_residual is not None else None
+        ),
+        "prediction_improves_primal_residual": (
+            bool(predicted_residual <= repeat_residual)
+            if predicted_residual is not None
+            else None
+        ),
+        "repeat_correction_step_inf_norm": float(
+            np.linalg.norm(repeat_correction.primal_step, ord=np.inf)
+        ),
+        "repeat_correction_applied_step_scale": float(
+            repeat_correction.applied_step_scale
+        ),
+        "repeat_correction_linear_residual_inf_norm": float(
+            repeat_correction.linear_residual_inf_norm
+        ),
+        "repeat_correction_used_least_squares": bool(
+            repeat_correction.used_least_squares
+        ),
+        "corrected_repeat_primal_residual": float(corrected_repeat_residual),
+        "repeat_correction_improves_primal_residual": bool(
+            corrected_repeat_residual <= repeat_residual
+        ),
+        "solve_wall_time_s": float(solve_wall_time_s),
+        "repeat_correction_wall_time_s": float(correction_wall_time_s),
+        "total_wall_time_s": float(perf_counter() - start),
+    }
 
 
 class CompiledNlpReuseTracker:
@@ -15844,6 +16145,23 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         raise ValueError(
             "--exact-initial-nlp-audit is available only for CasADi NLP solvers."
         )
+    if args.parametric_kkt_audit and args.solver not in ("ipopt", "madnlp"):
+        raise ValueError(
+            "--parametric-kkt-audit is available only for IPOPT and MadNLP."
+        )
+    if args.parametric_kkt_predictor:
+        if args.solver not in ("ipopt", "madnlp"):
+            raise ValueError(
+                "--parametric-kkt-predictor is available only for IPOPT and MadNLP."
+            )
+        args.parametric_kkt_audit = True
+    if not (
+        np.isfinite(args.parametric_kkt_predictor_maximum_residual_ratio)
+        and 0.0 < args.parametric_kkt_predictor_maximum_residual_ratio <= 1.0
+    ):
+        raise ValueError(
+            "--parametric-kkt-predictor-maximum-residual-ratio must be in (0, 1]."
+        )
     args.terminal_wheel_q_reference_mode = "absolute_initial"
     objectives = parse_objectives(args.objective)
     torque_diagnostics = crank_torque_diagnostics(
@@ -18433,6 +18751,8 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
     acados_window_diagnostics = []
     acados_dual_warm_start_summaries = []
     nlp_dual_warm_start_summaries = []
+    parametric_kkt_audits = []
+    parametric_kkt_prediction_audits = []
     nlp_solver_stats = []
     compiled_nlp_tracker = CompiledNlpReuseTracker(nlp_c_compile_enabled(args))
     transfer_rollout_summaries = []
@@ -18575,6 +18895,40 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                 perf_counter() - diagnostics_start
             )
         solution._cocofest_feasibility_summary = feasibility
+        if args.parametric_kkt_audit and _rho_solution_is_certified(
+            solution.status, feasibility
+        ):
+            try:
+                kkt_audit = canonical_solution_kkt_audit(
+                    solution,
+                    test_zero_rhs_factorization=(
+                        not args.parametric_kkt_predictor
+                    ),
+                )
+            except Exception as error:  # diagnostic must never invalidate a RHO
+                kkt_audit = {
+                    "available": False,
+                    "reason": "evaluation_failed",
+                    "error": f"{type(error).__name__}: {error}",
+                }
+            kkt_audit.update(
+                {
+                    "attempt_window": int(_nmpc.total_optimization_run) + 1,
+                    "target_rho": completed_physical_rhos + 1,
+                }
+            )
+            parametric_kkt_audits.append(kkt_audit)
+            if echo:
+                print(
+                    "parametric_kkt_audit: "
+                    f"available={kkt_audit['available']} "
+                    f"variables={kkt_audit.get('variable_count')} "
+                    f"constraints={kkt_audit.get('constraint_count')} "
+                    f"active={kkt_audit.get('active_row_count')} "
+                    f"active_counts={kkt_audit.get('active_row_counts')} "
+                    f"stationarity={kkt_audit.get('stationarity_inf_norm')} "
+                    f"wall_time_s={kkt_audit.get('total_wall_time_s')}"
+                )
         save_common_initial_solution(solution)
         if args.solver == "acados" and horizon_seed_cache_path is not None:
             cache_first_successful_window(_nmpc, solution)
@@ -20031,6 +20385,69 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                             f"active={item.get('active_count')}/"
                             f"{item.get('node_count')}"
                         )
+        if (
+            continue_solving
+            and _sol is not None
+            and args.parametric_kkt_audit
+            and args.solver in ("ipopt", "madnlp")
+        ):
+            try:
+                prediction_audit = parametric_kkt_next_rho_prediction_audit(
+                    _nmpc,
+                    evaluate_bound_motion_prediction=(
+                        not args.parametric_kkt_predictor
+                    ),
+                )
+            except Exception as error:  # diagnostic must never invalidate a RHO
+                prediction_audit = {
+                    "available": False,
+                    "reason": "prediction_failed",
+                    "error": f"{type(error).__name__}: {error}",
+                }
+            prediction_audit["injected"] = False
+            if args.parametric_kkt_predictor and prediction_audit["available"]:
+                repeat_residual = prediction_audit["repeat_primal_residual"]
+                corrected_residual = prediction_audit[
+                    "corrected_repeat_primal_residual"
+                ]
+                accepted = bool(
+                    corrected_residual < repeat_residual
+                    and corrected_residual
+                    <= args.parametric_kkt_predictor_maximum_residual_ratio
+                    * repeat_residual
+                )
+                prediction_audit["passes_injection_guard"] = accepted
+                if accepted:
+                    interface = _nmpc.ocp_solver
+                    inject = getattr(interface, "set_next_initial_guess_override", None)
+                    if not callable(inject):
+                        raise RuntimeError(
+                            "--parametric-kkt-predictor requires the pinned "
+                            "Bioptim one-shot initial-guess interface."
+                        )
+                    inject(interface._cocofest_kkt_corrected_repeat_candidate)
+                    if hasattr(interface, "lam_g"):
+                        interface.lam_g = None
+                    if hasattr(interface, "lam_x"):
+                        interface.lam_x = None
+                    prediction_audit["injected"] = True
+                    prediction_audit["dual_reset"] = True
+            prediction_audit["target_rho"] = completed_physical_rhos + 1
+            parametric_kkt_prediction_audits.append(prediction_audit)
+            if echo:
+                print(
+                    "parametric_kkt_prediction_audit: "
+                    f"available={prediction_audit['available']} "
+                    f"moving_targets={prediction_audit.get('moving_active_targets')} "
+                    f"step={prediction_audit.get('primal_step_inf_norm')} "
+                    f"repeat_residual={prediction_audit.get('repeat_primal_residual')} "
+                    f"predicted_residual="
+                    f"{prediction_audit.get('predicted_primal_residual')} "
+                    f"corrected_repeat_residual="
+                    f"{prediction_audit.get('corrected_repeat_primal_residual')} "
+                    f"injected={prediction_audit.get('injected')} "
+                    f"wall_time_s={prediction_audit.get('total_wall_time_s')}"
+                )
         if continue_solving and _sol is not None:
             audit_start = perf_counter()
             next_audit = audit_initial_guess(_nmpc)
@@ -20695,6 +21112,12 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                 terminal_wheel_qdot_bound_summaries
             )
         attach_exact_initial_nlp_audits(summary, nmpc)
+        if parametric_kkt_audits:
+            summary["parametric_kkt_audits"] = parametric_kkt_audits
+        if parametric_kkt_prediction_audits:
+            summary["parametric_kkt_prediction_audits"] = (
+                parametric_kkt_prediction_audits
+            )
         if build_mechanical_audit_profile:
             attach_mechanical_equivalence_audit(summary, reduced_cycling_dynamics)
         return summary
@@ -20849,6 +21272,12 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             },
         }
         attach_exact_initial_nlp_audits(summary, nmpc)
+        if parametric_kkt_audits:
+            summary["parametric_kkt_audits"] = parametric_kkt_audits
+        if parametric_kkt_prediction_audits:
+            summary["parametric_kkt_prediction_audits"] = (
+                parametric_kkt_prediction_audits
+            )
         return summary
     rho_solve_loop_wall_time_s = perf_counter() - rho_solve_loop_start
     post_solve_start = perf_counter()
@@ -21083,6 +21512,12 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
     summary["native_solver_status"] = _native_solver_status(nmpc)
     exact_initial_audits_start = perf_counter()
     attach_exact_initial_nlp_audits(summary, nmpc)
+    if parametric_kkt_audits:
+        summary["parametric_kkt_audits"] = parametric_kkt_audits
+    if parametric_kkt_prediction_audits:
+        summary["parametric_kkt_prediction_audits"] = (
+            parametric_kkt_prediction_audits
+        )
     exact_initial_audits_wall_time_s = perf_counter() - exact_initial_audits_start
     mechanical_audit_wall_time_s = 0.0
     if build_mechanical_audit_profile:

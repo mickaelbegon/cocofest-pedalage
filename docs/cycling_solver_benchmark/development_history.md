@@ -71,11 +71,11 @@ provenance humaine.
 
 | Composant | Version Bioptim réellement utilisée |
 |---|---|
-| Construction et certification des seeds | `045961b3efeeffe69272712ec65b53ef14eead64` |
-| IPOPT full/reduced | `045961b3efeeffe69272712ec65b53ef14eead64` |
-| MadNLP/MUMPS full/reduced | `045961b3efeeffe69272712ec65b53ef14eead64` |
-| FATROP/collocation full/reduced | `045961b3efeeffe69272712ec65b53ef14eead64` |
-| ACADOS full/reduced et variantes | `045961b3efeeffe69272712ec65b53ef14eead64` |
+| Construction et certification des seeds | `f7a0d722526967d9a81a8ad596ddb911d32a0bfe` |
+| IPOPT full/reduced | `f7a0d722526967d9a81a8ad596ddb911d32a0bfe` |
+| MadNLP/MUMPS full/reduced | `f7a0d722526967d9a81a8ad596ddb911d32a0bfe` |
+| FATROP/collocation full/reduced | `f7a0d722526967d9a81a8ad596ddb911d32a0bfe` |
+| ACADOS full/reduced et variantes | `f7a0d722526967d9a81a8ad596ddb911d32a0bfe` |
 
 Ce commit appartient à la branche dédiée
 `codex/cocofest-acados-v055-exploration`. Il part exactement de
@@ -5601,7 +5601,7 @@ Le prédicteur advanced-step proposé traite un RHO comme le NLP paramétrique
 Ding, l'état mécanique initial et les bornes terminales absolues. Pour un
 ensemble actif fixé, la sensibilité est obtenue par
 
-$$
+```math
 \begin{bmatrix}
 \nabla_{zz}^2 L & J_A^T \\
 J_A & 0
@@ -5616,7 +5616,7 @@ J_A & 0
 \partial c_A/\partial p
 \end{bmatrix}
 \Delta p.
-$$
+```
 
 Le couple primal-dual prédit est ensuite limité par une trust region, projeté
 sur les bornes physiques et audité avant le correcteur. Toute projection ou
@@ -5761,3 +5761,53 @@ que de `1.83e-6`, l'AUC de `9.26e-9 cycle` et la capacité minimale de
 l'élargissement local, pas de la mémoire de Schmitt. Le choix nominal simple
 est memoryless; l'hystérésis reste une option de safeguard à retester sur 100
 RHO et sous résistance/fatigue avant de la supprimer.
+
+Le run vert
+[`31793228803`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/31793228803)
+termine cette vérification à couple nul. Memoryless et hystérésis certifient
+`100/100`; la trust region stricte reste arrêtée à `2/100`. Les médianes/P90
+solveur sont respectivement `0.040095/0.040359 s` et
+`0.040073/0.040588 s`. L'hystérésis relâche 1 976 voisinages, contre 1 632
+pour memoryless, utilise sa mémoire sur 392 contrôles-fenêtres et change 86
+labels. Les coûts exécutés ne diffèrent que de `1.31e-5`. Il n'existe donc
+toujours aucun bénéfice mesurable justifiant l'hystérésis comme défaut.
+
+La campagne résistante `signed:+0.15 N.m`, run
+[`31793240281`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/31793240281),
+ne constitue pas une ablation valide : la référence ACADOS échoue avant son
+premier RHO dans l'homotopie initiale (`MINSTEP`, résidu de contrainte
+`1.54e2`). Les trois cas dépendants sont explicitement marqués comme sautés.
+La prochaine tentative doit produire une seed ACADOS/IPOPT au même couple,
+plutôt que d'interpréter cette erreur de bridge comme un effet d'active-set.
+
+## Predictor KKT sparse centré sur le warm start transféré
+
+Le prototype advanced-step extrait maintenant la Hessienne de Lagrange et la
+Jacobienne du dictionnaire CasADi canonique réellement soumis à IPOPT/MadNLP.
+Sur le reduced/SX/Radau-3 local, le NLP contient 2 783 variables, 2 640
+contraintes, 18 244 coefficients Hessienne et 13 380 coefficients Jacobienne.
+La stationnarité du premier optimum vaut `3.97e-8`. Une erreur d'ensemble
+actif a été détectée et corrigée : un multiplicateur non nul ne peut plus
+activer une borne distante; l'activité exige la proximité primale, comme
+l'impose la complémentarité KKT.
+
+Le predictor paramétrique pur, construit depuis l'ancien optimum, dégrade le
+résidu primal du RHO suivant de `255.24` à `3085` et est rejeté. Le décalage
+cyclique et le rollout déjà contenus dans `repeat` sont trop importants pour
+être ignorés. La variante retenue conserve donc `repeat` comme centre et
+résout un système KKT sparse pour corriger ses défauts actifs. Elle réduit le
+premier résidu de `255.24` à `174.31` et n'est injectée que si le ratio est au
+plus `0.95`.
+
+Sur cinq RHO locaux appariés, les itérations chaudes passent de
+`71,58,49,48` à `64,46,55,45`. Le garde-fou injecte les deux premières
+corrections et rejette les deux suivantes, qui auraient augmenté le résidu.
+Le temps solveur chaud cumulé baisse de `3.91 s` à `2.98 s` (`-23.7 %`), et
+le coût exécuté reste identique à environ `5e-11`. En incluant la correction
+KKT diagnostique, le gain observé est environ `8 %`; la suppression de la
+factorisation de contrôle redondante doit porter le gain effectif autour de
+`14 %`. Le commit Bioptim
+`f7a0d722526967d9a81a8ad596ddb911d32a0bfe` fournit l'override `x0` exact,
+scalé et one-shot nécessaire pour conserver tous les états de collocation.
+Ces chiffres locaux sont prometteurs, mais une ablation Linux sur 30 RHO,
+puis Radau-5 et MadNLP, reste obligatoire.

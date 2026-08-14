@@ -38,6 +38,7 @@ high_accuracy_trace_max_cycles="${HIGH_ACCURACY_TRACE_MAX_CYCLES:-30}"
 high_accuracy_trace_cycle_milestones="${HIGH_ACCURACY_TRACE_CYCLE_MILESTONES:-430,660,779}"
 rho_pulse_width_transfer_mode="${RHO_PULSE_WIDTH_TRANSFER_MODE:-repeat}"
 rho_pulse_width_extrapolation_factor="${RHO_PULSE_WIDTH_EXTRAPOLATION_FACTOR:-1.0}"
+parametric_kkt_predictor="${PARAMETRIC_KKT_PREDICTOR:-false}"
 
 if ! [[ "$collocation_degree" =~ ^[2-9]$ ]]; then
   echo "COLLOCATION_DEGREE must be an integer between 2 and 9, got '$collocation_degree'." >&2
@@ -71,6 +72,17 @@ case "$rho_pulse_width_transfer_mode" in
   repeat|extrapolate|lag2) ;;
   *) echo "RHO_PULSE_WIDTH_TRANSFER_MODE must be repeat, extrapolate, or lag2." >&2; exit 2 ;;
 esac
+case "$parametric_kkt_predictor" in
+  true|false) ;;
+  *) echo "PARAMETRIC_KKT_PREDICTOR must be true or false." >&2; exit 2 ;;
+esac
+if [[ "$parametric_kkt_predictor" == "true" ]]; then
+  if [[ "$solver" != "ipopt" && "$solver" != "madnlp" ]]; then
+    echo "The parametric KKT predictor is available only for IPOPT/MadNLP." >&2
+    exit 2
+  fi
+  solver_options+=(--parametric-kkt-predictor)
+fi
 
 if [[ "$ipopt_profile" =~ ^scientific[-_]radau[3456]$ ]]; then
   # Keep the complete certified primal, not only compact JSON checkpoints.

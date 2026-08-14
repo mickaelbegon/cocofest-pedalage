@@ -25,7 +25,7 @@ La CI ne dépend pas d'un nom de branche flottant. Elle clone le fork
 effectue les checkouts par SHA complet :
 
 - intégration multi-solveurs active :
-  `045961b3efeeffe69272712ec65b53ef14eead64`;
+  `f7a0d722526967d9a81a8ad596ddb911d32a0bfe`;
 - intégration Alpaqa archivée :
   `d84e7e43534360fc048e0be26a3bd69a2abc2d77`;
 - écran MadNLP/MUMPS historique, conservé uniquement pour diagnostic :

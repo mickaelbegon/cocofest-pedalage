@@ -950,7 +950,7 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     capsule online réutilisée. Les temps chauds valent `1.117/1.656 s` en
     médiane/P90 sur cinq RHO; le coût initial de compilation est exclu du
     budget temps réel.
-50. [ablation 30 RHO terminée, memoryless retenu] Une hystérésis de Schmitt autour
+50. [ablation 100 RHO terminée, memoryless retenu] Une hystérésis de Schmitt autour
     de `pd0`, avec `delta_off=2 us` et `delta_on=5 us`, ne change que 5 valeurs
     de classification sur 12 000 PW IPOPT et 2 sur 12 000 PW MadNLP dans les
     trajectoires 100 RHO disponibles. Elle ne supprime pas les vraies
@@ -977,7 +977,12 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     `0.53 %` à la médiane murale. Retenir memoryless sur ce cas; conserver
     l'hystérésis comme option et la retester sur 100 RHO puis sous résistance,
     où l'ensemble actif pourrait changer davantage.
-51. [noyau et second membre bornes testés, branchement OCP à faire] Prototyper le prédicteur paramétrique
+    Le run `31793228803` confirme `100/100` pour les deux gardes, contre
+    `2/100` sans garde locale. L'hystérésis libère 1 976 voisinages contre
+    1 632, change 86 labels et n'améliore pas le P90. La tentative résistante
+    `31793240281` échoue dans le bridge initial avant l'ablation; construire
+    d'abord une seed ACADOS certifiée au même couple.
+51. [prototype OCP injecté, ablation Linux/Radau-5 à faire] Prototyper le prédicteur paramétrique
     KKT sur le reduced/SX/Radau-5 avant de l'appliquer à ACADOS ou MadNLP :
     (a) rendre explicite le vecteur `p` regroupant état initial et bornes
     terminales; (b) extraire Hessienne de Lagrange, Jacobienne et ensemble
@@ -990,8 +995,13 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     remplace pas le prédicteur. Exploiter l'intervalle d'un cycle pour calculer
     le RHO suivant en advanced-step. Le code sait maintenant convertir les
     déplacements `lbx/ubx/lbg/ubg` des lignes actives en second membre
-    `J_A Delta z = Delta b_A`; il reste à construire Hessienne/Jacobienne
-    sparse depuis l'interface Bioptim et à comparer son résidu à `repeat`.
+    `J_A Delta z = Delta b_A`. L'extraction sparse canonique et l'override
+    one-shot Bioptim sont maintenant effectifs. Le predictor pur est rejeté;
+    la correction KKT centrée sur `repeat` diminue les itérations chaudes de
+    `226` à `210` sur cinq RHO Radau-3 locaux et le temps solveur chaud de
+    `23.7 %`, sans changement de coût. Le guard rejette correctement deux
+    corrections nuisibles. Lancer l'A/B Linux sur 30 RHO, mesurer le temps
+    effectif KKT inclus, puis répéter en Radau-5 et avec MadNLP primal-only.
 
 La question causale est maintenant resserrée : une seule projection au RHO 19
 ne suffit pas, mais la séquence 19--36 conserve le bassin franchissant le RHO

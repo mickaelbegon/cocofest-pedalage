@@ -2,10 +2,14 @@ import numpy as np
 import pytest
 
 from cocofest.optimization.parametric_kkt import (
+    CanonicalNlpKktEvaluator,
     active_kkt_rhs_from_bound_changes,
+    active_kkt_rhs_to_bound_targets,
     assemble_active_kkt_rows,
+    assemble_sparse_active_kkt_rows,
     kkt_prediction_passes_residual_guard,
     solve_parametric_kkt_sensitivity,
+    solve_sparse_bound_kkt_sensitivity,
 )
 
 
@@ -45,10 +49,27 @@ def test_active_kkt_rhs_rejects_equality_that_opens_into_an_interval():
         )
 
 
-def test_active_kkt_rows_include_equalities_and_multiplier_supported_bounds():
+def test_active_kkt_rhs_to_targets_corrects_a_repeat_candidate():
+    residual = active_kkt_rhs_to_bound_targets(
+        sources=(
+            ("constraint", 0, "equality"),
+            ("variable", 1, "lower"),
+        ),
+        variable_values=np.array([0.0, 0.4]),
+        constraint_values=np.array([1.0]),
+        variable_lower_bounds=np.array([-np.inf, 0.5]),
+        variable_upper_bounds=np.array([np.inf, 1.0]),
+        constraint_lower_bounds=np.array([1.3]),
+        constraint_upper_bounds=np.array([1.3]),
+    )
+
+    np.testing.assert_allclose(residual, [0.3, 0.1])
+
+
+def test_active_kkt_rows_include_equalities_and_primal_active_bounds():
     active = assemble_active_kkt_rows(
-        variable_values=np.array([0.0, 0.4, 0.8]),
-        constraint_values=np.array([1.0, 0.2, 0.7]),
+        variable_values=np.array([0.0, 1.0, 0.8]),
+        constraint_values=np.array([1.0, 0.2, 0.9]),
         constraint_jacobian=np.array(
             [[1.0, 1.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
         ),
@@ -75,6 +96,38 @@ def test_active_kkt_rows_include_equalities_and_multiplier_supported_bounds():
             [0.0, 1.0, 0.0],
         ],
     )
+
+
+def test_multiplier_does_not_activate_a_distant_bound():
+    active = assemble_sparse_active_kkt_rows(
+        variable_values=np.array([0.4]),
+        constraint_values=np.array([0.7]),
+        constraint_jacobian=np.array([[1.0]]),
+        variable_lower_bounds=np.array([0.0]),
+        variable_upper_bounds=np.array([1.0]),
+        constraint_lower_bounds=np.array([0.0]),
+        constraint_upper_bounds=np.array([0.9]),
+        variable_multipliers=np.array([2.0]),
+        constraint_multipliers=np.array([3.0]),
+    )
+
+    assert active.sources == ()
+    assert active.jacobian.shape == (0, 1)
+
+
+def test_sparse_active_rows_drop_duplicate_fixed_variable_direction():
+    active = assemble_sparse_active_kkt_rows(
+        variable_values=np.array([2.0, 0.0]),
+        constraint_values=np.array([4.0]),
+        constraint_jacobian=np.array([[2.0, 0.0]]),
+        variable_lower_bounds=np.array([2.0, -np.inf]),
+        variable_upper_bounds=np.array([2.0, np.inf]),
+        constraint_lower_bounds=np.array([4.0]),
+        constraint_upper_bounds=np.array([4.0]),
+    )
+
+    assert active.sources == (("constraint", 0, "equality"),)
+    assert active.jacobian.shape == (1, 2)
 
 
 def test_parametric_kkt_sensitivity_matches_quadratic_program_solution():
@@ -134,3 +187,77 @@ def test_parametric_kkt_rejects_incompatible_dimensions():
             np.zeros((1, 1)),
             np.ones(1),
         )
+
+
+def test_canonical_sparse_kkt_predicts_moving_equality_solution():
+    from casadi import SX, vertcat
+
+    # min x0^2 + 2*x1^2, subject to x0 + x1 = b. At b=1 the
+    # optimum and multiplier are [2/3, 1/3] and -4/3.
+    x = SX.sym("x", 2)
+    evaluator = CanonicalNlpKktEvaluator(
+        {"x": x, "f": x[0] ** 2 + 2 * x[1] ** 2, "g": vertcat(x[0] + x[1])}
+    )
+    old_x = np.array([2.0 / 3.0, 1.0 / 3.0])
+    blocks = evaluator.evaluate(old_x, np.array([-4.0 / 3.0]))
+
+    assert blocks.lagrangian_hessian.shape == (2, 2)
+    assert blocks.constraint_jacobian.shape == (1, 2)
+    assert blocks.lagrangian_hessian.nnz == 2
+    np.testing.assert_allclose(blocks.objective_gradient, [4.0 / 3.0, 4.0 / 3.0])
+    np.testing.assert_allclose(blocks.constraint_values, [1.0])
+
+    active = assemble_sparse_active_kkt_rows(
+        variable_values=old_x,
+        constraint_values=blocks.constraint_values,
+        constraint_jacobian=blocks.constraint_jacobian,
+        variable_lower_bounds=np.full(2, -np.inf),
+        variable_upper_bounds=np.full(2, np.inf),
+        constraint_lower_bounds=np.array([1.0]),
+        constraint_upper_bounds=np.array([1.0]),
+        constraint_multipliers=np.array([-4.0 / 3.0]),
+    )
+    target_step = active_kkt_rhs_from_bound_changes(
+        active.sources,
+        old_variable_lower_bounds=np.full(2, -np.inf),
+        old_variable_upper_bounds=np.full(2, np.inf),
+        new_variable_lower_bounds=np.full(2, -np.inf),
+        new_variable_upper_bounds=np.full(2, np.inf),
+        old_constraint_lower_bounds=np.array([1.0]),
+        old_constraint_upper_bounds=np.array([1.0]),
+        new_constraint_lower_bounds=np.array([1.3]),
+        new_constraint_upper_bounds=np.array([1.3]),
+    )
+    prediction = solve_sparse_bound_kkt_sensitivity(
+        blocks.lagrangian_hessian,
+        active.jacobian,
+        target_step,
+    )
+
+    np.testing.assert_allclose(prediction.primal_step, [0.2, 0.1], atol=1e-13)
+    np.testing.assert_allclose(old_x + prediction.primal_step, [13.0 / 15.0, 13.0 / 30.0])
+    assert prediction.linear_residual_inf_norm < 1e-13
+    assert prediction.used_least_squares is False
+
+
+def test_sparse_active_rows_do_not_materialize_dense_identity():
+    from scipy.sparse import csc_matrix, issparse
+
+    active = assemble_sparse_active_kkt_rows(
+        variable_values=np.array([0.0, 0.5, 1.0]),
+        constraint_values=np.array([0.5]),
+        constraint_jacobian=csc_matrix([[0.0, 1.0, 0.0]]),
+        variable_lower_bounds=np.array([0.0, -np.inf, -np.inf]),
+        variable_upper_bounds=np.array([0.0, np.inf, 1.0]),
+        constraint_lower_bounds=np.array([0.5]),
+        constraint_upper_bounds=np.array([0.5]),
+    )
+
+    assert issparse(active.jacobian)
+    assert active.jacobian.shape == (3, 3)
+    assert active.jacobian.nnz == 3
+    assert active.sources == (
+        ("constraint", 0, "equality"),
+        ("variable", 0, "equality"),
+        ("variable", 2, "upper"),
+    )

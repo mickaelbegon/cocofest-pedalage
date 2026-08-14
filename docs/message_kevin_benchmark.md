@@ -32,7 +32,7 @@ Les changements importants sont :
 
 La branche Bioptim dédiée est
 `codex/cocofest-acados-v055-exploration`, au SHA
-`045961b3efeeffe69272712ec65b53ef14eead64`. Elle utilise ACADOS 0.5.5 au
+`f7a0d722526967d9a81a8ad596ddb911d32a0bfe`. Elle utilise ACADOS 0.5.5 au
 SHA `59d93e17d2985fdd73fc58b8a83ed8f83a024171` et contient les correctifs
 Bioptim pour les contraintes `Node.START`, le scaling ACADOS et le scaling
 FATROP. La branche Cocofest est `codex/acados-pr-refresh`.
