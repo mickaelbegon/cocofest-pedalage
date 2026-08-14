@@ -2163,14 +2163,16 @@ jobs:
               --arg homotopy_only "$ACADOS_HOMOTOPY_ONLY" \
               --arg recovery_only "$ACADOS_RECOVERY_ONLY" \
               --arg lazy_recovery_only "$ACADOS_LAZY_RECOVERY_ONLY" \
-              --arg reduced_100_only "$ACADOS_REDUCED_100_ONLY" '
+              --arg reduced_100_only "$ACADOS_REDUCED_100_ONLY" \
+              --arg active_set_only "$ACADOS_ACTIVE_SET_ONLY" '
               (.configurations.acados.use_sx == true) and
               (
                 if $extended == "true" and
                    $homotopy_only != "true" and
                    $recovery_only != "true" and
                    $lazy_recovery_only != "true" and
-                   $reduced_100_only != "true"
+                   $reduced_100_only != "true" and
+                   $active_set_only != "true"
                 then .configurations.acados.n_windows > 5
                 else true
                 end
