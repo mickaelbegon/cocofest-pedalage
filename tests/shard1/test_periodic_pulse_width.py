@@ -1488,6 +1488,21 @@ def test_phase_aligned_active_set_guard_rejects_inverted_hysteresis_band():
         )
 
 
+def test_transfer_only_pulse_width_trust_radius_triggers_recenter():
+    args = SimpleNamespace(
+        acados_pulse_width_trust_radius=None,
+        acados_transfer_pulse_width_trust_radius=1e-5,
+    )
+
+    assert periodic_example.pulse_width_transfer_trust_region_requested(args, None)
+
+    args.acados_transfer_pulse_width_trust_radius = None
+    assert not periodic_example.pulse_width_transfer_trust_region_requested(
+        args, None
+    )
+    assert periodic_example.pulse_width_transfer_trust_region_requested(args, 1e-6)
+
+
 def test_control_homotopy_radii_are_parsed_as_an_increasing_sequence():
     parser = periodic_example.build_argument_parser()
     args = parser.parse_args(

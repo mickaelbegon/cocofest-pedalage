@@ -5708,3 +5708,12 @@ L'ablation finale compare désormais deux cas ayant tous deux une trust region
 PW de `+/-10 us`, avec ou sans élargissement local/hystérésis. Le témoin
 robuste sans trust du même run reste la référence externe permettant de
 détecter un biais d'optimalité.
+
+La relance `31767261001` a ensuite exposé un bug de déclenchement : l'option
+`--acados-transfer-pulse-width-trust-radius` était correctement parsée et lue
+dans le bloc de recentrage, mais absente de la condition d'entrée de ce même
+bloc. Sans rayon global ou hérité, le bloc restait donc inatteignable. Les
+deux variantes ont certifié `30/30` avec la solution sans trust, puis le gate
+a correctement refusé l'absence de résumés d'hystérésis. La condition couvre
+maintenant explicitement les trois sources de rayon et un test de régression
+vérifie le cas « transfer-only ».

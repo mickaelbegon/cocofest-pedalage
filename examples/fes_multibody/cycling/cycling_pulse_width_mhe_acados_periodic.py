@@ -15305,6 +15305,18 @@ def apply_pulse_width_control_trust_region(
     return summary
 
 
+def pulse_width_transfer_trust_region_requested(
+    args: argparse.Namespace, retained_homotopy_radius: float | None
+) -> bool:
+    """Return whether the next RHO must rebuild nodewise PW trust bounds."""
+
+    return bool(
+        args.acados_pulse_width_trust_radius is not None
+        or args.acados_transfer_pulse_width_trust_radius is not None
+        or retained_homotopy_radius is not None
+    )
+
+
 def apply_phase_aligned_pulse_width_transition_guard(
     periodic_nmpc,
     radius: float,
@@ -19959,9 +19971,8 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             continue_solving
             and _sol is not None
             and args.solver == "acados"
-            and (
-                args.acados_pulse_width_trust_radius is not None
-                or retained_homotopy_radius is not None
+            and pulse_width_transfer_trust_region_requested(
+                args, retained_homotopy_radius
             )
         ):
             if retained_homotopy_radius is not None:
