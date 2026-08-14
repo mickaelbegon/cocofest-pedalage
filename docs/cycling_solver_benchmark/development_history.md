@@ -5638,8 +5638,10 @@ Le premier incrément d'implémentation ajoute trois éléments reproductibles :
 - `cocofest.optimization.parametric_kkt` fournit le noyau numérique du
   prédicteur fixed-active-set : assemblage et résolution du système KKT,
   régularisation, limitation commune du pas primal-dual et garde sur le
-  résidu. Le test analytique d'un QP paramétrique retrouve exactement la
-  sensibilité attendue. Ce noyau n'est pas encore branché au vecteur de
+  résidu. Il sait aussi reconstruire les lignes actives à partir des bornes,
+  résidus et signes de `lam_x/lam_g`, en dédoublonnant les égalités. Le test
+  analytique d'un QP paramétrique retrouve exactement la sensibilité attendue.
+  Ce noyau n'est pas encore branché au vecteur de
   décision Bioptim du RHO reduced; cette séparation est volontaire afin de
   valider les conventions de signe et les safeguards avant le premier essai
   biomécanique.

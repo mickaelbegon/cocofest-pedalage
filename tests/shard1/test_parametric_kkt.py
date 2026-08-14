@@ -2,9 +2,42 @@ import numpy as np
 import pytest
 
 from cocofest.optimization.parametric_kkt import (
+    assemble_active_kkt_rows,
     kkt_prediction_passes_residual_guard,
     solve_parametric_kkt_sensitivity,
 )
+
+
+def test_active_kkt_rows_include_equalities_and_multiplier_supported_bounds():
+    active = assemble_active_kkt_rows(
+        variable_values=np.array([0.0, 0.4, 0.8]),
+        constraint_values=np.array([1.0, 0.2, 0.7]),
+        constraint_jacobian=np.array(
+            [[1.0, 1.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+        ),
+        variable_lower_bounds=np.array([0.0, 0.0, -np.inf]),
+        variable_upper_bounds=np.array([0.0, 1.0, 1.0]),
+        constraint_lower_bounds=np.array([1.0, 0.0, -np.inf]),
+        constraint_upper_bounds=np.array([1.0, 1.0, 0.9]),
+        variable_multipliers=np.array([0.0, 2.0, 0.0]),
+        constraint_multipliers=np.array([0.0, 0.0, 3.0]),
+    )
+
+    assert active.sources == (
+        ("constraint", 0, "equality"),
+        ("constraint", 2, "upper"),
+        ("variable", 0, "equality"),
+        ("variable", 1, "upper"),
+    )
+    np.testing.assert_allclose(
+        active.jacobian,
+        [
+            [1.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+    )
 
 
 def test_parametric_kkt_sensitivity_matches_quadratic_program_solution():

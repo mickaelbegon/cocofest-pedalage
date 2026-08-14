@@ -21,6 +21,132 @@ class KktSensitivityPrediction:
     used_least_squares: bool
 
 
+@dataclass(frozen=True)
+class ActiveKktRows:
+    jacobian: np.ndarray
+    sources: tuple[tuple[str, int, str], ...]
+
+
+def assemble_active_kkt_rows(
+    variable_values: np.ndarray,
+    constraint_values: np.ndarray,
+    constraint_jacobian: np.ndarray,
+    variable_lower_bounds: np.ndarray,
+    variable_upper_bounds: np.ndarray,
+    constraint_lower_bounds: np.ndarray,
+    constraint_upper_bounds: np.ndarray,
+    *,
+    variable_multipliers: np.ndarray | None = None,
+    constraint_multipliers: np.ndarray | None = None,
+    primal_activity_tolerance: float = 1e-7,
+    dual_activity_tolerance: float = 1e-8,
+    equality_tolerance: float = 1e-12,
+) -> ActiveKktRows:
+    """Stack equality, active inequality, and active variable-bound rows.
+
+    IPOPT/CasADi multiplier signs are used only as a secondary activity test:
+    negative for a lower bound and positive for an upper bound. Equal lower
+    and upper bounds are represented once, independently of their multiplier.
+    """
+
+    z = np.asarray(variable_values, dtype=float).reshape(-1)
+    g = np.asarray(constraint_values, dtype=float).reshape(-1)
+    jacobian = np.asarray(constraint_jacobian, dtype=float)
+    lbx = np.asarray(variable_lower_bounds, dtype=float).reshape(-1)
+    ubx = np.asarray(variable_upper_bounds, dtype=float).reshape(-1)
+    lbg = np.asarray(constraint_lower_bounds, dtype=float).reshape(-1)
+    ubg = np.asarray(constraint_upper_bounds, dtype=float).reshape(-1)
+    if jacobian.shape != (g.size, z.size):
+        raise ValueError("The nonlinear-constraint Jacobian has an invalid shape.")
+    if lbx.shape != z.shape or ubx.shape != z.shape:
+        raise ValueError("Variable bounds must match the decision vector.")
+    if lbg.shape != g.shape or ubg.shape != g.shape:
+        raise ValueError("Constraint bounds must match the constraint vector.")
+    for value, name in (
+        (primal_activity_tolerance, "primal activity tolerance"),
+        (dual_activity_tolerance, "dual activity tolerance"),
+        (equality_tolerance, "equality tolerance"),
+    ):
+        if not np.isfinite(value) or value < 0.0:
+            raise ValueError(f"The {name} must be finite and non-negative.")
+    lam_x = (
+        np.zeros(z.size)
+        if variable_multipliers is None
+        else np.asarray(variable_multipliers, dtype=float).reshape(-1)
+    )
+    lam_g = (
+        np.zeros(g.size)
+        if constraint_multipliers is None
+        else np.asarray(constraint_multipliers, dtype=float).reshape(-1)
+    )
+    if lam_x.shape != z.shape or lam_g.shape != g.shape:
+        raise ValueError("Multiplier vectors have incompatible dimensions.")
+
+    rows = []
+    sources = []
+    for index in range(g.size):
+        finite_lower = np.isfinite(lbg[index])
+        finite_upper = np.isfinite(ubg[index])
+        equality = (
+            finite_lower
+            and finite_upper
+            and abs(ubg[index] - lbg[index]) <= equality_tolerance
+        )
+        if equality:
+            rows.append(jacobian[index])
+            sources.append(("constraint", index, "equality"))
+            continue
+        lower_active = finite_lower and (
+            g[index] - lbg[index] <= primal_activity_tolerance
+            or lam_g[index] < -dual_activity_tolerance
+        )
+        upper_active = finite_upper and (
+            ubg[index] - g[index] <= primal_activity_tolerance
+            or lam_g[index] > dual_activity_tolerance
+        )
+        if lower_active:
+            rows.append(jacobian[index])
+            sources.append(("constraint", index, "lower"))
+        if upper_active:
+            rows.append(jacobian[index])
+            sources.append(("constraint", index, "upper"))
+
+    identity = np.eye(z.size)
+    for index in range(z.size):
+        finite_lower = np.isfinite(lbx[index])
+        finite_upper = np.isfinite(ubx[index])
+        equality = (
+            finite_lower
+            and finite_upper
+            and abs(ubx[index] - lbx[index]) <= equality_tolerance
+        )
+        if equality:
+            rows.append(identity[index])
+            sources.append(("variable", index, "equality"))
+            continue
+        lower_active = finite_lower and (
+            z[index] - lbx[index] <= primal_activity_tolerance
+            or lam_x[index] < -dual_activity_tolerance
+        )
+        upper_active = finite_upper and (
+            ubx[index] - z[index] <= primal_activity_tolerance
+            or lam_x[index] > dual_activity_tolerance
+        )
+        if lower_active:
+            rows.append(identity[index])
+            sources.append(("variable", index, "lower"))
+        if upper_active:
+            rows.append(identity[index])
+            sources.append(("variable", index, "upper"))
+
+    return ActiveKktRows(
+        jacobian=(
+            np.vstack(rows) if rows else np.empty((0, z.size), dtype=float)
+        ),
+        sources=tuple(sources),
+    )
+
+
 def solve_parametric_kkt_sensitivity(
     hessian: np.ndarray,
     active_constraint_jacobian: np.ndarray,
