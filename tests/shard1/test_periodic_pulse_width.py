@@ -10595,7 +10595,12 @@ def test_compiled_nlp_tracker_detects_a_second_generated_solver():
     assert summary["graph_rebuild_detected"] is True
 
 
-def test_compiled_nlp_tracker_classifies_madnlp_startup_option_capsule():
+def test_compiled_nlp_tracker_classifies_madnlp_startup_option_capsule(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "nlp.c"
+    source.write_text("/* identical generated graph */", encoding="utf-8")
     bounds = SimpleNamespace(min=np.zeros((1, 3)), max=np.ones((1, 3)))
     nmpc = SimpleNamespace(
         ocp_solver=SimpleNamespace(shaked_ocp_solver=object()),
@@ -10607,6 +10612,8 @@ def test_compiled_nlp_tracker_classifies_madnlp_startup_option_capsule():
     tracker.record_expected_capsule_rebuild(
         after_window=0, reason="madnlp_first_window_solver_options"
     )
+    first_mtime_ns = source.stat().st_mtime_ns
+    os.utime(source, ns=(first_mtime_ns + 1_000_000, first_mtime_ns + 1_000_000))
     hot_solver = object()
     nmpc.ocp_solver.shaked_ocp_solver = hot_solver
     tracker.record(nmpc, 1)
@@ -10617,6 +10624,8 @@ def test_compiled_nlp_tracker_classifies_madnlp_startup_option_capsule():
     assert summary["graph_rebuild_detected"] is True
     assert summary["expected_capsule_rebuild_only"] is True
     assert summary["hot_compiled_library_reused"] is True
+    assert summary["unique_compiled_source_versions"] == 1
+    assert summary["compiled_source_reused"] is True
     assert summary["expected_capsule_rebuilds"] == [
         {
             "after_window": 0,

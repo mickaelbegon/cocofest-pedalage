@@ -5666,6 +5666,14 @@ NLP est identique et la seconde capsule est conservée des RHO 1 à 4. L'audit
 distingue désormais ce rebuild d'option attendu d'une reconstruction du
 graphe; le gate exige la réutilisation de la capsule chaude.
 
+La première relance a encore marqué le gate MadNLP en échec malgré `5/5` RHO
+certifiés. Le tracker incluait le `mtime_ns` de `nlp.c` dans l'identité de la
+source : la régénération volontaire de la capsule chaude changeait donc la
+date, alors que chemin, taille et SHA-256 (`dae9cf47...`) restaient identiques.
+L'identité de version repose maintenant sur le contenu (`path + size + SHA`);
+le timestamp reste journalisé mais ne peut plus simuler un changement de
+graphe.
+
 L'ablation ACADOS d'hystérésis n'a pas encore été mesurée : avec le couple
 signé `+0.15 N.m` (résistif pour `qdot<0`), la référence reduced échoue avant
 le premier SQP dans l'homotopie des contrôles. Le cas dépendant était ensuite

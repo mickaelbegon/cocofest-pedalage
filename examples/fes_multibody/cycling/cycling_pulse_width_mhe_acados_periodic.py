@@ -8248,7 +8248,6 @@ class CompiledNlpReuseTracker:
             (
                 item["path"],
                 item["size_bytes"],
-                item["mtime_ns"],
                 item["sha256"],
             )
             for item in self._compiled_source_signatures
