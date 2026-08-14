@@ -5674,6 +5674,14 @@ L'identité de version repose maintenant sur le contenu (`path + size + SHA`);
 le timestamp reste journalisé mais ne peut plus simuler un changement de
 graphe.
 
+Le run de certification
+[`31767128193`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/31767128193)
+valide finalement le contrat MadNLP : `5/5` RHO, une version unique du code C,
+cinq vecteurs de bornes distincts, une capsule de démarrage attendue puis une
+capsule chaude réutilisée sur les quatre RHO suivants. La médiane/P90 solveur
+chaude vaut `1.117/1.656 s`. Le mur-à-mur de `231.98 s` inclut la génération
+et les deux compilations initiales; il ne représente pas la période online.
+
 L'ablation ACADOS d'hystérésis n'a pas encore été mesurée : avec le couple
 signé `+0.15 N.m` (résistif pour `qdot<0`), la référence reduced échoue avant
 le premier SQP dans l'homotopie des contrôles. Le cas dépendant était ensuite

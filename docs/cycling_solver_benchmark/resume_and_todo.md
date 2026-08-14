@@ -945,6 +945,11 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     initialisation primal-dual, puis exiger un test discriminant `max_iter=1`
     avant l'ablation `off/constraints/bounds/all` sur le RHO. Tant que ce test
     échoue, conserver MadNLP en warm-start primal seulement.
+    Le run `31767128193` certifie par ailleurs la compilation RHO : une seule
+    version SHA du NLP C, une capsule initiale à options larges, puis une
+    capsule online réutilisée. Les temps chauds valent `1.117/1.656 s` en
+    médiane/P90 sur cinq RHO; le coût initial de compilation est exclu du
+    budget temps réel.
 50. [prototype implémenté, campagne ciblée prête] Une hystérésis de Schmitt autour
     de `pd0`, avec `delta_off=2 us` et `delta_on=5 us`, ne change que 5 valeurs
     de classification sur 12 000 PW IPOPT et 2 sur 12 000 PW MadNLP dans les
