@@ -5741,3 +5741,23 @@ fatigue exécutée n'augmentent que de `1.02e-5 %`; l'AUC change de
 la robustesse de la trust region sans biais mesurable à cette échelle. Une
 dernière variante appariée sans mémoire de Schmitt est ajoutée pour séparer
 l'effet de l'élargissement local de celui de l'hystérésis elle-même.
+
+Cette ablation est terminée dans le run vert
+[`31767967895`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/31767967895).
+La garde memoryless et la garde hystérétique certifient toutes deux `30/30`
+avec 38 itérations cumulées, contre seulement `2/30` pour la trust region
+stricte. La variante memoryless relâche 512 voisinages; l'hystérésis utilise sa
+mémoire 112 fois, change 16 labels et relâche 576 voisinages.
+
+| Garde | RHO | Médiane/P90 solveur | Médiane/P90 murale | Coût exécuté |
+|---|---:|---:|---:|---:|
+| aucune, trust stricte | `2/30` | `0.1221 / 0.1221 s` | `0.1407 / 0.1407 s` | préfixe incomplet |
+| locale memoryless | `30/30` | `0.03987 / 0.04027 s` | `0.05865 / 0.05910 s` | `110.598895456` |
+| locale avec hystérésis | `30/30` | `0.04009 / 0.04034 s` | `0.05896 / 0.05931 s` | `110.598897287` |
+
+L'hystérésis ajoute `0.53 %` à la médiane murale et ne change le coût exécuté
+que de `1.83e-6`, l'AUC de `9.26e-9 cycle` et la capacité minimale de
+`-1.10e-10`. Sur 30 RHO à couple nul, le gain de robustesse vient donc de
+l'élargissement local, pas de la mémoire de Schmitt. Le choix nominal simple
+est memoryless; l'hystérésis reste une option de safeguard à retester sur 100
+RHO et sous résistance/fatigue avant de la supprimer.

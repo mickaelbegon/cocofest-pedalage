@@ -950,7 +950,7 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     capsule online réutilisée. Les temps chauds valent `1.117/1.656 s` en
     médiane/P90 sur cinq RHO; le coût initial de compilation est exclu du
     budget temps réel.
-50. [garde validée 30 RHO, ablation memoryless en attente] Une hystérésis de Schmitt autour
+50. [ablation 30 RHO terminée, memoryless retenu] Une hystérésis de Schmitt autour
     de `pd0`, avec `delta_off=2 us` et `delta_on=5 us`, ne change que 5 valeurs
     de classification sur 12 000 PW IPOPT et 2 sur 12 000 PW MadNLP dans les
     trajectoires 100 RHO disponibles. Elle ne supprime pas les vraies
@@ -971,8 +971,12 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     Le run `31767641638` montre que la trust region stricte s'arrête à `2/30`,
     tandis que la garde hystérétique certifie `30/30` à `0.0530/0.0551 s`
     médiane/P90, avec un biais de fatigue de seulement `1.02e-5 %` face au
-    profil sans trust. Comparer maintenant la même garde sans mémoire afin
-    d'attribuer séparément le gain à l'élargissement local et à l'hystérésis.
+    profil sans trust. Le run `31767967895` attribue le gain à
+    l'élargissement local : memoryless et hystérésis donnent `30/30` et 38
+    itérations, mais l'hystérésis libère 64 voisinages de plus et ajoute
+    `0.53 %` à la médiane murale. Retenir memoryless sur ce cas; conserver
+    l'hystérésis comme option et la retester sur 100 RHO puis sous résistance,
+    où l'ensemble actif pourrait changer davantage.
 51. [noyau et second membre bornes testés, branchement OCP à faire] Prototyper le prédicteur paramétrique
     KKT sur le reduced/SX/Radau-5 avant de l'appliquer à ACADOS ou MadNLP :
     (a) rendre explicite le vecteur `p` regroupant état initial et bornes
