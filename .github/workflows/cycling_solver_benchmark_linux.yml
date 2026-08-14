@@ -1691,8 +1691,12 @@ jobs:
                 --acados-transfer-active-set-guard-radius 5e-4
                 --acados-transfer-active-set-guard-margin 1
                 --acados-transfer-active-set-threshold 5e-6
-                --acados-transfer-active-set-hysteresis-off-threshold 2e-6
               )
+              if [[ "$variant" != *"memoryless"* ]]; then
+                solver_options+=(
+                  --acados-transfer-active-set-hysteresis-off-threshold 2e-6
+                )
+              fi
             fi
             if [[ "$variant" == *"phase-one-mechanical-lazy"* ]]; then
               # Preserve the unmodified cyclic shift during every successful
@@ -1903,6 +1907,7 @@ jobs:
               > acados-smoke-results/reference-cases.txt
             run_case sqp-irk-reference reduced 1 SQP IRK 5 5
             run_case sqp-irk-terminal-omega-0p3-trust-10us reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
+            run_case sqp-irk-terminal-omega-0p3-trust-10us-active-set-guard-memoryless reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
             run_case sqp-irk-terminal-omega-0p3-trust-10us-active-set-guard reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
           elif [[ "$ACADOS_PW_STABILITY_ONLY" == "true" ]]; then
             # Causal reduced-mechanics screen for the observed period-two PW
@@ -2222,6 +2227,7 @@ jobs:
           fi
           if [[ "$ACADOS_ACTIVE_SET_ONLY" == "true" ]]; then
             baseline="acados-smoke-results/sqp-irk-terminal-omega-0p3-trust-10us-reduced/result.json"
+            memoryless="acados-smoke-results/sqp-irk-terminal-omega-0p3-trust-10us-active-set-guard-memoryless-reduced/result.json"
             guarded="acados-smoke-results/sqp-irk-terminal-omega-0p3-trust-10us-active-set-guard-reduced/result.json"
             jq -e '
               .results[0] |
@@ -2231,7 +2237,21 @@ jobs:
               .results[0] |
               (.error == null) and
               (.validated_cycles == .requested_cycles)
+            ' "$memoryless"
+            jq -e '
+              .results[0] |
+              (.error == null) and
+              (.validated_cycles == .requested_cycles)
             ' "$guarded"
+            jq -e '
+              .results[0].transfer_active_set_guard_summaries as $guards |
+              (($guards // []) | length > 1) and
+              all($guards[].controls[]; .hysteresis_enabled == false) and
+              all($guards[].controls[]; .hysteresis_memory_used == false)
+            ' "$memoryless" || {
+              echo "The memoryless active-set control exercised hysteresis unexpectedly." >&2
+              exit 1
+            }
             jq -e '
               .results[0].transfer_active_set_guard_summaries as $guards |
               (($guards // []) | length > 1) and

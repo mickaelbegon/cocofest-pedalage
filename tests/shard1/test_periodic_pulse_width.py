@@ -7554,6 +7554,11 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
         "run_case sqp-irk-terminal-omega-0p3-trust-10us-active-set-guard reduced"
         in workflow
     )
+    assert (
+        "run_case sqp-irk-terminal-omega-0p3-trust-10us-active-set-guard-memoryless reduced"
+        in workflow
+    )
+    assert 'if [[ "$variant" != *"memoryless"* ]]; then' in workflow
     assert "--acados-transfer-pulse-width-trust-radius 1e-5" in workflow
     assert 'run_case sqp-irk-reference reduced 1 SQP IRK 5 5' in workflow
     assert "--acados-transfer-active-set-guard-radius 5e-4" in workflow

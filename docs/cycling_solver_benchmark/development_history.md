@@ -5725,3 +5725,19 @@ deux variantes ont certifié `30/30` avec la solution sans trust, puis le gate
 a correctement refusé l'absence de résumés d'hystérésis. La condition couvre
 maintenant explicitement les trois sources de rayon et un test de régression
 vérifie le cas « transfer-only ».
+
+Après correction, le run
+[`31767641638`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/31767641638)
+montre un effet robuste de la garde : la trust region stricte `+/-10 us`
+s'arrête au RHO 3 (`2/30`), tandis que l'élargissement local avec hystérésis
+certifie `30/30`, sans recovery. Sur 29 transferts, la mémoire est utilisée
+112 fois, 16 labels diffèrent de la classification memoryless et 576
+voisinages muscle-nœud sont libérés. La médiane/P90 murale chaude vaut
+`0.0530/0.0551 s`.
+
+Comparé au profil robuste sans trust du run `31766910662`, le coût et la
+fatigue exécutée n'augmentent que de `1.02e-5 %`; l'AUC change de
+`5.77e-8 cycle` et la capacité minimale de `-4.39e-10`. La garde restaure donc
+la robustesse de la trust region sans biais mesurable à cette échelle. Une
+dernière variante appariée sans mémoire de Schmitt est ajoutée pour séparer
+l'effet de l'élargissement local de celui de l'hystérésis elle-même.
