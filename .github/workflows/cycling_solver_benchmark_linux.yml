@@ -2605,7 +2605,7 @@ jobs:
       COLLOCATION_DIAGNOSTIC_RHOS: ${{ inputs.collocation_diagnostic_rhos }}
       BENCHMARK_SOLVER: ${{ matrix.solver }}
       COCOFEST_BENCHMARK_COMMIT: ${{ github.sha }}
-      BIOPTIM_BENCHMARK_COMMIT: ${{ env.BIOPTIM_PRODUCTION_COMMIT }}
+      BIOPTIM_BENCHMARK_COMMIT: f7a0d722526967d9a81a8ad596ddb911d32a0bfe
       BIOPTIM_INTEGRATION_BRANCH: codex/cocofest-acados-v055-exploration
       NLP_TRANSFER_PREPARATION: ${{ inputs.nlp_transfer_preparation }}
       NLP_PHASE_ONE_SCREEN_THRESHOLD: ${{ inputs.nlp_phase_one_screen_threshold }}

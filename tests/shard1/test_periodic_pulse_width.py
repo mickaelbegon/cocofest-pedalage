@@ -7554,7 +7554,9 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert (
         "BIOPTIM_PRODUCTION_COMMIT: " "f7a0d722526967d9a81a8ad596ddb911d32a0bfe"
     ) in workflow
-    assert "BIOPTIM_BENCHMARK_COMMIT: ${{ env.BIOPTIM_PRODUCTION_COMMIT }}" in workflow
+    assert (
+        "BIOPTIM_BENCHMARK_COMMIT: " "f7a0d722526967d9a81a8ad596ddb911d32a0bfe"
+    ) in workflow
     assert "ref: ${{ env.BIOPTIM_PRODUCTION_COMMIT }}" in workflow
     assert "a3499cab16d7605b8efa7255cf89f1af6a7c59c9" not in workflow
     assert "ACADOS_COMMIT: 59d93e17d2985fdd73fc58b8a83ed8f83a024171" in workflow
