@@ -7554,9 +7554,8 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert (
         "BIOPTIM_PRODUCTION_COMMIT: " "f7a0d722526967d9a81a8ad596ddb911d32a0bfe"
     ) in workflow
-    assert (
-        workflow.count("bioptim_commit: f7a0d722526967d9a81a8ad596ddb911d32a0bfe") == 3
-    )
+    assert "BIOPTIM_BENCHMARK_COMMIT: ${{ env.BIOPTIM_PRODUCTION_COMMIT }}" in workflow
+    assert "ref: ${{ env.BIOPTIM_PRODUCTION_COMMIT }}" in workflow
     assert "a3499cab16d7605b8efa7255cf89f1af6a7c59c9" not in workflow
     assert "ACADOS_COMMIT: 59d93e17d2985fdd73fc58b8a83ed8f83a024171" in workflow
     assert (
@@ -7645,9 +7644,11 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert "Validate the paired IPOPT KKT ablation" in workflow
     assert "parametric_kkt_prediction_audits" in workflow
     assert "cycling-fatigue-linux-ipopt-kkt-predictor-reduced" in workflow
-    assert 'campaign: ["${{ inputs.cycles }}"]' in workflow
-    assert "- campaign: kkt_predictor\n            solver: madnlp" in workflow
-    assert "- campaign: kkt_predictor\n            solver: fatrop" in workflow
+    assert (
+        "solver: ${{ fromJSON(inputs.cycles == 'kkt_predictor' && "
+        "'[\"ipopt\"]' || '[\"ipopt\",\"madnlp\",\"fatrop\"]') }}"
+        in workflow
+    )
     prepare_acados = workflow.split("\n  prepare-acados-stack:", maxsplit=1)[1].split(
         "\n  acados-smoke:", maxsplit=1
     )[0]
@@ -7833,7 +7834,7 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert "expected 12 JSON files" not in workflow
     assert ".configurations.acados.n_windows > 5" in workflow
     assert ".validated_cycles == $expected" not in workflow
-    assert "case_slug: fatrop-collocation" in workflow
+    assert "matrix.solver == 'fatrop' && 'fatrop-collocation'" in workflow
     assert "Run FATROP collocation full" in workflow
     assert "Run FATROP collocation reduced" in workflow
     assert "max-parallel: 3" in workflow
@@ -7912,11 +7913,6 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert "Checkpoint MadNLP MUMPS reduced" in workflow
     assert "max-parallel: 2" in workflow
     assert re.search(r"\n  benchmark:.*?\n    needs: prepare-seed", workflow, re.DOTALL)
-    assert re.search(
-        r"- solver: ipopt\b.*?- solver: madnlp\b",
-        workflow,
-        flags=re.DOTALL,
-    )
     assert " MX " not in workflow
     assert " pardiso_mkl " not in workflow
     assert "--ipopt-use-sx" in benchmark_runner

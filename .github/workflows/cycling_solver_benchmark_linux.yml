@@ -2581,60 +2581,23 @@ jobs:
           retention-days: 30
 
   benchmark:
-    name: ${{ matrix.case_slug }} — sequential full/reduced
+    name: ${{ matrix.solver == 'fatrop' && 'fatrop-collocation' || matrix.solver }} — sequential full/reduced
     if: ${{ inputs.cycles != 'screen' && inputs.cycles != 'acados' && inputs.cycles != 'acados_guard' && inputs.cycles != 'acados_active_set' && inputs.cycles != 'acados_pw_stability' && inputs.cycles != 'acados_recovery' && inputs.cycles != 'acados_lazy_recovery' && inputs.cycles != 'acados_homotopy' && inputs.cycles != 'acados_reduced_100' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles != 'acados_dropout' && inputs.cycles != 'full_horizon' }}
     needs: prepare-seed
     runs-on: ${{ inputs.runner_label }}
-    timeout-minutes: ${{ matrix.timeout_minutes }}
+    timeout-minutes: ${{ matrix.solver == 'ipopt' && 300 || 420 }}
     strategy:
       fail-fast: false
       max-parallel: 3
       matrix:
-        solver: [ipopt, madnlp, fatrop]
-        campaign: ["${{ inputs.cycles }}"]
-        exclude:
-          - campaign: kkt_predictor
-            solver: madnlp
-          - campaign: kkt_predictor
-            solver: fatrop
-        include:
-          - solver: ipopt
-            backend: mumps
-            case_slug: ipopt
-            benchmark_mode: main
-            timeout_minutes: 300
-            benchmark_rhos: ${{ inputs.cycles == 'pw_transfer_ablation' && '100' || inputs.cycles == 'kkt_predictor' && inputs.refined_collocation_rhos || inputs.cycles == 'radau5_100' && inputs.radau5_endurance_rhos || inputs.cycles == 'radau35_comparison' && inputs.radau35_comparison_rhos || (inputs.cycles == 'fatigue_endurance' || inputs.cycles == 'fatigue_endurance_radau5') && inputs.fatigue_endurance_max_rhos || inputs.cycles }}
-            cycles_per_window: ${{ inputs.cycles_per_window }}
-            bioptim_commit: f7a0d722526967d9a81a8ad596ddb911d32a0bfe
-            integration_branch: codex/cocofest-acados-v055-exploration
-            casadi_cxx_abi: 0
-          - solver: madnlp
-            backend: mumps
-            case_slug: madnlp
-            benchmark_mode: main
-            timeout_minutes: 420
-            benchmark_rhos: ${{ inputs.cycles == 'pw_transfer_ablation' && '100' || inputs.cycles == 'kkt_predictor' && inputs.refined_collocation_rhos || inputs.cycles == 'radau5_100' && inputs.radau5_endurance_rhos || inputs.cycles == 'radau35_comparison' && inputs.radau35_comparison_rhos || (inputs.cycles == 'fatigue_endurance' || inputs.cycles == 'fatigue_endurance_radau5') && inputs.fatigue_endurance_max_rhos || inputs.cycles }}
-            cycles_per_window: ${{ inputs.cycles_per_window }}
-            bioptim_commit: f7a0d722526967d9a81a8ad596ddb911d32a0bfe
-            integration_branch: codex/cocofest-acados-v055-exploration
-            casadi_cxx_abi: 1
-          - solver: fatrop
-            backend: fatrop
-            case_slug: fatrop-collocation
-            benchmark_mode: main
-            timeout_minutes: 420
-            benchmark_rhos: ${{ inputs.cycles == 'pw_transfer_ablation' && '100' || inputs.cycles == 'kkt_predictor' && inputs.refined_collocation_rhos || inputs.cycles == 'radau5_100' && inputs.radau5_endurance_rhos || inputs.cycles == 'radau35_comparison' && inputs.radau35_comparison_rhos || (inputs.cycles == 'fatigue_endurance' || inputs.cycles == 'fatigue_endurance_radau5') && inputs.fatigue_endurance_max_rhos || inputs.cycles }}
-            cycles_per_window: ${{ inputs.cycles_per_window }}
-            bioptim_commit: f7a0d722526967d9a81a8ad596ddb911d32a0bfe
-            integration_branch: codex/cocofest-acados-v055-exploration
-            casadi_cxx_abi: 0
+        solver: ${{ fromJSON(inputs.cycles == 'kkt_predictor' && '["ipopt"]' || '["ipopt","madnlp","fatrop"]') }}
     env:
       # IPOPT uses the wheel ABI; source-built CasADi/libMad follows
       # Conda's modern libstdc++ ABI.
-      CASADI_CXX_ABI: ${{ matrix.casadi_cxx_abi }}
+      CASADI_CXX_ABI: ${{ matrix.solver == 'madnlp' && '1' || '0' }}
       PYTHONPATH: ${{ github.workspace }}
-      BENCHMARK_RHOS: ${{ matrix.benchmark_rhos }}
-      BENCHMARK_CYCLES_PER_WINDOW: ${{ matrix.cycles_per_window }}
+      BENCHMARK_RHOS: ${{ inputs.cycles == 'pw_transfer_ablation' && '100' || inputs.cycles == 'kkt_predictor' && inputs.refined_collocation_rhos || inputs.cycles == 'radau5_100' && inputs.radau5_endurance_rhos || inputs.cycles == 'radau35_comparison' && inputs.radau35_comparison_rhos || (inputs.cycles == 'fatigue_endurance' || inputs.cycles == 'fatigue_endurance_radau5') && inputs.fatigue_endurance_max_rhos || inputs.cycles }}
+      BENCHMARK_CYCLES_PER_WINDOW: ${{ inputs.cycles_per_window }}
       BENCHMARK_ASSISTANCE: ${{ inputs.crank_assistance_nm }}
       BENCHMARK_Q_SLACK: ${{ inputs.terminal_wheel_q_slack }}
       BENCHMARK_MAX_ITER: ${{ inputs.solver_max_iterations }}
@@ -2642,8 +2605,8 @@ jobs:
       COLLOCATION_DIAGNOSTIC_RHOS: ${{ inputs.collocation_diagnostic_rhos }}
       BENCHMARK_SOLVER: ${{ matrix.solver }}
       COCOFEST_BENCHMARK_COMMIT: ${{ github.sha }}
-      BIOPTIM_BENCHMARK_COMMIT: ${{ matrix.bioptim_commit }}
-      BIOPTIM_INTEGRATION_BRANCH: ${{ matrix.integration_branch }}
+      BIOPTIM_BENCHMARK_COMMIT: ${{ env.BIOPTIM_PRODUCTION_COMMIT }}
+      BIOPTIM_INTEGRATION_BRANCH: codex/cocofest-acados-v055-exploration
       NLP_TRANSFER_PREPARATION: ${{ inputs.nlp_transfer_preparation }}
       NLP_PHASE_ONE_SCREEN_THRESHOLD: ${{ inputs.nlp_phase_one_screen_threshold }}
       NLP_PHASE_ONE_MODE: ${{ inputs.nlp_phase_one_mode }}
@@ -2659,7 +2622,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: ${{ env.BIOPTIM_REPOSITORY }}
-          ref: ${{ matrix.bioptim_commit }}
+          ref: ${{ env.BIOPTIM_PRODUCTION_COMMIT }}
           path: .benchmark-deps/bioptim
 
       - name: Checkout the pinned libMad runtime
@@ -2795,7 +2758,7 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}
           BENCHMARK_SOLVER: ${{ matrix.solver }}
-          BENCHMARK_BACKEND: ${{ matrix.backend }}
+          BENCHMARK_BACKEND: ${{ matrix.solver == 'fatrop' && 'fatrop' || 'mumps' }}
         run: |
           set -o pipefail
           python - <<'PY' 2>&1 | tee solver-runtime-smoke.log
@@ -3194,10 +3157,10 @@ jobs:
             RHO_PULSE_WIDTH_TRANSFER_MODE="$mode" \
             RHO_PULSE_WIDTH_EXTRAPOLATION_FACTOR="$factor" \
               bash .github/scripts/run_cycling_benchmark_case.sh \
-                "${{ matrix.case_slug }}-pw-${suffix}" \
+                "${{ matrix.solver == 'fatrop' && 'fatrop-collocation' || matrix.solver }}-pw-${suffix}" \
                 "${{ matrix.solver }}" \
                 reduced \
-                "${{ matrix.backend }}" \
+                "${{ matrix.solver == 'fatrop' && 'fatrop' || 'mumps' }}" \
                 collocation \
                 benchmark-results \
                 "$BENCHMARK_CYCLES" \
@@ -3214,12 +3177,12 @@ jobs:
         # study.  Keep full and reduced interpreted so degree five alone is
         # the changed variable; compiled reduced Radau-3 is measured below.
         continue-on-error: true
-        run: bash .github/scripts/run_cycling_benchmark_case.sh "${{ matrix.case_slug }}-radau5-100" "${{ matrix.solver }}" full "${{ matrix.backend }}" collocation benchmark-results "$BENCHMARK_CYCLES" false sx none 5 scientific-radau5 off true
+        run: bash .github/scripts/run_cycling_benchmark_case.sh "${{ matrix.solver == 'fatrop' && 'fatrop-collocation' || matrix.solver }}-radau5-100" "${{ matrix.solver }}" full "${{ matrix.solver == 'fatrop' && 'fatrop' || 'mumps' }}" collocation benchmark-results "$BENCHMARK_CYCLES" false sx none 5 scientific-radau5 off true
 
       - name: Run 100-RHO Radau-5 reduced
         if: ${{ inputs.cycles == 'radau5_100' }}
         continue-on-error: true
-        run: bash .github/scripts/run_cycling_benchmark_case.sh "${{ matrix.case_slug }}-radau5-100" "${{ matrix.solver }}" reduced "${{ matrix.backend }}" collocation benchmark-results "$BENCHMARK_CYCLES" false sx none 5 scientific-radau5 off true
+        run: bash .github/scripts/run_cycling_benchmark_case.sh "${{ matrix.solver == 'fatrop' && 'fatrop-collocation' || matrix.solver }}-radau5-100" "${{ matrix.solver }}" reduced "${{ matrix.solver == 'fatrop' && 'fatrop' || 'mumps' }}" collocation benchmark-results "$BENCHMARK_CYCLES" false sx none 5 scientific-radau5 off true
 
       - name: Run compiled reduced Radau-3 fatigue endurance
         if: ${{ inputs.cycles == 'fatigue_endurance' }}
@@ -3227,7 +3190,7 @@ jobs:
         # its certified prefix.  The post-job gate accepts only horizon
         # completion or a two-failure endpoint with fatigue evidence.
         continue-on-error: true
-        run: bash .github/scripts/run_cycling_benchmark_case.sh "${{ matrix.case_slug }}-radau3-fatigue-endurance" "${{ matrix.solver }}" reduced "${{ matrix.backend }}" collocation benchmark-results "$BENCHMARK_CYCLES" true sx none 3 periodic_collocation auto auto
+        run: bash .github/scripts/run_cycling_benchmark_case.sh "${{ matrix.solver == 'fatrop' && 'fatrop-collocation' || matrix.solver }}-radau3-fatigue-endurance" "${{ matrix.solver }}" reduced "${{ matrix.solver == 'fatrop' && 'fatrop' || 'mumps' }}" collocation benchmark-results "$BENCHMARK_CYCLES" true sx none 3 periodic_collocation auto auto
 
       - name: Run compiled reduced Radau-5 fatigue endurance
         if: ${{ inputs.cycles == 'fatigue_endurance_radau5' && (matrix.solver == 'ipopt' || matrix.solver == 'madnlp') }}
@@ -3238,19 +3201,19 @@ jobs:
         # IPOPT needs the target-transcription bridge and must not inherit
         # collocation duals from the Radau-3 common seed.  MadNLP also uses
         # this bridge; its cost is reported outside the hot-RHO timings.
-        run: bash .github/scripts/run_cycling_benchmark_case.sh "${{ matrix.case_slug }}-radau5-fatigue-endurance" "${{ matrix.solver }}" reduced "${{ matrix.backend }}" collocation benchmark-results "$BENCHMARK_CYCLES" true sx none 5 scientific-radau5 off true
+        run: bash .github/scripts/run_cycling_benchmark_case.sh "${{ matrix.solver == 'fatrop' && 'fatrop-collocation' || matrix.solver }}-radau5-fatigue-endurance" "${{ matrix.solver }}" reduced "${{ matrix.solver == 'fatrop' && 'fatrop' || 'mumps' }}" collocation benchmark-results "$BENCHMARK_CYCLES" true sx none 5 scientific-radau5 off true
 
       - name: Run compiled reduced Radau-3 long comparison
         if: ${{ inputs.cycles == 'radau35_comparison' && (matrix.solver == 'ipopt' || matrix.solver == 'madnlp') }}
         # Compare only the transcription degree on the same runner, shared
         # seed, SX graph, reduced mechanics, tolerance and C-evaluator reuse.
-        run: bash .github/scripts/run_cycling_benchmark_case.sh "${{ matrix.case_slug }}-radau3-comparison" "${{ matrix.solver }}" reduced "${{ matrix.backend }}" collocation benchmark-results "$BENCHMARK_CYCLES" true sx none 3 scientific-radau3 off true
+        run: bash .github/scripts/run_cycling_benchmark_case.sh "${{ matrix.solver == 'fatrop' && 'fatrop-collocation' || matrix.solver }}-radau3-comparison" "${{ matrix.solver }}" reduced "${{ matrix.solver == 'fatrop' && 'fatrop' || 'mumps' }}" collocation benchmark-results "$BENCHMARK_CYCLES" true sx none 3 scientific-radau3 off true
 
       - name: Run compiled reduced Radau-5 long comparison
         if: ${{ inputs.cycles == 'radau35_comparison' && (matrix.solver == 'ipopt' || matrix.solver == 'madnlp') }}
         # This must be a target-Radau-5 primal bridge: merely injecting the
         # Radau-3 common primal caused IPOPT to hit max_iter while feasible.
-        run: bash .github/scripts/run_cycling_benchmark_case.sh "${{ matrix.case_slug }}-radau5-comparison" "${{ matrix.solver }}" reduced "${{ matrix.backend }}" collocation benchmark-results "$BENCHMARK_CYCLES" true sx none 5 scientific-radau5 off true
+        run: bash .github/scripts/run_cycling_benchmark_case.sh "${{ matrix.solver == 'fatrop' && 'fatrop-collocation' || matrix.solver }}-radau5-comparison" "${{ matrix.solver }}" reduced "${{ matrix.solver == 'fatrop' && 'fatrop' || 'mumps' }}" collocation benchmark-results "$BENCHMARK_CYCLES" true sx none 5 scientific-radau5 off true
 
       - name: Checkpoint campaign-specific results
         if: ${{ always() && (inputs.cycles == 'pw_transfer_ablation' || inputs.cycles == 'radau5_100' || inputs.cycles == 'radau35_comparison' || inputs.cycles == 'fatigue_endurance' || inputs.cycles == 'fatigue_endurance_radau5') }}
@@ -3300,7 +3263,7 @@ jobs:
         shell: bash
         env:
           BENCHMARK_SOLVER: ${{ matrix.solver }}
-          BENCHMARK_MODE: ${{ matrix.benchmark_mode }}
+          BENCHMARK_MODE: main
           BENCHMARK_CAMPAIGN: ${{ inputs.cycles }}
           COMPILE_NLP_EVALUATORS: ${{ inputs.compile_nlp_evaluators }}
           PARAMETRIC_KKT_ABLATION: ${{ inputs.cycles == 'kkt_predictor' }}
