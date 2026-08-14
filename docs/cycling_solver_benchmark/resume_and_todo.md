@@ -1000,8 +1000,14 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     la correction KKT centrée sur `repeat` diminue les itérations chaudes de
     `226` à `210` sur cinq RHO Radau-3 locaux et le temps solveur chaud de
     `23.7 %`, sans changement de coût. Le guard rejette correctement deux
-    corrections nuisibles. Lancer l'A/B Linux sur 30 RHO, mesurer le temps
-    effectif KKT inclus, puis répéter en Radau-5 et avec MadNLP primal-only.
+    corrections nuisibles. Le smoke Linux compilé `31796123514` donne le
+    résultat opposé : une seule injection, `+4.1 %` de temps solveur total et
+    environ `0.22 s` de projection par transfert, sans changement physique.
+    La campagne 30 RHO `31796843615` doit confirmer ou infirmer ce rejet en
+    régime établi. Ensuite, ne pas copier directement le dual de projection :
+    construire un vrai pas Newton KKT avec résidu de stationnarité, comparer
+    duals préservés/réinitialisés/prédits sous IPOPT, puis seulement envisager
+    Radau-5 et MadNLP primal-only.
 
 La question causale est maintenant resserrée : une seule projection au RHO 19
 ne suffit pas, mais la séquence 19--36 conserve le bassin franchissant le RHO

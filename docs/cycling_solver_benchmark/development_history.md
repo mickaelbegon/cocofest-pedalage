@@ -5811,3 +5811,26 @@ factorisation de contrôle redondante doit porter le gain effectif autour de
 scalé et one-shot nécessaire pour conserver tous les états de collocation.
 Ces chiffres locaux sont prometteurs, mais une ablation Linux sur 30 RHO,
 puis Radau-5 et MadNLP, reste obligatoire.
+
+Le premier smoke Linux compilé,
+[`31796123514`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/31796123514),
+réfute toutefois le gain sur cinq RHO. Les deux cas certifient `5/5` avec un
+coût exécuté relatif identique à `9.8e-13`, mais une seule des quatre
+corrections est injectée. Les itérations chaudes passent de
+`92,46,47,46` sans KKT à `92,48,46,49` avec KKT. Le temps solveur total
+augmente de `10.240` à `10.660 s`; la médiane/P90 chaude passe de
+`1.439/2.785 s` à `1.568/2.897 s`. La correction sparse coûte en outre
+`0.218--0.230 s` par transfert sur ce runner.
+
+Ce résultat montre que diminuer le défaut primal maximum ne suffit pas à
+prédire une réduction d'itérations IPOPT. La variante injectée réinitialise
+aussi les duals de bornes, alors que la baseline les réutilise. Les
+multiplicateurs produits par le système de projection
+`[H,J^T;J,0][Delta z,nu]=[0,r]` ne peuvent pas être copiés dans IPOPT : `nu`
+est le multiplicateur de la projection, et non le nouveau multiplicateur du
+NLP. Une vraie variante primal-dual devra inclure le résidu de stationnarité
+dans le premier membre du Newton KKT et valider explicitement les conventions
+de signes avant injection. La campagne 30 RHO `31796843615` est lancée pour
+quantifier la fréquence d'acceptation de la variante primal-only en régime
+établi; elle ne doit pas être interprétée comme une validation de
+l'advanced-step primal-dual.
