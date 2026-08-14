@@ -10,7 +10,7 @@ on:
         default: ubuntu-24.04
         type: string
       cycles:
-        description: Number of RHO solves, or "screen", "acados", "acados_guard", "acados_pw_stability", "acados_recovery", "acados_lazy_recovery", "acados_homotopy", "acados_reduced_100", "acados_hybrid", "acados_reduced_recovery", "acados_reduced_fallback", "acados_recovery_speed", "acados_dropout", "pw_transfer_ablation", "radau5_100", "radau35_comparison", "fatigue_endurance", "fatigue_endurance_radau5", or "full_horizon"
+        description: Number of RHO solves, or "screen", "acados", "acados_guard", "acados_active_set", "acados_pw_stability", "acados_recovery", "acados_lazy_recovery", "acados_homotopy", "acados_reduced_100", "acados_hybrid", "acados_reduced_recovery", "acados_reduced_fallback", "acados_recovery_speed", "acados_dropout", "pw_transfer_ablation", "radau5_100", "radau35_comparison", "fatigue_endurance", "fatigue_endurance_radau5", or "full_horizon"
         required: true
         default: "100"
         type: string
@@ -1259,6 +1259,7 @@ jobs:
           ACADOS_OPTION_RHOS: ${{ inputs.acados_option_rhos }}
           ACADOS_HOMOTOPY_ONLY: ${{ inputs.cycles == 'acados_homotopy' }}
           ACADOS_CADENCE_GUARD_ONLY: ${{ inputs.cycles == 'acados_guard' }}
+          ACADOS_ACTIVE_SET_ONLY: ${{ inputs.cycles == 'acados_active_set' }}
           ACADOS_PW_STABILITY_ONLY: ${{ inputs.cycles == 'acados_pw_stability' }}
           ACADOS_RECOVERY_ONLY: ${{ inputs.cycles == 'acados_recovery' }}
           ACADOS_LAZY_RECOVERY_ONLY: ${{ inputs.cycles == 'acados_lazy_recovery' }}
@@ -1278,6 +1279,7 @@ jobs:
           done
           mkdir -p acados-smoke-results
           : > acados-smoke-results/expected-cases.txt
+          : > acados-smoke-results/skipped-cases.tsv
           : > acados-smoke-results/reference-cases.txt
           acados_extended=false
           acados_long=false
@@ -1309,7 +1311,12 @@ jobs:
             local common_seed_options=()
             local stationarity=1e-3
             mkdir -p "$case_dir"
-            echo "${variant}-${mechanics}" >> acados-smoke-results/expected-cases.txt
+            skip_case() {
+              local reason="$1"
+              printf '%s\t%s\n' "${variant}-${mechanics}" "$reason" \
+                >> acados-smoke-results/skipped-cases.tsv
+              echo "ACADOS case skipped: ${variant}-${mechanics}: ${reason}" >&2
+            }
             if [[ "$variant" == "sqp-irk-reference" && "$mechanics" == "full" ]]; then
               # Persist the first feasible full-ACADOS RHO. The cadence-
               # regularized OCP has a different objective but the same
@@ -1330,8 +1337,8 @@ jobs:
             elif [[ "$variant" == "sqp-irk-fast-guard-2p6-replay-proactive-80" ]]; then
               common_seed="$GITHUB_WORKSPACE/acados-smoke-results/sqp-irk-fast-guard-2p6-phase-one-mechanical-history-full/prepared-after-80-for-81.npz"
               if [[ ! -f "$common_seed" ]]; then
-                echo "The proactive RHO-80 replay checkpoint is missing." >&2
-                return 2
+                skip_case "The proactive RHO-80 replay checkpoint is missing."
+                return 0
               fi
               # The saved file is already the fully prepared primal for RHO
               # 81. Bind the fresh OCP's first-node state to that continuation
@@ -1345,9 +1352,15 @@ jobs:
               if [[ "$ACADOS_FATIGUE_ENDURANCE_ONLY" != "true" ]]; then
                 common_seed="$GITHUB_WORKSPACE/acados-smoke-results/reference-${mechanics}-feasible-seed.npz"
                 if [[ ! -f "$common_seed" ]]; then
-                  echo "The cadence-guard case requires its preceding ACADOS reference seed." >&2
-                  return 2
+                  skip_case "The cadence-guard case requires its preceding ACADOS reference seed."
+                  return 0
                 fi
+              fi
+            elif [[ "$variant" == "sqp-irk-active-set-guard" ]]; then
+              common_seed="$GITHUB_WORKSPACE/acados-smoke-results/reference-reduced-feasible-seed.npz"
+              if [[ ! -f "$common_seed" ]]; then
+                skip_case "The active-set A/B requires its preceding reduced ACADOS reference seed."
+                return 0
               fi
             elif [[ "$mechanics" == "reduced" && ( "$variant" == *"pw-lag2"* || "$variant" == *"terminal-omega"* || "$variant" == *"alternate-pw-retry"* ) ]]; then
               # The stability ablation must change only the predictor or the
@@ -1356,16 +1369,17 @@ jobs:
               # consistent collocation bridge.
               common_seed="$GITHUB_WORKSPACE/acados-smoke-results/reference-reduced-feasible-seed.npz"
               if [[ ! -f "$common_seed" ]]; then
-                echo "The PW-stability case requires its preceding reduced ACADOS seed." >&2
-                return 2
+                skip_case "The PW-stability case requires its preceding reduced ACADOS seed."
+                return 0
               fi
             elif [[ ( "$variant" == "sqp-irk-two-stage-cadence-reg-1" || "$variant" == "sqp-irk-cadence-reg-1-rollout-guard" || "$variant" == "sqp-irk-cadence-reg-1-best-retry" || "$variant" == "sqp-byrd-omojokun-cadence-reg-1-irk" || "$variant" == "sqp-byrd-terminal-homotopy-cadence-reg-1-irk" || "$variant" == "sqp-byrd-rollout-accept-cadence-reg-1-irk" || "$variant" == "sqp-byrd-projected-selector-cadence-reg-1-irk" ) && "$mechanics" == "full" ]]; then
               common_seed="$GITHUB_WORKSPACE/acados-smoke-results/reference-full-feasible-seed.npz"
               if [[ ! -f "$common_seed" ]]; then
-                echo "The full cadence-regularized case requires the preceding feasible reference seed." >&2
-                return 2
+                skip_case "The full cadence-regularized case requires the preceding feasible reference seed."
+                return 0
               fi
             fi
+            echo "${variant}-${mechanics}" >> acados-smoke-results/expected-cases.txt
             if [[ "$integrator" == "ERK" ]]; then
               collocation_type=EXPLICIT_RUNGE_KUTTA
             fi
@@ -1873,6 +1887,15 @@ jobs:
               run_case sqp-irk-two-stage-fast-guard-2p6 "$mechanics" "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
               run_case sqp-irk-two-stage-fast-guard-2p55 "$mechanics" "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
             done
+          elif [[ "$ACADOS_ACTIVE_SET_ONLY" == "true" ]]; then
+            # Focused reduced-mechanics A/B. The reference creates one
+            # ACADOS-certified seed; the second case changes only the
+            # phase-aligned pd0 active-set guard with Schmitt hysteresis.
+            printf '%s\n' \
+              sqp-irk-reference-reduced \
+              > acados-smoke-results/reference-cases.txt
+            run_case sqp-irk-reference reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
+            run_case sqp-irk-active-set-guard reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
           elif [[ "$ACADOS_PW_STABILITY_ONLY" == "true" ]]; then
             # Causal reduced-mechanics screen for the observed period-two PW
             # orbit. Keep one OCP per case on the same runner and change only
@@ -2088,6 +2111,7 @@ jobs:
           ACADOS_REDUCED_100_ONLY: ${{ inputs.cycles == 'acados_reduced_100' }}
           ACADOS_FATIGUE_ENDURANCE_ONLY: ${{ inputs.cycles == 'fatigue_endurance' }}
           ACADOS_PW_STABILITY_ONLY: ${{ inputs.cycles == 'acados_pw_stability' }}
+          ACADOS_ACTIVE_SET_ONLY: ${{ inputs.cycles == 'acados_active_set' }}
           ACADOS_SMOKE_RHOS: ${{ inputs.acados_smoke_rhos }}
         run: |
           mapfile -t expected_cases < acados-smoke-results/expected-cases.txt
@@ -2122,6 +2146,7 @@ jobs:
           elif [[ "$ACADOS_HOMOTOPY_ONLY" == "true" || "$ACADOS_RECOVERY_ONLY" == "true" || \
                   "$ACADOS_LAZY_RECOVERY_ONLY" == "true" || \
                   "$ACADOS_REDUCED_100_ONLY" == "true" || \
+                  "$ACADOS_ACTIVE_SET_ONLY" == "true" || \
                   "$ACADOS_PW_STABILITY_ONLY" == "true" ]]; then
             expected_reference_count=1
           fi
@@ -2505,7 +2530,7 @@ jobs:
 
   benchmark:
     name: ${{ matrix.case_slug }} — sequential full/reduced
-    if: ${{ inputs.cycles != 'screen' && inputs.cycles != 'acados' && inputs.cycles != 'acados_guard' && inputs.cycles != 'acados_pw_stability' && inputs.cycles != 'acados_recovery' && inputs.cycles != 'acados_lazy_recovery' && inputs.cycles != 'acados_homotopy' && inputs.cycles != 'acados_reduced_100' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles != 'acados_dropout' && inputs.cycles != 'full_horizon' }}
+    if: ${{ inputs.cycles != 'screen' && inputs.cycles != 'acados' && inputs.cycles != 'acados_guard' && inputs.cycles != 'acados_active_set' && inputs.cycles != 'acados_pw_stability' && inputs.cycles != 'acados_recovery' && inputs.cycles != 'acados_lazy_recovery' && inputs.cycles != 'acados_homotopy' && inputs.cycles != 'acados_reduced_100' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles != 'acados_dropout' && inputs.cycles != 'full_horizon' }}
     needs: prepare-seed
     runs-on: ${{ inputs.runner_label }}
     timeout-minutes: ${{ matrix.timeout_minutes }}
@@ -3264,16 +3289,30 @@ jobs:
               case_requires_compile=false
             fi
             if [[ "$case_requires_compile" == "true" ]]; then
-              jq -e '
+              jq -e --arg solver "$BENCHMARK_SOLVER" '
                 .results[0] |
                 (.compiled_nlp_reuse.enabled == true) and
-                (.compiled_nlp_reuse.compiled_library_build_count == 1) and
-                (.compiled_nlp_reuse.graph_rebuild_detected == false) and
+                (
+                  (
+                    .compiled_nlp_reuse.compiled_library_build_count == 1 and
+                    .compiled_nlp_reuse.graph_rebuild_detected == false
+                  ) or
+                  (
+                    $solver == "madnlp" and
+                    .compiled_nlp_reuse.expected_capsule_rebuild_only == true
+                  )
+                ) and
                 (.compiled_nlp_reuse.observed_solves == .attempted_windows) and
                 (
                   (.attempted_windows <= 1) or
                   (
-                    (.compiled_nlp_reuse.compiled_library_reused == true) and
+                    (
+                      .compiled_nlp_reuse.compiled_library_reused == true or
+                      (
+                        $solver == "madnlp" and
+                        .compiled_nlp_reuse.hot_compiled_library_reused == true
+                      )
+                    ) and
                     (.compiled_nlp_reuse.runtime_bounds_changed == true) and
                     (.compiled_nlp_reuse.compiled_source_observed == true) and
                     (.compiled_nlp_reuse.compiled_source_observation_count == .attempted_windows) and
@@ -3466,7 +3505,7 @@ jobs:
 
   report:
     name: Aggregate Kevin benchmark
-    if: ${{ always() && inputs.cycles != 'screen' && inputs.cycles != 'acados' && inputs.cycles != 'acados_guard' && inputs.cycles != 'acados_pw_stability' && inputs.cycles != 'acados_recovery' && inputs.cycles != 'acados_lazy_recovery' && inputs.cycles != 'acados_homotopy' && inputs.cycles != 'acados_reduced_100' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles != 'acados_dropout' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles != 'full_horizon' }}
+    if: ${{ always() && inputs.cycles != 'screen' && inputs.cycles != 'acados' && inputs.cycles != 'acados_guard' && inputs.cycles != 'acados_active_set' && inputs.cycles != 'acados_pw_stability' && inputs.cycles != 'acados_recovery' && inputs.cycles != 'acados_lazy_recovery' && inputs.cycles != 'acados_homotopy' && inputs.cycles != 'acados_reduced_100' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles != 'acados_dropout' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles != 'full_horizon' }}
     needs: [benchmark, acados-smoke]
     runs-on: ubuntu-24.04
     permissions:

@@ -8136,6 +8136,25 @@ class CompiledNlpReuseTracker:
         self._observations = []
         self._compiled_source_signatures = []
         self._compiled_source_cache = {}
+        self._expected_capsule_rebuilds = []
+
+    def record_expected_capsule_rebuild(
+        self, *, after_window: int, reason: str
+    ) -> None:
+        """Declare a deliberate solver-option rebuild between two RHO solves.
+
+        The generated NLP functions may stay identical even though CasADi must
+        recreate the ``nlpsol`` capsule when an immutable backend option (for
+        example MadNLP's first-window ``max_iter``) changes.  Recording that
+        transition prevents the audit from confusing an intentional startup
+        capsule with a symbolic graph rebuild.
+        """
+
+        if not self.enabled:
+            return
+        self._expected_capsule_rebuilds.append(
+            {"after_window": int(after_window), "reason": str(reason)}
+        )
 
     def _compiled_source_signature(self) -> dict | None:
         """Identify CasADi's generated source without recompiling or loading it."""
@@ -8234,6 +8253,22 @@ class CompiledNlpReuseTracker:
             )
             for item in self._compiled_source_signatures
         }
+        expected_rebuild_count = len(self._expected_capsule_rebuilds)
+        hot_observations = self._observations[1:] if expected_rebuild_count else []
+        hot_library_indices = {
+            item["compiled_library_index"] for item in hot_observations
+        }
+        expected_capsule_rebuild_only = bool(
+            expected_rebuild_count == 1
+            and build_count == 2
+            and observation_count > 1
+            and self._observations[0]["compiled_library_index"] == 0
+            and hot_library_indices == {1}
+            and (
+                not self._compiled_source_signatures
+                or len(unique_compiled_sources) == 1
+            )
+        )
         return {
             "enabled": self.enabled,
             "runtime_inputs": list(self.runtime_inputs),
@@ -8243,6 +8278,11 @@ class CompiledNlpReuseTracker:
                 self.enabled and observation_count > 1 and build_count == 1
             ),
             "graph_rebuild_detected": bool(build_count > 1),
+            "expected_capsule_rebuilds": list(self._expected_capsule_rebuilds),
+            "expected_capsule_rebuild_only": expected_capsule_rebuild_only,
+            "hot_compiled_library_reused": bool(
+                expected_capsule_rebuild_only and len(hot_observations) > 1
+            ),
             "unique_runtime_bound_vectors": unique_bound_vectors,
             "runtime_bounds_changed": bool(unique_bound_vectors > 1),
             "compiled_source_observed": bool(self._compiled_source_signatures),
@@ -20059,6 +20099,11 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             rebuilt_for_hot_options = reset_cached_nlp_solver_for_option_change(
                 _nmpc
             )
+            if rebuilt_for_hot_options:
+                compiled_nlp_tracker.record_expected_capsule_rebuild(
+                    after_window=0,
+                    reason="madnlp_first_window_solver_options",
+                )
             if echo:
                 print(
                     "madnlp_hot_solver_capsule_reset: "

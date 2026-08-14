@@ -7319,6 +7319,9 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert "--max-consecutive-failing 1" in workflow
     assert "inputs.cycles == 'acados_guard'" in workflow
     assert "ACADOS_CADENCE_GUARD_ONLY" in workflow
+    assert "inputs.cycles == 'acados_active_set'" in workflow
+    assert "ACADOS_ACTIVE_SET_ONLY" in workflow
+    assert "skipped-cases.tsv" in workflow
     assert "inputs.cycles == 'acados_recovery'" in workflow
     assert "ACADOS_RECOVERY_ONLY" in workflow
     assert "inputs.cycles == 'acados_lazy_recovery'" in workflow
@@ -7439,6 +7442,8 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert '[[ "$result" =~ -radau[456]-' in workflow
     assert ".compiled_nlp_reuse.compiled_library_build_count == 1" in workflow
     assert ".compiled_nlp_reuse.graph_rebuild_detected == false" in workflow
+    assert ".compiled_nlp_reuse.expected_capsule_rebuild_only == true" in workflow
+    assert ".compiled_nlp_reuse.hot_compiled_library_reused == true" in workflow
     assert ".compiled_nlp_reuse.runtime_bounds_changed == true" in workflow
     assert ".compiled_nlp_reuse.observed_solves == .attempted_windows" in workflow
     assert (
@@ -10570,6 +10575,36 @@ def test_compiled_nlp_tracker_detects_a_second_generated_solver():
     assert summary["compiled_library_build_count"] == 2
     assert summary["compiled_library_reused"] is False
     assert summary["graph_rebuild_detected"] is True
+
+
+def test_compiled_nlp_tracker_classifies_madnlp_startup_option_capsule():
+    bounds = SimpleNamespace(min=np.zeros((1, 3)), max=np.ones((1, 3)))
+    nmpc = SimpleNamespace(
+        ocp_solver=SimpleNamespace(shaked_ocp_solver=object()),
+        nlp=[SimpleNamespace(x_bounds={"theta": bounds}, u_bounds={}, g=[])],
+    )
+    tracker = periodic_example.CompiledNlpReuseTracker(enabled=True)
+
+    tracker.record(nmpc, 0)
+    tracker.record_expected_capsule_rebuild(
+        after_window=0, reason="madnlp_first_window_solver_options"
+    )
+    hot_solver = object()
+    nmpc.ocp_solver.shaked_ocp_solver = hot_solver
+    tracker.record(nmpc, 1)
+    tracker.record(nmpc, 2)
+
+    summary = tracker.summary()
+    assert summary["compiled_library_build_count"] == 2
+    assert summary["graph_rebuild_detected"] is True
+    assert summary["expected_capsule_rebuild_only"] is True
+    assert summary["hot_compiled_library_reused"] is True
+    assert summary["expected_capsule_rebuilds"] == [
+        {
+            "after_window": 0,
+            "reason": "madnlp_first_window_solver_options",
+        }
+    ]
 
 
 def test_compiled_nlp_tracker_requires_source_at_every_solve(tmp_path, monkeypatch):

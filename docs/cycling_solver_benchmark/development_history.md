@@ -5645,3 +5645,34 @@ Le premier incrément d'implémentation ajoute trois éléments reproductibles :
   décision Bioptim du RHO reduced; cette séparation est volontaire afin de
   valider les conventions de signe et les safeguards avant le premier essai
   biomécanique.
+
+## 42. Première validation Linux KKT/hystérésis (14 août 2026)
+
+Le run
+[`31765363296`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/31765363296)
+confirme sous Linux/CasADi `3.7.2+` le résultat dual obtenu sur macOS : le
+test discriminant mesure un écart maximal de premier pas de
+`8.87e-11`, inférieur au seuil `1e-10`, et conclut
+`dual_inputs_consumed=false`. Le warm-start MadNLP courant est donc primal;
+les multiplicateurs ne doivent pas être crédités d'un gain tant que libMad
+n'a pas passé ce test.
+
+Les solves MadNLP/MUMPS full et reduced ont tous deux certifié `5/5` RHO. Le
+job était rouge pour une autre raison : le premier RHO utilise volontairement
+un budget d'itérations sans limite murale, puis le profil online réduit ce
+budget à 73 itérations et 20 secondes. Cette option immutable force CasADi à
+créer une capsule `nlpsol` de démarrage puis une capsule chaude. Le code C du
+NLP est identique et la seconde capsule est conservée des RHO 1 à 4. L'audit
+distingue désormais ce rebuild d'option attendu d'une reconstruction du
+graphe; le gate exige la réutilisation de la capsule chaude.
+
+L'ablation ACADOS d'hystérésis n'a pas encore été mesurée : avec le couple
+signé `+0.15 N.m` (résistif pour `qdot<0`), la référence reduced échoue avant
+le premier SQP dans l'homotopie des contrôles. Le cas dépendant était ensuite
+absent et masquait la cause par une erreur de comptage. Le workflow poursuit
+maintenant les cas indépendants, archive les dépendances sautées dans
+`skipped-cases.tsv`, et expose une campagne ciblée `acados_active_set` : une
+référence reduced puis le même OCP avec garde de transitions et hystérésis
+`5/2 us`. La première comparaison doit être faite à couple nul pour valider
+le mécanisme; la résistance `0.15 N.m` ne sera retestée qu'après correction du
+bridge/homotopie initiale.

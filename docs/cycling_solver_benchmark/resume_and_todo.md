@@ -934,16 +934,18 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     cœurs physiques, sans parallélisme BLAS/OpenMP imbriqué. Après exécution,
     distinguer obligatoirement `fatigue_limited_candidate` de
     `unconfirmed_endurance_stop` et les succès natifs des fallbacks.
-49. [audit local négatif, diagnostic CI ajouté] Ne pas interpréter
+49. [audit macOS et Linux négatif] Ne pas interpréter
     `madnlp_dual_warm_start: applied=True` comme un warm-start dual effectif.
     La branche Bioptim copie bien `lam_g/lam_x` vers `lam_g0/lam_x0`, mais le
     runtime CasADi 3.8.0/libMad macOS testé produit exactement le même premier
     pas avec des multiplicateurs nuls ou de norme `1e6`, même avec
-    `dual_initialized=true`. Ajouter au runtime libMad une vraie
+    `dual_initialized=true`. Le test Linux CasADi `3.7.2+` du run
+    `31765363296` confirme `dual_inputs_consumed=false` avec un écart maximal
+    de `8.87e-11`. Ajouter au runtime libMad une vraie
     initialisation primal-dual, puis exiger un test discriminant `max_iter=1`
     avant l'ablation `off/constraints/bounds/all` sur le RHO. Tant que ce test
     échoue, conserver MadNLP en warm-start primal seulement.
-50. [prototype implémenté, CI à exécuter] Une hystérésis de Schmitt autour
+50. [prototype implémenté, campagne ciblée prête] Une hystérésis de Schmitt autour
     de `pd0`, avec `delta_off=2 us` et `delta_on=5 us`, ne change que 5 valeurs
     de classification sur 12 000 PW IPOPT et 2 sur 12 000 PW MadNLP dans les
     trajectoires 100 RHO disponibles. Elle ne supprime pas les vraies
@@ -952,8 +954,11 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     **prévu** : un nœud inactif n'est libéré qu'au-dessus de
     `pd0+delta_on`, un nœud actif n'est marqué inactif qu'en dessous de
     `pd0+delta_off`. Ne jamais imposer ce verrou au solve final : relâcher les
-    bornes temporaires et certifier le NLP original. Journaliser transitions,
-    faux verrous, coût, fatigue et P90.
+    bornes temporaires et certifier le NLP original. La campagne
+    `cycles=acados_active_set` compare désormais référence et hystérésis sur
+    une machine; commencer à couple nul, car le bridge reduced à
+    `signed:+0.15` échoue encore avant ACADOS. Journaliser transitions, faux
+    verrous, coût, fatigue et P90.
 51. [noyau mathématique testé, branchement OCP à faire] Prototyper le prédicteur paramétrique
     KKT sur le reduced/SX/Radau-5 avant de l'appliquer à ACADOS ou MadNLP :
     (a) rendre explicite le vecteur `p` regroupant état initial et bornes
