@@ -5830,7 +5830,16 @@ multiplicateurs produits par le système de projection
 est le multiplicateur de la projection, et non le nouveau multiplicateur du
 NLP. Une vraie variante primal-dual devra inclure le résidu de stationnarité
 dans le premier membre du Newton KKT et valider explicitement les conventions
-de signes avant injection. La campagne 30 RHO `31796843615` est lancée pour
-quantifier la fréquence d'acceptation de la variante primal-only en régime
-établi; elle ne doit pas être interprétée comme une validation de
-l'advanced-step primal-dual.
+de signes avant injection.
+
+La campagne 30 RHO
+[`31796843615`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/31796843615)
+confirme le rejet de la variante primal-only. Les deux cas certifient `30/30`;
+la correction n'est injectée qu'une fois sur 29 transferts. Les itérations
+chaudes augmentent de `1 200` à `1 231`, le temps solveur total de
+`30.973` à `31.490 s`, la médiane chaude de `0.880` à `0.904 s` et le P90
+de `1.156` à `1.348 s`. Les 29 projections ajoutent `4.935 s`, soit
+`0.170 s/transfert`, en dehors du temps solveur. Le coût exécuté ne diffère
+que de `2.41e-7`, l'AUC de `1.32e-9 cycle` et la capacité minimale de
+`9.5e-12` : il n'y a pas de biais scientifique détectable, mais aucun gain
+numérique. Cette projection ne doit pas être portée à Radau-5 ou MadNLP.

@@ -1003,11 +1003,15 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     corrections nuisibles. Le smoke Linux compilé `31796123514` donne le
     résultat opposé : une seule injection, `+4.1 %` de temps solveur total et
     environ `0.22 s` de projection par transfert, sans changement physique.
-    La campagne 30 RHO `31796843615` doit confirmer ou infirmer ce rejet en
-    régime établi. Ensuite, ne pas copier directement le dual de projection :
-    construire un vrai pas Newton KKT avec résidu de stationnarité, comparer
-    duals préservés/réinitialisés/prédits sous IPOPT, puis seulement envisager
-    Radau-5 et MadNLP primal-only.
+    Le run 30 RHO `31796843615` confirme le rejet : une seule injection,
+    `+31` itérations chaudes, `+0.517 s` de solveur, P90 `+16.6 %` et
+    `4.935 s` de surcharge KKT. Ne pas porter cette projection à Radau-5 ou
+    MadNLP. Ne pas copier directement le dual de projection : construire un
+    vrai pas Newton KKT avec résidu de stationnarité et de faisabilité,
+    reconstruire les duals actifs avec leurs signes, puis comparer sous IPOPT
+    les modes préservé/réinitialisé/prédit. L'injection devra améliorer une
+    norme KKT combinant primal, stationnarité et complémentarité, pas seulement
+    le maximum de défaut primal.
 
 La question causale est maintenant resserrée : une seule projection au RHO 19
 ne suffit pas, mais la séquence 19--36 conserve le bassin franchissant le RHO
