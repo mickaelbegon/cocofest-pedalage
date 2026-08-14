@@ -6430,6 +6430,17 @@ def test_benchmark_json_summary_contains_comparable_fatigue_metrics(tmp_path):
             "solver_reset_applied": True,
         }
     ]
+    result["transfer_active_set_guard_summaries"] = [
+        {
+            "window": 2,
+            "controls": {
+                "last_pulse_width_Biceps": {
+                    "hysteresis_enabled": True,
+                    "hysteresis_memory_used": True,
+                }
+            },
+        }
+    ]
     result["retry_same_rho_summaries"] = [
         {"target_rho": 10, "recovery": "alternate_pw_predictor"}
     ]
@@ -6536,6 +6547,10 @@ def test_benchmark_json_summary_contains_comparable_fatigue_metrics(tmp_path):
             "solver_reset_applied": True,
         }
     ]
+    assert row["transfer_active_set_guard_summaries"][0]["window"] == 2
+    assert row["transfer_active_set_guard_summaries"][0]["controls"][
+        "last_pulse_width_Biceps"
+    ]["hysteresis_memory_used"] is True
     assert row["retry_same_rho_summaries"] == [
         {"target_rho": 10, "recovery": "alternate_pw_predictor"}
     ]
@@ -7518,6 +7533,8 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert "--acados-control-homotopy-window-growth 10" in workflow
     assert "--acados-control-homotopy-window-max-radius 1e-5" in workflow
     assert "run_case sqp-irk-active-set-guard reduced" in workflow
+    assert "run_case sqp-irk-terminal-omega-0p3-active-set-guard reduced" in workflow
+    assert 'run_case sqp-irk-reference reduced 1 SQP IRK 5 5' in workflow
     assert "--acados-transfer-active-set-guard-radius 5e-4" in workflow
     assert "--acados-transfer-active-set-guard-margin 1" in workflow
     assert "--acados-transfer-active-set-threshold 5e-6" in workflow

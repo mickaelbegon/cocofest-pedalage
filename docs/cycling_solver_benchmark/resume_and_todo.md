@@ -956,7 +956,11 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     `pd0+delta_off`. Ne jamais imposer ce verrou au solve final : relâcher les
     bornes temporaires et certifier le NLP original. La campagne
     `cycles=acados_active_set` compare désormais référence et hystérésis sur
-    une machine; commencer à couple nul, car le bridge reduced à
+    une machine. Le premier essai a confirmé 19 nœuds libérés mais comparait
+    le vieux profil sans borne terminale et s'est arrêté au RHO 2 après un
+    overshoot de `7.54 rad/s`; l'expérience corrigée compare maintenant le
+    profil robuste `omega_T=-2*pi +/- 0.3 rad/s` avec et sans hystérésis.
+    Commencer à couple nul, car le bridge reduced à
     `signed:+0.15` échoue encore avant ACADOS. Journaliser transitions, faux
     verrous, coût, fatigue et P90.
 51. [noyau et second membre bornes testés, branchement OCP à faire] Prototyper le prédicteur paramétrique

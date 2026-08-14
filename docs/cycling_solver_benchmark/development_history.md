@@ -5676,3 +5676,16 @@ référence reduced puis le même OCP avec garde de transitions et hystérésis
 `5/2 us`. La première comparaison doit être faite à couple nul pour valider
 le mécanisme; la résistance `0.15 N.m` ne sera retestée qu'après correction du
 bridge/homotopie initiale.
+
+Le premier run ciblé
+[`31766563726`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/31766563726)
+a validé le câblage mais pas l'efficacité : référence et garde s'arrêtent au
+RHO 2. La garde a bien libéré 19 nœuds autour de 8 transitions, puis le
+rollout a présenté un overshoot de vitesse de `7.54 rad/s` et ACADOS a renvoyé
+`MINSTEP`. La cause est expérimentale : le témoin utilisait le vieux profil
+sans borne terminale de vitesse, alors que le candidat online robuste impose
+`omega_T=-2*pi +/- 0.3 rad/s`. L'A/B corrigé construit maintenant une seed
+ACADOS sur un RHO, puis compare sur 30 RHO ce profil terminal robuste avec et
+sans hystérésis. Les résumés détaillés de la garde sont conservés dans le JSON
+du benchmark et le gate exige que la mémoire de Schmitt soit effectivement
+utilisée.

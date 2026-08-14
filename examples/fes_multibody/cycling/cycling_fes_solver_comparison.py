@@ -3298,6 +3298,9 @@ def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
                 "acados_alternate_pw_predictor_summaries": (
                     result.get("acados_alternate_pw_predictor_summaries") or []
                 ),
+                "transfer_active_set_guard_summaries": (
+                    result.get("transfer_active_set_guard_summaries") or []
+                ),
                 "retry_same_rho_summaries": (
                     result.get("retry_same_rho_summaries") or []
                 ),

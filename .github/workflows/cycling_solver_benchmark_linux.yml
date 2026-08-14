@@ -1356,7 +1356,7 @@ jobs:
                   return 0
                 fi
               fi
-            elif [[ "$variant" == "sqp-irk-active-set-guard" ]]; then
+            elif [[ "$variant" == *"active-set-guard"* ]]; then
               common_seed="$GITHUB_WORKSPACE/acados-smoke-results/reference-reduced-feasible-seed.npz"
               if [[ ! -f "$common_seed" ]]; then
                 skip_case "The active-set A/B requires its preceding reduced ACADOS reference seed."
@@ -1673,7 +1673,7 @@ jobs:
                 --acados-transfer-bound-homotopy-max-refinements 16
               )
             fi
-            if [[ "$variant" == "sqp-irk-active-set-guard" ]]; then
+            if [[ "$variant" == *"active-set-guard"* ]]; then
               if [[ "$mechanics" != "reduced" ]]; then
                 echo "The phase-aligned PW guard is screened on reduced mechanics." >&2
                 return 2
@@ -1889,13 +1889,15 @@ jobs:
             done
           elif [[ "$ACADOS_ACTIVE_SET_ONLY" == "true" ]]; then
             # Focused reduced-mechanics A/B. The reference creates one
-            # ACADOS-certified seed; the second case changes only the
+            # ACADOS-certified seed. Both measured cases use the robust
+            # absolute terminal-cadence band; the second changes only the
             # phase-aligned pd0 active-set guard with Schmitt hysteresis.
             printf '%s\n' \
               sqp-irk-reference-reduced \
               > acados-smoke-results/reference-cases.txt
-            run_case sqp-irk-reference reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
-            run_case sqp-irk-active-set-guard reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
+            run_case sqp-irk-reference reduced 1 SQP IRK 5 5
+            run_case sqp-irk-terminal-omega-0p3 reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
+            run_case sqp-irk-terminal-omega-0p3-active-set-guard reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
           elif [[ "$ACADOS_PW_STABILITY_ONLY" == "true" ]]; then
             # Causal reduced-mechanics screen for the observed period-two PW
             # orbit. Keep one OCP per case on the same runner and change only
@@ -2207,6 +2209,26 @@ jobs:
               ((.acados_alternate_pw_predictor_summaries // []) | length > 0)
             ' "$result" || {
               echo "The alternate-PW retry case did not exercise its same-RHO recovery path." >&2
+              exit 1
+            }
+          fi
+          if [[ "$ACADOS_ACTIVE_SET_ONLY" == "true" ]]; then
+            baseline="acados-smoke-results/sqp-irk-terminal-omega-0p3-reduced/result.json"
+            guarded="acados-smoke-results/sqp-irk-terminal-omega-0p3-active-set-guard-reduced/result.json"
+            for result in "$baseline" "$guarded"; do
+              jq -e '
+                .results[0] |
+                (.error == null) and
+                (.validated_cycles == .requested_cycles)
+              ' "$result"
+            done
+            jq -e '
+              .results[0].transfer_active_set_guard_summaries as $guards |
+              (($guards // []) | length > 1) and
+              any($guards[].controls[]; .hysteresis_enabled == true) and
+              any($guards[].controls[]; .hysteresis_memory_used == true)
+            ' "$guarded" || {
+              echo "The active-set campaign did not exercise persistent hysteresis." >&2
               exit 1
             }
           fi
