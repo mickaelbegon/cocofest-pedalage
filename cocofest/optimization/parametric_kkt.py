@@ -27,6 +27,97 @@ class ActiveKktRows:
     sources: tuple[tuple[str, int, str], ...]
 
 
+def active_kkt_rhs_from_bound_changes(
+    sources: tuple[tuple[str, int, str], ...],
+    old_variable_lower_bounds: np.ndarray,
+    old_variable_upper_bounds: np.ndarray,
+    new_variable_lower_bounds: np.ndarray,
+    new_variable_upper_bounds: np.ndarray,
+    old_constraint_lower_bounds: np.ndarray,
+    old_constraint_upper_bounds: np.ndarray,
+    new_constraint_lower_bounds: np.ndarray,
+    new_constraint_upper_bounds: np.ndarray,
+    *,
+    equality_tolerance: float = 1e-12,
+) -> np.ndarray:
+    """Return the active-row target displacement for moving NLP bounds.
+
+    For an active row written ``a(z) - b = 0``, linearization gives
+    ``J dz = db``.  This routine produces that ``db`` in the same order as
+    :func:`assemble_active_kkt_rows`.  It therefore avoids introducing fake
+    symbolic parameters when a receding-horizon datum already enters CasADi
+    through ``lbx/ubx/lbg/ubg``.
+    """
+
+    arrays = {
+        "old_lbx": np.asarray(old_variable_lower_bounds, dtype=float).reshape(-1),
+        "old_ubx": np.asarray(old_variable_upper_bounds, dtype=float).reshape(-1),
+        "new_lbx": np.asarray(new_variable_lower_bounds, dtype=float).reshape(-1),
+        "new_ubx": np.asarray(new_variable_upper_bounds, dtype=float).reshape(-1),
+        "old_lbg": np.asarray(old_constraint_lower_bounds, dtype=float).reshape(-1),
+        "old_ubg": np.asarray(old_constraint_upper_bounds, dtype=float).reshape(-1),
+        "new_lbg": np.asarray(new_constraint_lower_bounds, dtype=float).reshape(-1),
+        "new_ubg": np.asarray(new_constraint_upper_bounds, dtype=float).reshape(-1),
+    }
+    if arrays["old_lbx"].shape != arrays["old_ubx"].shape or arrays[
+        "new_lbx"
+    ].shape != arrays["old_lbx"].shape or arrays["new_ubx"].shape != arrays[
+        "old_lbx"
+    ].shape:
+        raise ValueError("Old and new variable bounds must have identical shapes.")
+    if arrays["old_lbg"].shape != arrays["old_ubg"].shape or arrays[
+        "new_lbg"
+    ].shape != arrays["old_lbg"].shape or arrays["new_ubg"].shape != arrays[
+        "old_lbg"
+    ].shape:
+        raise ValueError("Old and new constraint bounds must have identical shapes.")
+    if not np.isfinite(equality_tolerance) or equality_tolerance < 0.0:
+        raise ValueError("The equality tolerance must be finite and non-negative.")
+
+    target_steps = []
+    for kind, index, side in sources:
+        if kind == "variable":
+            lower_key, upper_key = "lbx", "ubx"
+        elif kind == "constraint":
+            lower_key, upper_key = "lbg", "ubg"
+        else:
+            raise ValueError(f"Unknown active-row kind '{kind}'.")
+        if index < 0 or index >= arrays[f"old_{lower_key}"].size:
+            raise IndexError(f"Active-row index {index} is out of range for {kind} bounds.")
+        if side == "lower":
+            target_step = (
+                arrays[f"new_{lower_key}"][index]
+                - arrays[f"old_{lower_key}"][index]
+            )
+        elif side == "upper":
+            target_step = (
+                arrays[f"new_{upper_key}"][index]
+                - arrays[f"old_{upper_key}"][index]
+            )
+        elif side == "equality":
+            lower_step = (
+                arrays[f"new_{lower_key}"][index]
+                - arrays[f"old_{lower_key}"][index]
+            )
+            upper_step = (
+                arrays[f"new_{upper_key}"][index]
+                - arrays[f"old_{upper_key}"][index]
+            )
+            if not np.isfinite(lower_step) or not np.isfinite(upper_step):
+                raise ValueError("A moving equality bound must remain finite.")
+            if abs(lower_step - upper_step) > equality_tolerance:
+                raise ValueError(
+                    "Lower and upper displacements of a moving equality disagree."
+                )
+            target_step = 0.5 * (lower_step + upper_step)
+        else:
+            raise ValueError(f"Unknown active-row side '{side}'.")
+        if not np.isfinite(target_step):
+            raise ValueError("An active bound target displacement is not finite.")
+        target_steps.append(float(target_step))
+    return np.asarray(target_steps, dtype=float)
+
+
 def assemble_active_kkt_rows(
     variable_values: np.ndarray,
     constraint_values: np.ndarray,

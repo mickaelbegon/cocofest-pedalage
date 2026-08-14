@@ -959,7 +959,7 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     une machine; commencer à couple nul, car le bridge reduced à
     `signed:+0.15` échoue encore avant ACADOS. Journaliser transitions, faux
     verrous, coût, fatigue et P90.
-51. [noyau mathématique testé, branchement OCP à faire] Prototyper le prédicteur paramétrique
+51. [noyau et second membre bornes testés, branchement OCP à faire] Prototyper le prédicteur paramétrique
     KKT sur le reduced/SX/Radau-5 avant de l'appliquer à ACADOS ou MadNLP :
     (a) rendre explicite le vecteur `p` regroupant état initial et bornes
     terminales; (b) extraire Hessienne de Lagrange, Jacobienne et ensemble
@@ -970,7 +970,10 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     résidus initiaux, itérations, médiane/P90, recoveries, coût et quatre AUC.
     L'hystérésis du point 50 protège les changements d'ensemble actif; elle ne
     remplace pas le prédicteur. Exploiter l'intervalle d'un cycle pour calculer
-    le RHO suivant en advanced-step.
+    le RHO suivant en advanced-step. Le code sait maintenant convertir les
+    déplacements `lbx/ubx/lbg/ubg` des lignes actives en second membre
+    `J_A Delta z = Delta b_A`; il reste à construire Hessienne/Jacobienne
+    sparse depuis l'interface Bioptim et à comparer son résidu à `repeat`.
 
 La question causale est maintenant resserrée : une seule projection au RHO 19
 ne suffit pas, mais la séquence 19--36 conserve le bassin franchissant le RHO

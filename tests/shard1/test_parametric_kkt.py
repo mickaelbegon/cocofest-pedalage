@@ -2,10 +2,47 @@ import numpy as np
 import pytest
 
 from cocofest.optimization.parametric_kkt import (
+    active_kkt_rhs_from_bound_changes,
     assemble_active_kkt_rows,
     kkt_prediction_passes_residual_guard,
     solve_parametric_kkt_sensitivity,
 )
+
+
+def test_active_kkt_rhs_tracks_variable_and_constraint_target_motion():
+    target_step = active_kkt_rhs_from_bound_changes(
+        sources=(
+            ("constraint", 0, "equality"),
+            ("constraint", 1, "upper"),
+            ("variable", 0, "equality"),
+            ("variable", 1, "lower"),
+        ),
+        old_variable_lower_bounds=np.array([0.0, 1.0]),
+        old_variable_upper_bounds=np.array([0.0, 3.0]),
+        new_variable_lower_bounds=np.array([-2.0, 1.25]),
+        new_variable_upper_bounds=np.array([-2.0, 3.0]),
+        old_constraint_lower_bounds=np.array([4.0, -np.inf]),
+        old_constraint_upper_bounds=np.array([4.0, 5.0]),
+        new_constraint_lower_bounds=np.array([3.5, -np.inf]),
+        new_constraint_upper_bounds=np.array([3.5, 5.75]),
+    )
+
+    np.testing.assert_allclose(target_step, [-0.5, 0.75, -2.0, 0.25])
+
+
+def test_active_kkt_rhs_rejects_equality_that_opens_into_an_interval():
+    with pytest.raises(ValueError, match="equality disagree"):
+        active_kkt_rhs_from_bound_changes(
+            sources=(("variable", 0, "equality"),),
+            old_variable_lower_bounds=np.array([1.0]),
+            old_variable_upper_bounds=np.array([1.0]),
+            new_variable_lower_bounds=np.array([2.0]),
+            new_variable_upper_bounds=np.array([3.0]),
+            old_constraint_lower_bounds=np.empty(0),
+            old_constraint_upper_bounds=np.empty(0),
+            new_constraint_lower_bounds=np.empty(0),
+            new_constraint_upper_bounds=np.empty(0),
+        )
 
 
 def test_active_kkt_rows_include_equalities_and_multiplier_supported_bounds():
