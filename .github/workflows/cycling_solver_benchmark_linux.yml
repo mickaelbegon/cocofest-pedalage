@@ -1033,7 +1033,7 @@ jobs:
 
   prepare-acados-stack:
     name: Prepare the cached ACADOS numerical stack
-    if: ${{ inputs.cycles != 'screen' && inputs.cycles != 'full_horizon' && inputs.cycles != 'pw_transfer_ablation' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles_per_window == '1' }}
+    if: ${{ inputs.cycles != 'screen' && inputs.cycles != 'full_horizon' && inputs.cycles != 'pw_transfer_ablation' && inputs.cycles != 'kkt_predictor' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles_per_window == '1' }}
     needs: prepare-seed
     runs-on: ${{ inputs.runner_label }}
     timeout-minutes: 120
@@ -2590,6 +2590,13 @@ jobs:
       fail-fast: false
       max-parallel: 3
       matrix:
+        solver: [ipopt, madnlp, fatrop]
+        campaign: ["${{ inputs.cycles }}"]
+        exclude:
+          - campaign: kkt_predictor
+            solver: madnlp
+          - campaign: kkt_predictor
+            solver: fatrop
         include:
           - solver: ipopt
             backend: mumps
@@ -3605,7 +3612,7 @@ jobs:
 
   report:
     name: Aggregate Kevin benchmark
-    if: ${{ always() && inputs.cycles != 'screen' && inputs.cycles != 'acados' && inputs.cycles != 'acados_guard' && inputs.cycles != 'acados_active_set' && inputs.cycles != 'acados_pw_stability' && inputs.cycles != 'acados_recovery' && inputs.cycles != 'acados_lazy_recovery' && inputs.cycles != 'acados_homotopy' && inputs.cycles != 'acados_reduced_100' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles != 'acados_dropout' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles != 'full_horizon' }}
+    if: ${{ always() && inputs.cycles != 'screen' && inputs.cycles != 'acados' && inputs.cycles != 'acados_guard' && inputs.cycles != 'acados_active_set' && inputs.cycles != 'acados_pw_stability' && inputs.cycles != 'acados_recovery' && inputs.cycles != 'acados_lazy_recovery' && inputs.cycles != 'acados_homotopy' && inputs.cycles != 'acados_reduced_100' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles != 'acados_dropout' && inputs.cycles != 'kkt_predictor' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles != 'full_horizon' }}
     needs: [benchmark, acados-smoke]
     runs-on: ubuntu-24.04
     permissions:

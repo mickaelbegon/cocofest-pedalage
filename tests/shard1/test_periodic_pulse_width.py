@@ -7645,6 +7645,13 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert "Validate the paired IPOPT KKT ablation" in workflow
     assert "parametric_kkt_prediction_audits" in workflow
     assert "cycling-fatigue-linux-ipopt-kkt-predictor-reduced" in workflow
+    assert 'campaign: ["${{ inputs.cycles }}"]' in workflow
+    assert "- campaign: kkt_predictor\n            solver: madnlp" in workflow
+    assert "- campaign: kkt_predictor\n            solver: fatrop" in workflow
+    prepare_acados = workflow.split("\n  prepare-acados-stack:", maxsplit=1)[1].split(
+        "\n  acados-smoke:", maxsplit=1
+    )[0]
+    assert "inputs.cycles != 'kkt_predictor'" in prepare_acados
     assert "--max-consecutive-failing 2" in workflow
     assert "--retry-failed-rho-without-advance" in workflow
     assert "fatigue_endurance_radau5" in workflow
