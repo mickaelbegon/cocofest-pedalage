@@ -5697,3 +5697,14 @@ ACADOS sur un RHO, puis compare sur 30 RHO ce profil terminal robuste avec et
 sans hystérésis. Les résumés détaillés de la garde sont conservés dans le JSON
 du benchmark et le gate exige que la mémoire de Schmitt soit effectivement
 utilisée.
+
+Le second run ciblé
+[`31766910662`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/31766910662)
+converge `30/30` avec et sans garde, avec coût, fatigue et capacité minimale
+identiques, mais révèle que la garde n'a jamais été appelée. Le profil
+terminal robuste utilise `--acados-control-homotopy-release-final-radius`; il
+ne conserve donc aucune trust region inter-RHO que la garde puisse élargir.
+L'ablation finale compare désormais deux cas ayant tous deux une trust region
+PW de `+/-10 us`, avec ou sans élargissement local/hystérésis. Le témoin
+robuste sans trust du même run reste la référence externe permettant de
+détecter un biais d'optimalité.

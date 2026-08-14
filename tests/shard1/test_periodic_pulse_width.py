@@ -7534,7 +7534,12 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert "--acados-control-homotopy-window-growth 10" in workflow
     assert "--acados-control-homotopy-window-max-radius 1e-5" in workflow
     assert "run_case sqp-irk-active-set-guard reduced" in workflow
-    assert "run_case sqp-irk-terminal-omega-0p3-active-set-guard reduced" in workflow
+    assert "run_case sqp-irk-terminal-omega-0p3-trust-10us reduced" in workflow
+    assert (
+        "run_case sqp-irk-terminal-omega-0p3-trust-10us-active-set-guard reduced"
+        in workflow
+    )
+    assert "--acados-transfer-pulse-width-trust-radius 1e-5" in workflow
     assert 'run_case sqp-irk-reference reduced 1 SQP IRK 5 5' in workflow
     assert "--acados-transfer-active-set-guard-radius 5e-4" in workflow
     assert "--acados-transfer-active-set-guard-margin 1" in workflow

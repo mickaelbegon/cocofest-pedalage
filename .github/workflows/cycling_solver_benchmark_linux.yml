@@ -1460,6 +1460,12 @@ jobs:
               # stopped repeat/lag2 at RHO 2.
               solver_options+=(--acados-control-homotopy-release-final-radius)
             fi
+            if [[ "$variant" == *"trust-10us"* ]]; then
+              # Paired active-set ablation: both cases retain exactly the same
+              # inter-RHO +/-10 us control trust region. The guarded case may
+              # widen it only around phase-aligned recruitment transitions.
+              solver_options+=(--acados-transfer-pulse-width-trust-radius 1e-5)
+            fi
             if [[ "$variant" == *"pw-prox-1e2"* ]]; then
               # Weak stagewise proximity to the prepared previous-cycle PW.
               # The target is recentered at every RHO; executed fatigue is
@@ -1896,8 +1902,8 @@ jobs:
               sqp-irk-reference-reduced \
               > acados-smoke-results/reference-cases.txt
             run_case sqp-irk-reference reduced 1 SQP IRK 5 5
-            run_case sqp-irk-terminal-omega-0p3 reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
-            run_case sqp-irk-terminal-omega-0p3-active-set-guard reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
+            run_case sqp-irk-terminal-omega-0p3-trust-10us reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
+            run_case sqp-irk-terminal-omega-0p3-trust-10us-active-set-guard reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
           elif [[ "$ACADOS_PW_STABILITY_ONLY" == "true" ]]; then
             # Causal reduced-mechanics screen for the observed period-two PW
             # orbit. Keep one OCP per case on the same runner and change only
@@ -2215,15 +2221,17 @@ jobs:
             }
           fi
           if [[ "$ACADOS_ACTIVE_SET_ONLY" == "true" ]]; then
-            baseline="acados-smoke-results/sqp-irk-terminal-omega-0p3-reduced/result.json"
-            guarded="acados-smoke-results/sqp-irk-terminal-omega-0p3-active-set-guard-reduced/result.json"
-            for result in "$baseline" "$guarded"; do
-              jq -e '
-                .results[0] |
-                (.error == null) and
-                (.validated_cycles == .requested_cycles)
-              ' "$result"
-            done
+            baseline="acados-smoke-results/sqp-irk-terminal-omega-0p3-trust-10us-reduced/result.json"
+            guarded="acados-smoke-results/sqp-irk-terminal-omega-0p3-trust-10us-active-set-guard-reduced/result.json"
+            jq -e '
+              .results[0] |
+              (.error == null) and ((.attempted_windows // 0) > 0)
+            ' "$baseline"
+            jq -e '
+              .results[0] |
+              (.error == null) and
+              (.validated_cycles == .requested_cycles)
+            ' "$guarded"
             jq -e '
               .results[0].transfer_active_set_guard_summaries as $guards |
               (($guards // []) | length > 1) and
