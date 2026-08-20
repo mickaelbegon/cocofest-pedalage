@@ -5558,7 +5558,7 @@ def build_cli() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--terminal-qdot-regularization-target-source",
-        choices=("initial", "previous"),
+        choices=("initial", "previous", "first_node"),
         default="previous",
     )
     parser.add_argument(

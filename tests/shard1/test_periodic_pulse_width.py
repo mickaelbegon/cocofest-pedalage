@@ -8345,6 +8345,20 @@ def test_regularized_mhe_cli_exposes_previous_window_targets_and_terminal_slack(
     assert args.periodic_ipopt_refinement_each_window is False
 
 
+def test_comparison_cli_exposes_first_node_terminal_velocity_target():
+    args = comparison_example.build_cli().parse_args(
+        [
+            "--terminal-qdot-regularization-weight",
+            "0.1",
+            "--terminal-qdot-regularization-target-source",
+            "first_node",
+        ]
+    )
+
+    assert args.terminal_qdot_regularization_weight == 0.1
+    assert args.terminal_qdot_regularization_target_source == "first_node"
+
+
 def test_acados_internal_wheel_speed_guard_keeps_physical_audit_margin_separate():
     args = periodic_example.build_argument_parser().parse_args(
         [
