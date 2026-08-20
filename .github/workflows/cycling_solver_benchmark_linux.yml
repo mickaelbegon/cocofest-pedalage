@@ -10,7 +10,7 @@ on:
         default: ubuntu-24.04
         type: string
       cycles:
-        description: Number of RHO solves, or "screen", "acados", "acados_guard", "acados_active_set", "acados_pw_stability", "acados_recovery", "acados_lazy_recovery", "acados_homotopy", "acados_reduced_100", "acados_hybrid", "acados_reduced_recovery", "acados_reduced_fallback", "acados_recovery_speed", "acados_dropout", "pw_transfer_ablation", "kkt_predictor", "radau5_100", "radau35_comparison", "fatigue_endurance", "fatigue_endurance_radau5", or "full_horizon"
+        description: Number of RHO solves, or "screen", "acados", "acados_guard", "acados_active_set", "acados_pw_stability", "acados_recovery", "acados_lazy_recovery", "acados_homotopy", "acados_reduced_100", "acados_hybrid", "acados_reduced_recovery", "acados_reduced_fallback", "acados_recovery_speed", "acados_dropout", "pw_transfer_ablation", "kkt_predictor", "ipopt_dual", "radau5_100", "radau35_comparison", "fatigue_endurance", "fatigue_endurance_radau5", or "full_horizon"
         required: true
         default: "100"
         type: string
@@ -1033,7 +1033,7 @@ jobs:
 
   prepare-acados-stack:
     name: Prepare the cached ACADOS numerical stack
-    if: ${{ inputs.cycles != 'screen' && inputs.cycles != 'full_horizon' && inputs.cycles != 'pw_transfer_ablation' && inputs.cycles != 'kkt_predictor' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles_per_window == '1' }}
+    if: ${{ inputs.cycles != 'screen' && inputs.cycles != 'full_horizon' && inputs.cycles != 'pw_transfer_ablation' && inputs.cycles != 'kkt_predictor' && inputs.cycles != 'ipopt_dual' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles_per_window == '1' }}
     needs: prepare-seed
     runs-on: ${{ inputs.runner_label }}
     timeout-minutes: 120
@@ -1157,7 +1157,7 @@ jobs:
 
   acados-smoke:
     name: ACADOS — sequential full/reduced and option screen
-    if: ${{ inputs.cycles != 'screen' && inputs.cycles != 'full_horizon' && inputs.cycles != 'pw_transfer_ablation' && inputs.cycles != 'kkt_predictor' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles != 'acados_dropout' && inputs.cycles_per_window == '1' }}
+    if: ${{ inputs.cycles != 'screen' && inputs.cycles != 'full_horizon' && inputs.cycles != 'pw_transfer_ablation' && inputs.cycles != 'kkt_predictor' && inputs.cycles != 'ipopt_dual' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles != 'acados_dropout' && inputs.cycles_per_window == '1' }}
     needs: [prepare-seed, prepare-acados-stack]
     runs-on: ${{ inputs.runner_label }}
     timeout-minutes: 240
@@ -2590,13 +2590,13 @@ jobs:
       fail-fast: false
       max-parallel: 3
       matrix:
-        solver: ${{ fromJSON(inputs.cycles == 'kkt_predictor' && '["ipopt"]' || '["ipopt","madnlp","fatrop"]') }}
+        solver: ${{ fromJSON((inputs.cycles == 'kkt_predictor' || inputs.cycles == 'ipopt_dual') && '["ipopt"]' || '["ipopt","madnlp","fatrop"]') }}
     env:
       # IPOPT uses the wheel ABI; source-built CasADi/libMad follows
       # Conda's modern libstdc++ ABI.
       CASADI_CXX_ABI: ${{ matrix.solver == 'madnlp' && '1' || '0' }}
       PYTHONPATH: ${{ github.workspace }}
-      BENCHMARK_RHOS: ${{ inputs.cycles == 'pw_transfer_ablation' && '100' || inputs.cycles == 'kkt_predictor' && inputs.refined_collocation_rhos || inputs.cycles == 'radau5_100' && inputs.radau5_endurance_rhos || inputs.cycles == 'radau35_comparison' && inputs.radau35_comparison_rhos || (inputs.cycles == 'fatigue_endurance' || inputs.cycles == 'fatigue_endurance_radau5') && inputs.fatigue_endurance_max_rhos || inputs.cycles }}
+      BENCHMARK_RHOS: ${{ inputs.cycles == 'pw_transfer_ablation' && '100' || (inputs.cycles == 'kkt_predictor' || inputs.cycles == 'ipopt_dual') && inputs.refined_collocation_rhos || inputs.cycles == 'radau5_100' && inputs.radau5_endurance_rhos || inputs.cycles == 'radau35_comparison' && inputs.radau35_comparison_rhos || (inputs.cycles == 'fatigue_endurance' || inputs.cycles == 'fatigue_endurance_radau5') && inputs.fatigue_endurance_max_rhos || inputs.cycles }}
       BENCHMARK_CYCLES_PER_WINDOW: ${{ inputs.cycles_per_window }}
       BENCHMARK_ASSISTANCE: ${{ inputs.crank_assistance_nm }}
       BENCHMARK_Q_SLACK: ${{ inputs.terminal_wheel_q_slack }}
@@ -2935,6 +2935,45 @@ jobs:
         with:
           name: cycling-fatigue-linux-ipopt-reduced-${{ github.run_id }}
           path: benchmark-results/ipopt-reduced/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Run IPOPT reduced with complete previous duals
+        if: ${{ matrix.solver == 'ipopt' && inputs.cycles == 'ipopt_dual' }}
+        env:
+          DUAL_WARM_START: all
+        run: bash .github/scripts/run_cycling_benchmark_case.sh ipopt-dual-all ipopt reduced mumps collocation benchmark-results "$BENCHMARK_CYCLES" "${{ inputs.compile_nlp_evaluators }}"
+
+      - name: Validate the IPOPT complete-dual ablation
+        if: ${{ matrix.solver == 'ipopt' && inputs.cycles == 'ipopt_dual' }}
+        run: |
+          baseline="benchmark-results/ipopt-reduced/result.json"
+          candidate="benchmark-results/ipopt-dual-all-reduced/result.json"
+          jq -e '.results[0].success == true' "$candidate"
+          python - "$baseline" "$candidate" <<'PY'
+          import json
+          import math
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as stream:
+              baseline = json.load(stream)["results"][0]
+          with open(sys.argv[2], encoding="utf-8") as stream:
+              candidate = json.load(stream)["results"][0]
+          baseline_cost = float(baseline["executed_fatigue_objective"])
+          candidate_cost = float(candidate["executed_fatigue_objective"])
+          relative_cost = abs(candidate_cost - baseline_cost) / max(1.0, abs(baseline_cost))
+          if not math.isfinite(relative_cost) or relative_cost > 1e-7:
+              raise SystemExit(f"Complete dual transfer changed executed cost by {relative_cost:.3e}")
+          print(f"Complete dual-transfer relative executed-cost difference: {relative_cost:.3e}")
+          PY
+
+      - name: Checkpoint IPOPT complete-dual ablation
+        if: ${{ always() && matrix.solver == 'ipopt' && inputs.cycles == 'ipopt_dual' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: cycling-fatigue-linux-ipopt-dual-all-${{ github.run_id }}
+          path: benchmark-results/ipopt-dual-all-reduced/
           if-no-files-found: warn
           retention-days: 30
 
@@ -3300,6 +3339,7 @@ jobs:
           BENCHMARK_CAMPAIGN: ${{ inputs.cycles }}
           COMPILE_NLP_EVALUATORS: ${{ inputs.compile_nlp_evaluators }}
           PARAMETRIC_KKT_ABLATION: ${{ inputs.cycles == 'kkt_predictor' }}
+          IPOPT_DUAL_ABLATION: ${{ inputs.cycles == 'ipopt_dual' }}
         run: |
           case "$BENCHMARK_SOLVER" in
             ipopt|madnlp|fatrop) expected=2 ;;
@@ -3307,6 +3347,9 @@ jobs:
           esac
           if [[ "$PARAMETRIC_KKT_ABLATION" == "true" && "$BENCHMARK_SOLVER" == "ipopt" ]]; then
             expected=$((expected + 3))
+          fi
+          if [[ "$IPOPT_DUAL_ABLATION" == "true" && "$BENCHMARK_SOLVER" == "ipopt" ]]; then
+            expected=$((expected + 1))
           fi
           if [[ "$BENCHMARK_CAMPAIGN" == "fatigue_endurance" ]]; then
             expected=1
@@ -3608,7 +3651,7 @@ jobs:
 
   report:
     name: Aggregate Kevin benchmark
-    if: ${{ always() && inputs.cycles != 'screen' && inputs.cycles != 'acados' && inputs.cycles != 'acados_guard' && inputs.cycles != 'acados_active_set' && inputs.cycles != 'acados_pw_stability' && inputs.cycles != 'acados_recovery' && inputs.cycles != 'acados_lazy_recovery' && inputs.cycles != 'acados_homotopy' && inputs.cycles != 'acados_reduced_100' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles != 'acados_dropout' && inputs.cycles != 'kkt_predictor' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles != 'full_horizon' }}
+    if: ${{ always() && inputs.cycles != 'screen' && inputs.cycles != 'acados' && inputs.cycles != 'acados_guard' && inputs.cycles != 'acados_active_set' && inputs.cycles != 'acados_pw_stability' && inputs.cycles != 'acados_recovery' && inputs.cycles != 'acados_lazy_recovery' && inputs.cycles != 'acados_homotopy' && inputs.cycles != 'acados_reduced_100' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles != 'acados_dropout' && inputs.cycles != 'kkt_predictor' && inputs.cycles != 'ipopt_dual' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles != 'full_horizon' }}
     needs: [benchmark, acados-smoke]
     runs-on: ubuntu-24.04
     permissions:
