@@ -7638,6 +7638,7 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert "--common-initial-solution-recenter-first-node-bounds" in active_set_seed_bridge
     assert "--adopt-common-initial-solution-warmup-cycles" in active_set_seed_bridge
     assert "--acados-initial-irk-rollout" in active_set_seed_bridge
+    assert "--disable-periodic-fes-warmup-projection" in active_set_seed_bridge
     assert "--acados-transfer-active-set-guard-radius 5e-4" in workflow
     assert "--acados-transfer-active-set-guard-margin 1" in workflow
     assert "--acados-transfer-active-set-threshold 5e-6" in workflow

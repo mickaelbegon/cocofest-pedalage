@@ -1504,6 +1504,13 @@ jobs:
               )
               if [[ "$variant" == "sqp-irk-reference" && "$mechanics" == "reduced" ]]; then
                 solver_options+=(--acados-initial-irk-rollout)
+              else
+                # The dependent active-set cases load the status-0 ACADOS
+                # shooting trajectory produced immediately above.  Projecting
+                # its Ding states a second time changed an exact native seed
+                # into a 9.63e-2-defect seed under resistance and made the
+                # terminal-omega continuation fail at its first tightening.
+                solver_options+=(--disable-periodic-fes-warmup-projection)
               fi
             fi
             if [[ "$variant" == "sqp-irk-qp-hot" ]]; then
