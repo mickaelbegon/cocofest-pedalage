@@ -7746,11 +7746,11 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
         'terminal-qdot-reg-1"*'
     )
     assert (
-        "run_case sqp-irk-two-stage-fast-guard-2p6-trust-10us-terminal-qdot-reg-100 reduced"
+        "run_case sqp-irk-two-stage-fast-guard-2p6-trust-10us-terminal-omega-0p5 reduced"
         in workflow
     )
     assert (
-        "run_case sqp-irk-two-stage-fast-guard-2p6-trust-10us-terminal-omega-0p5 reduced"
+        "--acados-terminal-wheel-qdot-homotopy-margins 2.6,2.5,2,1.5,1,0.5"
         in workflow
     )
     assert '--cycles-per-window "$window_cycles"' in workflow

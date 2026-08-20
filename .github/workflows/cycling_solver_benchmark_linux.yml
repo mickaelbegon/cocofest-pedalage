@@ -1477,10 +1477,18 @@ jobs:
               solver_options+=(--acados-failed-rho-alternate-pw-predictor)
             fi
             if [[ "$variant" == *"terminal-omega-0p5"* ]]; then
-              solver_options+=(
-                --terminal-wheel-qdot-bound-margin 0.5
-                --acados-terminal-wheel-qdot-homotopy-margins 3,2.5,2,1.5,1,0.5
-              )
+              solver_options+=(--terminal-wheel-qdot-bound-margin 0.5)
+              if [[ "$variant" == *"fast-guard-2p6"* ]]; then
+                # The terminal continuation must remain inside the asymmetric
+                # fast path bound at every stage.
+                solver_options+=(
+                  --acados-terminal-wheel-qdot-homotopy-margins 2.6,2.5,2,1.5,1,0.5
+                )
+              else
+                solver_options+=(
+                  --acados-terminal-wheel-qdot-homotopy-margins 3,2.5,2,1.5,1,0.5
+                )
+              fi
             elif [[ "$variant" == *"terminal-omega-0p3"* ]]; then
               solver_options+=(
                 --terminal-wheel-qdot-bound-margin 0.3
@@ -2031,9 +2039,9 @@ jobs:
               if (( ACADOS_SMOKE_RHOS <= 5 )) && [[ "$ACADOS_WINDOW_CYCLES" == "2" ]]; then
                 # The unregularized two-cycle horizon ends at the fast omega
                 # bound and the shifted RHO 2 immediately MINSTEPs. Compare
-                # a stronger soft cost and one explicit terminal invariant-set
-                # candidate before extending anything beyond this gate.
-                run_case sqp-irk-two-stage-fast-guard-2p6-trust-10us-terminal-qdot-reg-100 reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
+                # The soft weights through 100 are already rejected. Test the
+                # explicit terminal invariant-set candidate before extending
+                # anything beyond this gate.
                 run_case sqp-irk-two-stage-fast-guard-2p6-trust-10us-terminal-omega-0p5 reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
               elif (( ACADOS_SMOKE_RHOS <= 5 )); then
                 # The 5-RHO gate keeps both controls as negative evidence.
@@ -2373,15 +2381,14 @@ jobs:
             memoryless="acados-smoke-results/${active_set_prefix}-active-set-guard-memoryless-reduced/result.json"
             guarded="acados-smoke-results/${active_set_prefix}-active-set-guard-reduced/result.json"
             if [[ "$ACADOS_WINDOW_CYCLES" == "2" && "$BENCHMARK_ASSISTANCE" == signed:+* ]]; then
-              terminal_soft="acados-smoke-results/${active_set_prefix}-terminal-qdot-reg-100-reduced/result.json"
               terminal_set="acados-smoke-results/${active_set_prefix}-terminal-omega-0p5-reduced/result.json"
-              jq -e '.results[0].error == null' "$baseline" "$terminal_soft" "$terminal_set"
-              jq -s -e '
-                any(.[].results[0];
-                  (.error == null) and
-                  (.validated_cycles == .requested_cycles))
-              ' "$terminal_soft" "$terminal_set" || {
-                echo "Neither soft terminal-cadence candidate certified the two-cycle gate." >&2
+              jq -e '.results[0].error == null' "$baseline" "$terminal_set"
+              jq -e '
+                .results[0] |
+                (.error == null) and
+                (.validated_cycles == .requested_cycles)
+              ' "$terminal_set" || {
+                echo "The terminal cadence set did not certify the two-cycle gate." >&2
                 exit 1
               }
             else
