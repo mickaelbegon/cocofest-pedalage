@@ -792,6 +792,21 @@ partir du JSON de synthèse. Il ne contient volontairement pas `lam_x` ni
 `all` doit conserver ces multiplicateurs en mémoire dans le même processus, ou
 introduire une sérialisation explicite et vérifiée de leur ordre.
 
+Le predictor advanced-step KKT n'est pas retenu dans la méthode active. Un
+vrai pas Newton primal-dual avec garde de faisabilité, stationnarité, signes
+et complémentarité a été testé sur cinq RHO Linux : aucune des quatre
+corrections ne passe le garde-fou et le calcul ajoute environ `0.47 s/RHO`.
+La linéarisation à ensemble actif fixé ne représente pas le déplacement non
+linéaire important produit par le shift d'un cycle. Sur 30 RHO compiled, le
+transfert IPOPT complet `lam_x+lam_g` augmente aussi les itérations chaudes
+(`1 207 -> 1 226`) et le P90 (`1.286 -> 1.342 s`) par rapport au mode
+`bounds`. La méthode recommandée conserve donc seulement `lam_x`; elle ne
+paie aucun audit KKT dans la boucle de production. Les preuves détaillées sont
+les runs
+[`32363186429`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/32363186429)
+et
+[`32364461733`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/32364461733).
+
 Le même export active l'audit de la carte d'intégration sur le seed initial et
 localise l'intervalle, le cycle, le nœud local et l'état qui portent l'écart
 maximal. R3 et R5 peuvent ainsi être comparés sur le même diagnostic DOP853;

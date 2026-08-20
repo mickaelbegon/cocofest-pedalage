@@ -982,7 +982,7 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     1 632, change 86 labels et n'améliore pas le P90. La tentative résistante
     `31793240281` échoue dans le bridge initial avant l'ablation; construire
     d'abord une seed ACADOS certifiée au même couple.
-51. [prototype OCP injecté, ablation Linux/Radau-5 à faire] Prototyper le prédicteur paramétrique
+51. [terminé, predictor et dual complet rejetés] Prototyper le prédicteur paramétrique
     KKT sur le reduced/SX/Radau-5 avant de l'appliquer à ACADOS ou MadNLP :
     (a) rendre explicite le vecteur `p` regroupant état initial et bornes
     terminales; (b) extraire Hessienne de Lagrange, Jacobienne et ensemble
@@ -1011,7 +1011,16 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
     reconstruire les duals actifs avec leurs signes, puis comparer sous IPOPT
     les modes préservé/réinitialisé/prédit. L'injection devra améliorer une
     norme KKT combinant primal, stationnarité et complémentarité, pas seulement
-    le maximum de défaut primal.
+    le maximum de défaut primal. Le vrai Newton primal-dual a été implémenté
+    avec reconstruction signée des multiplicateurs et garde explicite de
+    complémentarité. Le run `32363186429` rejette les quatre corrections :
+    leur complémentarité passe d'environ `1e-7` à `7e-3--7e-2`, et les trois
+    derniers défauts primaux augmentent fortement. Le calcul ajoute environ
+    `0.47 s/RHO`. Le seul signal restant, conserver `lam_g` en plus de
+    `lam_x`, est réfuté sur 30 RHO compilés par `32364461733` : `1 226`
+    itérations chaudes contre `1 207`, médiane `0.9327` contre `0.9276 s` et
+    P90 `1.3415` contre `1.2856 s`. Conserver IPOPT `bounds`; ne pas prolonger
+    ces variantes à Radau-5, MadNLP ou 100 RHO.
 
 La question causale est maintenant resserrée : une seule projection au RHO 19
 ne suffit pas, mais la séquence 19--36 conserve le bassin franchissant le RHO

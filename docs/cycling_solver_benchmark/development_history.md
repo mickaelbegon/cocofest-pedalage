@@ -5843,3 +5843,73 @@ de `1.156` à `1.348 s`. Les 29 projections ajoutent `4.935 s`, soit
 que de `2.41e-7`, l'AUC de `1.32e-9 cycle` et la capacité minimale de
 `9.5e-12` : il n'y a pas de biais scientifique détectable, mais aucun gain
 numérique. Cette projection ne doit pas être portée à Radau-5 ou MadNLP.
+
+### Newton KKT primal-dual et garde de complémentarité
+
+Le système avancé a ensuite été corrigé pour résoudre le vrai pas Newton à
+ensemble actif fixé,
+
+$$
+\begin{bmatrix}
+H_L & J_A^\mathsf{T} \\
+J_A & 0
+\end{bmatrix}
+\begin{bmatrix}
+\Delta z \\
+\Delta \lambda_A
+\end{bmatrix}
+=
+-\begin{bmatrix}
+r_{\mathrm{stat}} \\
+c_A(z)-b_A
+\end{bmatrix}.
+$$
+
+Les multiplicateurs actifs sont reconstruits avec la convention CasADi/IPOPT
+(borne basse négative, borne haute positive). L'injection exige désormais une
+amélioration primale stricte, une stationnarité non dégradée, des signes duaux
+valides et une complémentarité non dégradée. Trois politiques sont comparées
+sur la même machine : remise à zéro, conservation complète de `lam_x` et
+`lam_g`, et prédiction Newton.
+
+Le gate Linux cinq RHO
+[`32363186429`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/32363186429)
+certifie les quatre variantes reduced, mais rejette les quatre corrections.
+Au transfert vers le RHO 2, le défaut primal diminue de `255.42` à `162.23`
+et la stationnarité de `1.562` à `0.0434`; la complémentarité augmente
+toutefois de `7.47e-7` à `7.19e-3`. Aux RHO 3 à 5, le défaut primal corrigé
+atteint `288.8`, `1 253.1` et `1 333.6`, contre `15.39`, `0.288` et `0.154`
+pour `repeat`. Le garde-fou refuse donc correctement toutes les injections.
+
+La double évaluation de la Hessienne/Jacobienne et la factorisation coûtent
+`1.86--1.87 s` sur quatre transferts, soit environ `0.47 s/RHO`. Sans
+injection, `reset` et `predict` reproduisent les itérations de la référence.
+La conservation complète des duaux change les itérations chaudes de
+`92,46,47,46` à `65,50,48,66`; le total passe seulement de `231` à `229` et
+le temps solveur total reste identique à l'échelle du bruit (`10.383` contre
+`10.370 s`). Son P90 court diminue, mais sa médiane augmente : ce signal doit
+être isolé sans le coût de l'audit sur 30 RHO avant toute promotion.
+
+Décision : ne pas porter le predictor Newton actuel à Radau-5, MadNLP ou 100
+RHO. Sa linéarisation à ensemble actif fixé ne représente pas suffisamment le
+grand déplacement non linéaire induit par le shift/rollout d'un cycle. Le seul
+test prolongé justifié est le transfert dual IPOPT complet, sans predictor ni
+audit KKT. La campagne dédiée `cycles=ipopt_dual` compare à cette fin la
+référence `bounds` et `lam_x+lam_g` avec la même capsule reduced compilée.
+
+Le run apparié 30 RHO
+[`32364461733`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/32364461733)
+invalide finalement le signal P90 du petit échantillon. Les deux cas
+certifient `30/30` et réutilisent chacun une source C unique de `43.3 MB` avec
+30 vecteurs de bornes distincts. Avec `bounds`, les itérations chaudes, la
+médiane et le P90 solveur valent `1 207`, `0.9276 s` et `1.2856 s`; avec
+`lam_x+lam_g`, ils valent `1 226`, `0.9327 s` et `1.3415 s`. Le temps solveur
+total fluctue en sens inverse (`31.567` contre `31.131 s`), sans cohérence avec
+les itérations ni les quantiles : cette différence de `1.4 %` est attribuée au
+bruit d'exécution, pas à une accélération algorithmique.
+
+Le coût exécuté ne diffère que de `3.18e-6` (`1.24e-8` relatif), l'AUC de
+`6.12e-9 cycle` et la capacité minimale de `3.63e-10`. La politique IPOPT
+nominale reste donc `bounds`, c'est-à-dire le warm start de `lam_x` seulement.
+Le transfert complet et le predictor Newton sont rejetés; aucun gate Radau-5
+ou 100 RHO n'est justifié pour ces variantes.
