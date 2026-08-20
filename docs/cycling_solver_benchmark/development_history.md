@@ -5849,7 +5849,7 @@ numérique. Cette projection ne doit pas être portée à Radau-5 ou MadNLP.
 Le système avancé a ensuite été corrigé pour résoudre le vrai pas Newton à
 ensemble actif fixé,
 
-$$
+```math
 \begin{bmatrix}
 H_L & J_A^\mathsf{T} \\
 J_A & 0
@@ -5863,7 +5863,7 @@ J_A & 0
 r_{\mathrm{stat}} \\
 c_A(z)-b_A
 \end{bmatrix}.
-$$
+```
 
 Les multiplicateurs actifs sont reconstruits avec la convention CasADi/IPOPT
 (borne basse négative, borne haute positive). L'injection exige désormais une
@@ -5913,3 +5913,49 @@ Le coût exécuté ne diffère que de `3.18e-6` (`1.24e-8` relatif), l'AUC de
 nominale reste donc `bounds`, c'est-à-dire le warm start de `lam_x` seulement.
 Le transfert complet et le predictor Newton sont rejetés; aucun gate Radau-5
 ou 100 RHO n'est justifié pour ces variantes.
+
+## 43. ACADOS résistant : garde rapide et horizon deux-cycles (20 août 2026)
+
+La campagne résistante `signed:+0.15 N.m` a d'abord isolé une incohérence de
+seed : la référence ACADOS terminait à la borne physique rapide `-9.283`, puis
+le cas mesuré la tronquait à `-8.883 rad/s`. La seed reduced/IPOPT est
+désormais construite directement avec la marge `2.6 rad/s`, et la même garde
+est appliquée à la référence ACADOS.
+
+Le run `32376558196` valide alors le gate un-cycle : `5/5` RHO, avec
+`1,4,5,5,5` itérations et environ `0.12--0.15 s` par appel chaud. Les deux
+gardes d'ensemble actif autour de `pd0` échouent au RHO 2; l'élargissement
+local à `500 us`, et non l'hystérésis, déstabilise ici la branche robuste à
+`+/-10 us`. Le run 30 RHO `32377237731` certifie les six premiers RHO puis
+échoue deux fois au RHO 7. Le rollout transféré prédit déjà des vitesses
+terminales non physiques; cet arrêt n'est pas une fatigue confirmée.
+
+Un horizon de deux cycles a ensuite été testé sans changer la fréquence de
+replanification : chaque OCP contient 60 contrôles et avance d'un cycle. Le
+premier OCP converge, mais termine à `omega_T=-8.883 rad/s`. Au transfert, le
+rollout IRK atteint `+1.719 rad/s`. L'homotopie de bornes du run `32381190979`
+consomme environ `41 s`, atteint seulement `96.875 %`, puis `MINSTEP`. Le
+selector du run `32384391508` choisit correctement le shift projeté plutôt que
+ce rollout, mais le shift a encore un défaut de vitesse normalisé de `6.30` et
+échoue au RHO 2.
+
+Deux erreurs d'intégration ont été corrigées pendant cette ablation :
+
+- le CLI de comparaison n'exposait pas la cible terminale `first_node`, déjà
+  supportée par le solveur principal;
+- `InitialGuessList.__contains__` n'a pas une sémantique de dictionnaire; la
+  détection reduced utilise maintenant `x_init.keys()` et sélectionne bien
+  `omega` plutôt que `qdot`.
+
+Les coûts terminaux souples de poids `0.1`, `1` et `100` sont négatifs. Ils
+laissent `omega_T` entre `-8.850` et `-8.828 rad/s` et n'empêchent pas
+`MINSTEP` au RHO 2 (`32386153400`, `32386863045`). Enfin, la terminal set
+`|omega_T+2*pi| <= 0.5` a été resserrée avec une séquence restant à
+l'intérieur de la garde path. Le run `32387600192` atteint la marge `2.55`,
+mais échoue à `2.54 rad/s` avec `MAXITER`, résidu de stationnarité `49.61` et
+résidu dynamique `0.105`.
+
+Décision : ne pas prolonger ces variantes à 30 RHO. Pour cette charge, deux
+cycles aggravent le terminal effect au lieu de fournir un warm start viable.
+La branche de production reste un cycle reduced; le recovery doit être lancé
+au même RHO avant toute propagation d'un terminal non certifié.

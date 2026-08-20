@@ -1751,3 +1751,62 @@ les liens vers les campagnes CI sont conservés dans
 l'[historique des développements](development_history.md). Les décisions
 actives doivent être mises à jour ici seulement après une campagne appariée et
 certifiée.
+
+## Décisions de la campagne warm-start d'août 2026
+
+Les sept étapes de la campagne sont maintenant closes ou explicitement
+rejetées :
+
+| Étape | Verdict mesuré | Décision |
+|---|---|---|
+| Predictor paramétrique KKT | Sur 30 RHO IPOPT compilés, `+31` itérations chaudes, P90 `+16.6 %` et `4.935 s` de surcharge | Rejeté; conserver le shift/rollout existant |
+| Gate court | Toute variante nouvelle doit certifier `5/5` RHO avant extension | Conservé dans la CI |
+| Warm start dual IPOPT | `bounds`: `1207` itérations chaudes et P90 `1.2856 s`; dual complet: `1226` et `1.3415 s` | Conserver `lam_x` seulement |
+| Campagnes longues | Aucun passage Radau-5/100 RHO pour une variante négative au gate | Évite les campagnes sans information |
+| Warm start dual MadNLP | Le runtime testé annonce l'injection, mais `dual_inputs_consumed=false` | MadNLP reste primal-only avec MUMPS |
+| ACADOS résistant, un cycle | `5/5`, puis `6` RHO certifiés avant échec au RHO 7; P90 chaud environ `0.145 s` | Rapide, mais pas encore robuste à `+0.15 N.m` |
+| ACADOS résistant, deux cycles | Toutes les variantes échouent au transfert vers RHO 2 ou pendant la terminal-set homotopy | Rejeté pour le profil actuel; ne pas lancer 30 RHO |
+
+### Pourquoi les deux cycles ne corrigent pas ACADOS sous résistance
+
+Avec `signed:+0.15 N.m`, le premier horizon de deux cycles minimise la fatigue
+en terminant sur la borne rapide,
+
+```math
+\omega_T = -2\pi - 2.6 \simeq -8.883\ \mathrm{rad\,s^{-1}}.
+```
+
+Après le décalage d'un cycle, cet effet de bord devient un état intérieur du
+RHO suivant. Le rollout IRK prédit alors jusqu'à
+`omega = +1.719 rad/s`, soit `5.002 rad/s` hors borne. Le selector projeté
+rejette correctement ce rollout, mais le shift projeté conserve un défaut
+normalisé de vitesse de `6.30` et ACADOS termine immédiatement par `MINSTEP`.
+
+Les coûts terminaux vers la cadence du premier nœud, de poids `0.1`, `1` et
+`100`, ne déplacent le terminal que jusqu'à respectivement `-8.850`, `-8.841`
+et `-8.828 rad/s`; tous échouent au RHO 2. Une terminal set plus explicite,
+
+```math
+|\omega_T + 2\pi| \le 0.5\ \mathrm{rad\,s^{-1}},
+```
+
+est introduite par une homotopie compatible avec la borne path
+`2.6, 2.5, 2, 1.5, 1, 0.5`. Elle atteint `2.55 rad/s`, puis échoue à
+`2.54 rad/s` (`MAXITER`, résidu dynamique `0.105`). Ce n'est ni de la fatigue
+ni une erreur d'angle terminal : le problème est le bassin de faisabilité de
+la continuation mécanique sous charge.
+
+Les preuves principales sont les runs
+[`32376558196`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/32376558196),
+[`32377237731`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/32377237731),
+[`32381190979`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/32381190979),
+[`32384391508`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/32384391508),
+[`32386153400`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/32386153400)
+et
+[`32387600192`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/32387600192).
+
+La direction de production redevient donc l'horizon reduced d'un cycle avec
+borne angulaire absolue, garde de cadence, warm start primal et recovery
+IPOPT/Radau-5 au même RHO. Le prochain gain doit venir d'une restauration
+mécanique locale plus robuste ou d'un terminal invariant appris/certifié, pas
+d'un allongement naïf de l'horizon.

@@ -1025,3 +1025,28 @@ modèle, d'interface ou d'algorithme invalide le résultat négatif précédent.
 La question causale est maintenant resserrée : une seule projection au RHO 19
 ne suffit pas, mais la séquence 19--36 conserve le bassin franchissant le RHO
 81. Il reste à déterminer la plus petite borne supérieure robuste.
+
+52. [terminé négatif, runs `32376558196` à `32387600192`] Stabiliser ACADOS
+    reduced sous résistance `signed:+0.15 N.m`. Le profil un-cycle certifie
+    `5/5`, puis seulement six RHO sur la campagne 30. L'horizon deux-cycles,
+    le selector shift/rollout, les coûts terminaux `0.1`, `1`, `100` et la
+    terminal set `+/-0.5 rad/s` échouent tous avant le RHO 2 certifié. Ne pas
+    lancer 30/100 RHO avec ces variantes. Revenir à un cycle et déclencher le
+    recovery IPOPT/Radau-5 sur le même RHO dès le premier échec ACADOS.
+53. [TODO prioritaire] Sur le profil ACADOS un-cycle résistant, mesurer le
+    recovery IPOPT/Radau-5 à partir du checkpoint exact précédant le RHO 7 :
+    temps de restauration, recertification ACADOS, coût/fatigue et continuité
+    des quatre muscles. Aucun terminal ACADOS non certifié ne doit avancer le
+    MHE.
+54. [TODO] Construire une terminal set mécanique hors ligne à partir de
+    trajectoires IPOPT/Radau-5 certifiées sous plusieurs niveaux de fatigue et
+    de charge. Tester d'abord une enveloppe sur `(theta, omega)` et la capacité
+    musculaire minimale; ne pas réintroduire une cadence constante dans le
+    cycle.
+55. [TODO] Corriger le libellé `fatigue_limited_candidate` des arrêts ACADOS
+    précoces quand aucune preuve de fatigue n'existe. Ces cas doivent rester
+    `unconfirmed_endurance_stop` ou `numerical_failure_before_valid_cycle`.
+56. [TODO secondaire] Ajouter un mode de workflow qui réutilise réellement le
+    seed commun certifié entre ablations successives. L'entrée
+    `acados_seed_source_run_id` réutilise un seed ACADOS, mais ne supprime pas
+    la validation IPOPT du seed commun.
