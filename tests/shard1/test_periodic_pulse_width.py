@@ -8345,6 +8345,23 @@ def test_regularized_mhe_cli_exposes_previous_window_targets_and_terminal_slack(
     assert args.periodic_ipopt_refinement_each_window is False
 
 
+def test_velocity_key_uses_initial_guess_explicit_keys():
+    class InitialGuessesWithNonMappingMembership:
+        def __contains__(self, _key):
+            return False
+
+        @staticmethod
+        def keys():
+            return ("theta", "omega")
+
+    assert (
+        periodic_example.velocity_key_from_initial_guesses(
+            InitialGuessesWithNonMappingMembership()
+        )
+        == "omega"
+    )
+
+
 def test_comparison_cli_exposes_first_node_terminal_velocity_target():
     args = comparison_example.build_cli().parse_args(
         [

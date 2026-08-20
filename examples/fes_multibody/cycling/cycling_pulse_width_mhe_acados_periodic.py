@@ -15412,6 +15412,15 @@ def apply_terminal_qdot_regularization_target(periodic_nmpc, target) -> bool:
     return False
 
 
+def velocity_key_from_initial_guesses(x_init) -> str:
+    """Resolve the mechanical velocity block from Bioptim's explicit key view."""
+
+    # InitialGuessList supports keyed access, but ``in x_init`` does not have
+    # dict membership semantics. Reduced mechanics exposes the scalar block
+    # as ``omega``; full mechanics uses ``qdot``.
+    return "omega" if "omega" in x_init.keys() else "qdot"
+
+
 def refresh_acados_cached_objective_targets(periodic_nmpc) -> None:
     """Copy updated Bioptim targets into the yref arrays cached by Acados."""
     interface = getattr(periodic_nmpc, "ocp_solver", None)
@@ -18624,7 +18633,7 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             )
 
     if args.terminal_qdot_regularization_weight:
-        velocity_key = "omega" if "omega" in nmpc.nlp[0].x_init else "qdot"
+        velocity_key = velocity_key_from_initial_guesses(nmpc.nlp[0].x_init)
         qdot_guess = np.asarray(nmpc.nlp[0].x_init[velocity_key].init, dtype=float)
         terminal_qdot = (
             qdot_guess[:, 0]
@@ -19809,7 +19818,9 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                     velocity_key = "omega" if "omega" in previous_states else "qdot"
                     terminal_qdot_target = previous_states[velocity_key][:, -1]
                 else:
-                    velocity_key = "omega" if "omega" in _nmpc.nlp[0].x_init else "qdot"
+                    velocity_key = velocity_key_from_initial_guesses(
+                        _nmpc.nlp[0].x_init
+                    )
                     terminal_qdot_target = np.asarray(
                         _nmpc.nlp[0].x_init[velocity_key].init, dtype=float
                     )[:, 0]
