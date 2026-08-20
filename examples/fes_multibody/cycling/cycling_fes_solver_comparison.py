@@ -3652,6 +3652,7 @@ def main(
     acados_byrd_omojokon_slack_relaxation_factor: float = 1.00001,
     acados_project_qdot_from_q: bool = False,
     shared_transfer_full_dynamics_rollout: bool = False,
+    acados_transfer_irk_rollout: bool = False,
     shared_transfer_contact_projection: bool = False,
     shared_transfer_contact_projection_mode: str = "position",
     shared_transfer_phase_one: bool = False,
@@ -4360,6 +4361,7 @@ def main(
     acados_args.acados_transfer_phase_one = bool(
         shared_transfer_phase_one or acados_transfer_phase_one
     )
+    acados_args.acados_transfer_irk_rollout = acados_transfer_irk_rollout
     acados_args.acados_transfer_phase_one_mode = acados_transfer_phase_one_mode
     acados_args.acados_transfer_phase_one_lookback_nodes = (
         acados_transfer_phase_one_lookback_nodes
@@ -5042,6 +5044,14 @@ def build_cli() -> argparse.ArgumentParser:
         help=(
             "Apply the same complete-dynamics RK4 rollout to the appended cycle "
             "for IPOPT and ACADOS."
+        ),
+    )
+    parser.add_argument(
+        "--acados-transfer-irk-rollout",
+        action="store_true",
+        help=(
+            "Reintegrate the appended cycle with the generated ACADOS IRK map. "
+            "This is required by the ACADOS transfer-bound homotopy."
         ),
     )
     parser.add_argument(
@@ -6378,6 +6388,7 @@ if __name__ == "__main__":
         shared_transfer_full_dynamics_rollout=(
             args.shared_transfer_full_dynamics_rollout
         ),
+        acados_transfer_irk_rollout=args.acados_transfer_irk_rollout,
         shared_transfer_contact_projection=(args.shared_transfer_contact_projection),
         shared_transfer_contact_projection_mode=(
             args.shared_transfer_contact_projection_mode

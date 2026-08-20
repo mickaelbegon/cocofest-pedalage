@@ -1688,6 +1688,15 @@ def test_transfer_bound_homotopy_fractions_are_parsed():
     assert args.acados_transfer_bound_homotopy_max_refinements == 16
 
 
+def test_comparison_cli_exposes_acados_irk_transfer_rollout():
+    args = comparison_example.build_cli().parse_args(
+        ["--acados-transfer-irk-rollout", "--acados-transfer-bound-homotopy"]
+    )
+
+    assert args.acados_transfer_irk_rollout is True
+    assert args.acados_transfer_bound_homotopy is True
+
+
 def test_transfer_sqp_restart_options_are_parsed():
     parser = periodic_example.build_argument_parser()
     args = parser.parse_args(
