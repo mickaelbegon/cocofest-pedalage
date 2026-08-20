@@ -6366,8 +6366,17 @@ def run_acados_terminal_wheel_qdot_bound_continuation(
             )
 
     summaries = []
+    # Tightening a terminal bound changes the inequality active set. Reusing
+    # the preceding HPIPM memory and multipliers made the first newly active
+    # resistant stage diverge even with a 0.01-rad/s step. Preserve the
+    # accepted primal through x_init, but rebuild dual/QP state at every new
+    # bound. Dual preservation resumes only after the strict target is solved.
+    periodic_nmpc._cocofest_dual_warm_start_mode = "reset"
     for stage_index, margin in enumerate(margins):
         bound = set_terminal_wheel_qdot_bound_margin(periodic_nmpc, margin)
+        solver_reset_before_solve = bool(
+            stage_index > 0 and reset_acados_solver_memory(periodic_nmpc)
+        )
         set_acados_runtime_max_iterations(periodic_nmpc, stage_iterations)
         solution = solve_stage()
         diagnostics = snapshot_acados_diagnostics(solution)
@@ -6384,6 +6393,7 @@ def run_acados_terminal_wheel_qdot_bound_continuation(
             **bound,
             "status": solution.status,
             "accepted": accepted,
+            "solver_reset_before_solve": solver_reset_before_solve,
             "residuals": (
                 None if residuals is None else np.asarray(residuals, dtype=float).copy()
             ),

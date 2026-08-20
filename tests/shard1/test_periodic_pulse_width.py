@@ -4559,6 +4559,7 @@ def test_terminal_wheel_qdot_continuation_densifies_offline_anchor_steps(
         _sync_acados_state_bounds=lambda: None,
     )
     observed = []
+    reset_calls = []
 
     def solve_stage():
         observed.append(float(bounds.max[0, 2] + 2.0 * np.pi))
@@ -4582,6 +4583,11 @@ def test_terminal_wheel_qdot_continuation_densifies_offline_anchor_steps(
         "apply_solution_directly_to_periodic_nmpc_initial_guess",
         lambda *_: None,
     )
+    monkeypatch.setattr(
+        periodic_example,
+        "reset_acados_solver_memory",
+        lambda _nmpc: reset_calls.append(True) or True,
+    )
 
     summaries = periodic_example.run_acados_terminal_wheel_qdot_bound_continuation(
         nmpc,
@@ -4597,6 +4603,13 @@ def test_terminal_wheel_qdot_continuation_densifies_offline_anchor_steps(
     np.testing.assert_allclose([observed[0], observed[-1]], [3.0, 0.5])
     assert np.max(np.abs(np.diff(observed))) <= 1.0
     assert [summary["accepted"] for summary in summaries] == [True] * 4
+    assert [summary["solver_reset_before_solve"] for summary in summaries] == [
+        False,
+        True,
+        True,
+        True,
+    ]
+    assert len(reset_calls) == 3
 
 
 def test_acados_residual_history_selects_one_feasible_iterate():
