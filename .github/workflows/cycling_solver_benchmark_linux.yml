@@ -256,6 +256,8 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}
           BENCHMARK_CYCLES_PER_WINDOW: ${{ inputs.cycles == 'full_horizon' && '1' || inputs.cycles_per_window }}
+          BENCHMARK_MODE: ${{ inputs.cycles }}
+          BENCHMARK_TORQUE: ${{ inputs.crank_assistance_nm }}
         run: |
           mkdir -p benchmark-seed-result
           if [[ "$BENCHMARK_CYCLES_PER_WINDOW" != "1" && "$BENCHMARK_CYCLES_PER_WINDOW" != "2" ]]; then
@@ -268,6 +270,14 @@ jobs:
             local mechanics_options=()
             if [[ "$mechanics" == "reduced" ]]; then
               mechanics_options+=(--mechanical-formulation reduced)
+              if [[ "$BENCHMARK_MODE" == "acados_active_set" && "$BENCHMARK_TORQUE" == signed:+* ]]; then
+                # Build the resistant ACADOS seed on a dynamically coherent
+                # trajectory inside the future one-sided 2.6-rad/s fast box.
+                # A symmetric seed-only box is acceptable here: ACADOS later
+                # restores the physical 3.0-rad/s slow side, and the measured
+                # cost contains no seed regularization.
+                mechanics_options+=(--wheel-qdot-bound-margin 2.6)
+              fi
             else
               # Certify the full problem from the exact contact-manifold lift
               # of the already solved reduced theta/omega seed. Ding states

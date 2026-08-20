@@ -7726,6 +7726,13 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
         in workflow
     )
     assert "absolute terminal theta constraint" in workflow
+    assert 'BENCHMARK_MODE: ${{ inputs.cycles }}' in workflow
+    assert 'BENCHMARK_TORQUE: ${{ inputs.crank_assistance_nm }}' in workflow
+    assert (
+        '"$BENCHMARK_MODE" == "acados_active_set" && '
+        '"$BENCHMARK_TORQUE" == signed:+*' in workflow
+    )
+    assert "mechanics_options+=(--wheel-qdot-bound-margin 2.6)" in workflow
     active_set_seed_bridge = workflow.split(
         'if [[ "$ACADOS_ACTIVE_SET_ONLY" == "true" ]]; then', maxsplit=1
     )[1].split('if [[ "$variant" == "sqp-irk-qp-hot" ]]', maxsplit=1)[0]
