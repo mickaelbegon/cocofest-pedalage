@@ -7734,6 +7734,12 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     ) == 2
     assert 'window_cycles=2' in workflow
     assert 'total_cycles=$((rhos + 1))' in workflow
+    assert 'if [[ "$window_cycles" == "2" ]]; then' in workflow
+    two_cycle_transfer = workflow.split(
+        'if [[ "$window_cycles" == "2" ]]; then', maxsplit=1
+    )[1].split("else", maxsplit=1)[0]
+    assert "--acados-transfer-select-projected-candidate" in two_cycle_transfer
+    assert "--acados-transfer-bound-homotopy" not in two_cycle_transfer
     assert '--cycles-per-window "$window_cycles"' in workflow
     assert '--n-windows "$total_cycles"' in workflow
     assert (
