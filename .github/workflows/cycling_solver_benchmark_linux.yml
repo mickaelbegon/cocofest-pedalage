@@ -321,7 +321,11 @@ jobs:
           }
 
           prepare_case reduced
-          prepare_case full
+          if [[ "$BENCHMARK_MODE" != "acados_active_set" ]]; then
+            prepare_case full
+          else
+            echo "Skipping the unused full seed for the reduced-only ACADOS active-set campaign."
+          fi
 
       - name: Upload the validated immutable common seed
         uses: actions/upload-artifact@v7
