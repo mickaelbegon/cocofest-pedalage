@@ -1356,6 +1356,12 @@ jobs:
                   return 0
                 fi
               fi
+            elif [[ "$ACADOS_ACTIVE_SET_ONLY" == "true" && "$variant" != "sqp-irk-reference" ]]; then
+              common_seed="$GITHUB_WORKSPACE/acados-smoke-results/reference-reduced-feasible-seed.npz"
+              if [[ ! -f "$common_seed" ]]; then
+                skip_case "The active-set A/B requires its preceding reduced ACADOS reference seed."
+                return 0
+              fi
             elif [[ "$variant" == *"active-set-guard"* ]]; then
               common_seed="$GITHUB_WORKSPACE/acados-smoke-results/reference-reduced-feasible-seed.npz"
               if [[ ! -f "$common_seed" ]]; then
@@ -1933,9 +1939,21 @@ jobs:
               sqp-irk-reference-reduced \
               > acados-smoke-results/reference-cases.txt
             run_case sqp-irk-reference reduced 1 SQP IRK 5 5
-            run_case sqp-irk-terminal-omega-0p3-trust-10us reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
-            run_case sqp-irk-terminal-omega-0p3-trust-10us-active-set-guard-memoryless reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
-            run_case sqp-irk-terminal-omega-0p3-trust-10us-active-set-guard reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
+            if [[ "$BENCHMARK_ASSISTANCE" == signed:+* ]]; then
+              # A resistant optimum naturally reaches the terminal node near
+              # the fast side of the physical cadence box. Forcing the neutral
+              # omega_T=-2*pi +/-0.3 branch failed at the first active bound
+              # even with 0.01-rad/s steps and reset dual/QP memory. Anti-drift
+              # remains enforced by the absolute terminal theta constraint;
+              # do not impose near-constant terminal cadence under load.
+              run_case sqp-irk-trust-10us reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
+              run_case sqp-irk-trust-10us-active-set-guard-memoryless reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
+              run_case sqp-irk-trust-10us-active-set-guard reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
+            else
+              run_case sqp-irk-terminal-omega-0p3-trust-10us reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
+              run_case sqp-irk-terminal-omega-0p3-trust-10us-active-set-guard-memoryless reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
+              run_case sqp-irk-terminal-omega-0p3-trust-10us-active-set-guard reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
+            fi
           elif [[ "$ACADOS_PW_STABILITY_ONLY" == "true" ]]; then
             # Causal reduced-mechanics screen for the observed period-two PW
             # orbit. Keep one OCP per case on the same runner and change only
@@ -2253,9 +2271,13 @@ jobs:
             }
           fi
           if [[ "$ACADOS_ACTIVE_SET_ONLY" == "true" ]]; then
-            baseline="acados-smoke-results/sqp-irk-terminal-omega-0p3-trust-10us-reduced/result.json"
-            memoryless="acados-smoke-results/sqp-irk-terminal-omega-0p3-trust-10us-active-set-guard-memoryless-reduced/result.json"
-            guarded="acados-smoke-results/sqp-irk-terminal-omega-0p3-trust-10us-active-set-guard-reduced/result.json"
+            active_set_prefix="sqp-irk-terminal-omega-0p3-trust-10us"
+            if [[ "$BENCHMARK_ASSISTANCE" == signed:+* ]]; then
+              active_set_prefix="sqp-irk-trust-10us"
+            fi
+            baseline="acados-smoke-results/${active_set_prefix}-reduced/result.json"
+            memoryless="acados-smoke-results/${active_set_prefix}-active-set-guard-memoryless-reduced/result.json"
+            guarded="acados-smoke-results/${active_set_prefix}-active-set-guard-reduced/result.json"
             jq -e '
               .results[0] |
               (.error == null) and ((.attempted_windows // 0) > 0)
