@@ -1494,6 +1494,21 @@ jobs:
               # stopped repeat/lag2 at RHO 2.
               solver_options+=(--acados-control-homotopy-release-final-radius)
             fi
+            if [[ "$variant" == *"terminal-qdot-reg-0p1"* ]]; then
+              # Soft economic-MPC terminal ingredient: discourage the final
+              # node from exploiting the fast cadence bound without imposing
+              # constant omega inside either cycle. Recenter the target on
+              # the measured first-node cadence at every RHO.
+              solver_options+=(
+                --terminal-qdot-regularization-weight 0.1
+                --terminal-qdot-regularization-target-source first_node
+              )
+            elif [[ "$variant" == *"terminal-qdot-reg-1"* ]]; then
+              solver_options+=(
+                --terminal-qdot-regularization-weight 1
+                --terminal-qdot-regularization-target-source first_node
+              )
+            fi
             if [[ "$variant" == *"trust-10us"* ]]; then
               # Paired active-set ablation: both cases retain exactly the same
               # inter-RHO +/-10 us control trust region. The guarded case may
@@ -2006,7 +2021,13 @@ jobs:
               # before the fatigue-optimal solve without imposing constant
               # cadence.
               run_case sqp-irk-two-stage-fast-guard-2p6-trust-10us reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
-              if (( ACADOS_SMOKE_RHOS <= 5 )) && [[ "$ACADOS_WINDOW_CYCLES" == "1" ]]; then
+              if (( ACADOS_SMOKE_RHOS <= 5 )) && [[ "$ACADOS_WINDOW_CYCLES" == "2" ]]; then
+                # The unregularized two-cycle horizon ends at the fast omega
+                # bound and the shifted RHO 2 immediately MINSTEPs. Compare
+                # two soft terminal weights before extending any candidate.
+                run_case sqp-irk-two-stage-fast-guard-2p6-trust-10us-terminal-qdot-reg-0p1 reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
+                run_case sqp-irk-two-stage-fast-guard-2p6-trust-10us-terminal-qdot-reg-1 reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
+              elif (( ACADOS_SMOKE_RHOS <= 5 )); then
                 # The 5-RHO gate keeps both controls as negative evidence.
                 # Releasing transition nodes to 500 us made both variants hit
                 # MAXITER at resistant RHO 2, while the guarded baseline
@@ -2343,11 +2364,25 @@ jobs:
             baseline="acados-smoke-results/${active_set_prefix}-reduced/result.json"
             memoryless="acados-smoke-results/${active_set_prefix}-active-set-guard-memoryless-reduced/result.json"
             guarded="acados-smoke-results/${active_set_prefix}-active-set-guard-reduced/result.json"
-            jq -e '
-              .results[0] |
-              (.error == null) and
-              (.validated_cycles == .requested_cycles)
-            ' "$baseline"
+            if [[ "$ACADOS_WINDOW_CYCLES" == "2" && "$BENCHMARK_ASSISTANCE" == signed:+* ]]; then
+              terminal_0p1="acados-smoke-results/${active_set_prefix}-terminal-qdot-reg-0p1-reduced/result.json"
+              terminal_1="acados-smoke-results/${active_set_prefix}-terminal-qdot-reg-1-reduced/result.json"
+              jq -e '.results[0].error == null' "$baseline" "$terminal_0p1" "$terminal_1"
+              jq -s -e '
+                any(.[].results[0];
+                  (.error == null) and
+                  (.validated_cycles == .requested_cycles))
+              ' "$terminal_0p1" "$terminal_1" || {
+                echo "Neither soft terminal-cadence candidate certified the two-cycle gate." >&2
+                exit 1
+              }
+            else
+              jq -e '
+                .results[0] |
+                (.error == null) and
+                (.validated_cycles == .requested_cycles)
+              ' "$baseline"
+            fi
             if [[ "$BENCHMARK_ASSISTANCE" != signed:+* ]]; then
               jq -e '.results[0] | (.error == null) and (.validated_cycles == .requested_cycles)' "$memoryless"
               jq -e '.results[0] | (.error == null) and (.validated_cycles == .requested_cycles)' "$guarded"
