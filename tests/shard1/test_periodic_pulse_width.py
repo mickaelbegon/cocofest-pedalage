@@ -7735,6 +7735,11 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert "--adopt-common-initial-solution-warmup-cycles" in active_set_seed_bridge
     assert "--acados-initial-irk-rollout" in active_set_seed_bridge
     assert "--disable-periodic-fes-warmup-projection" in active_set_seed_bridge
+    assert (
+        '"$BENCHMARK_ASSISTANCE" == signed:+* && "$variant" == "sqp-irk-reference"'
+        in active_set_seed_bridge
+    )
+    assert "solver_options+=(--acados-wheel-qdot-fast-bound-margin 2.6)" in workflow
     assert "--acados-transfer-active-set-guard-radius 5e-4" in workflow
     assert "--acados-transfer-active-set-guard-margin 1" in workflow
     assert "--acados-transfer-active-set-threshold 5e-6" in workflow

@@ -1508,6 +1508,14 @@ jobs:
                 --common-initial-solution-recenter-first-node-bounds
                 --adopt-common-initial-solution-warmup-cycles
               )
+              if [[ "$BENCHMARK_ASSISTANCE" == signed:+* && "$variant" == "sqp-irk-reference" ]]; then
+                # Produce the shared ACADOS-native seed inside the same
+                # one-sided cadence box as every measured resistant case.
+                # Otherwise the unconstrained reference optimizes omega_T to
+                # -2*pi-3 and the consumer must clip it by exactly 0.4 rad/s,
+                # creating a discontinuous dynamics seed before RHO 1.
+                solver_options+=(--acados-wheel-qdot-fast-bound-margin 2.6)
+              fi
               if [[ "$variant" == "sqp-irk-reference" && "$mechanics" == "reduced" ]]; then
                 solver_options+=(--acados-initial-irk-rollout)
               else
