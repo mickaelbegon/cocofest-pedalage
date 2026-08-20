@@ -8271,6 +8271,7 @@ def parametric_kkt_next_rho_prediction_audit(
         active_kkt_rhs_from_bound_changes,
         active_kkt_rhs_to_bound_targets,
         apply_active_dual_step,
+        bound_complementarity_inf_norm,
         solve_sparse_bound_kkt_sensitivity,
         sparse_active_jacobian_from_sources,
     )
@@ -8415,6 +8416,44 @@ def parametric_kkt_next_rho_prediction_audit(
     corrected_repeat_stationarity_inf_norm = float(
         np.linalg.norm(corrected_repeat_stationarity, ord=np.inf)
     )
+    repeat_complementarity_inf_norm = max(
+        bound_complementarity_inf_norm(
+            repeat,
+            new_lbx,
+            new_ubx,
+            snapshot["variable_multipliers"],
+        ),
+        bound_complementarity_inf_norm(
+            repeat_constraints,
+            new_lbg,
+            new_ubg,
+            snapshot["constraint_multipliers"],
+        ),
+    )
+    corrected_repeat_complementarity_inf_norm = max(
+        bound_complementarity_inf_norm(
+            corrected_repeat,
+            new_lbx,
+            new_ubx,
+            dual_prediction.variable_multipliers,
+        ),
+        bound_complementarity_inf_norm(
+            corrected_repeat_constraints,
+            new_lbg,
+            new_ubg,
+            dual_prediction.constraint_multipliers,
+        ),
+    )
+    repeat_kkt_inf_norm = max(
+        repeat_residual,
+        repeat_stationarity_inf_norm,
+        repeat_complementarity_inf_norm,
+    )
+    corrected_repeat_kkt_inf_norm = max(
+        corrected_repeat_residual,
+        corrected_repeat_stationarity_inf_norm,
+        corrected_repeat_complementarity_inf_norm,
+    )
     moving_targets = int(np.count_nonzero(np.abs(target_step) > 0.0))
     return {
         "available": True,
@@ -8471,6 +8510,20 @@ def parametric_kkt_next_rho_prediction_audit(
         "repeat_correction_improves_stationarity": bool(
             corrected_repeat_stationarity_inf_norm
             <= repeat_stationarity_inf_norm
+        ),
+        "repeat_complementarity_inf_norm": float(
+            repeat_complementarity_inf_norm
+        ),
+        "corrected_repeat_complementarity_inf_norm": float(
+            corrected_repeat_complementarity_inf_norm
+        ),
+        "repeat_correction_preserves_complementarity": bool(
+            corrected_repeat_complementarity_inf_norm
+            <= repeat_complementarity_inf_norm + 1e-8
+        ),
+        "repeat_kkt_inf_norm_unscaled": float(repeat_kkt_inf_norm),
+        "corrected_repeat_kkt_inf_norm_unscaled": float(
+            corrected_repeat_kkt_inf_norm
         ),
         "predicted_dual_sign_guard_passes": bool(
             dual_prediction.passes_sign_guard
@@ -20502,6 +20555,9 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                     and prediction_audit[
                         "repeat_correction_improves_stationarity"
                     ]
+                    and prediction_audit[
+                        "repeat_correction_preserves_complementarity"
+                    ]
                 )
                 kkt_dual_mode = getattr(
                     args, "parametric_kkt_dual_mode", "reset"
@@ -20555,6 +20611,8 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                     f"{prediction_audit.get('repeat_stationarity_inf_norm')} "
                     f"corrected_stationarity="
                     f"{prediction_audit.get('corrected_repeat_stationarity_inf_norm')} "
+                    f"corrected_complementarity="
+                    f"{prediction_audit.get('corrected_repeat_complementarity_inf_norm')} "
                     f"dual_mode={prediction_audit.get('dual_mode')} "
                     f"injected={prediction_audit.get('injected')} "
                     f"wall_time_s={prediction_audit.get('total_wall_time_s')}"

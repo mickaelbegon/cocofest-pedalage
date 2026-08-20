@@ -55,6 +55,57 @@ class ActiveDualPrediction:
     sign_violation_count: int
 
 
+def bound_complementarity_inf_norm(
+    values: np.ndarray,
+    lower_bounds: np.ndarray,
+    upper_bounds: np.ndarray,
+    multipliers: np.ndarray,
+    *,
+    equality_tolerance: float = 1e-12,
+) -> float:
+    """Return the IPOPT/CasADi bound-complementarity infinity norm.
+
+    A negative multiplier belongs to the lower bound and a positive one to
+    the upper bound. Equality rows are excluded because their multipliers are
+    unrestricted and have no complementary slackness equation.
+    """
+
+    values = np.asarray(values, dtype=float).reshape(-1)
+    lower = np.asarray(lower_bounds, dtype=float).reshape(-1)
+    upper = np.asarray(upper_bounds, dtype=float).reshape(-1)
+    duals = np.asarray(multipliers, dtype=float).reshape(-1)
+    if not (values.size == lower.size == upper.size == duals.size):
+        raise ValueError("Bound complementarity inputs must have equal dimensions.")
+    if not np.isfinite(equality_tolerance) or equality_tolerance < 0.0:
+        raise ValueError("Equality tolerance must be finite and non-negative.")
+    if not np.all(np.isfinite(values)) or not np.all(np.isfinite(duals)):
+        raise ValueError("Bound complementarity values and multipliers must be finite.")
+    if np.any(lower > upper):
+        raise ValueError("A lower bound exceeds its upper bound.")
+
+    maximum = 0.0
+    for value, lower_bound, upper_bound, multiplier in zip(
+        values, lower, upper, duals
+    ):
+        equality = (
+            np.isfinite(lower_bound)
+            and np.isfinite(upper_bound)
+            and abs(upper_bound - lower_bound) <= equality_tolerance
+        )
+        if equality or multiplier == 0.0:
+            continue
+        if multiplier < 0.0:
+            if not np.isfinite(lower_bound):
+                return float("inf")
+            residual = abs(multiplier * (value - lower_bound))
+        else:
+            if not np.isfinite(upper_bound):
+                return float("inf")
+            residual = abs(multiplier * (upper_bound - value))
+        maximum = max(maximum, float(residual))
+    return maximum
+
+
 class CanonicalNlpKktEvaluator:
     """Cache CasADi derivative graphs and return SciPy sparse numerical blocks.
 

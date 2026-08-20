@@ -8,6 +8,7 @@ from cocofest.optimization.parametric_kkt import (
     apply_active_dual_step,
     assemble_active_kkt_rows,
     assemble_sparse_active_kkt_rows,
+    bound_complementarity_inf_norm,
     kkt_prediction_passes_residual_guard,
     solve_parametric_kkt_sensitivity,
     solve_sparse_bound_kkt_sensitivity,
@@ -299,6 +300,28 @@ def test_active_dual_prediction_rejects_wrong_bound_sign_without_clipping():
     np.testing.assert_allclose(prediction.variable_multipliers, [-0.2])
     assert not prediction.passes_sign_guard
     assert prediction.sign_violation_count == 2
+
+
+def test_bound_complementarity_uses_multiplier_side_and_ignores_equalities():
+    residual = bound_complementarity_inf_norm(
+        values=np.array([0.2, 0.7, 1.0]),
+        lower_bounds=np.array([0.0, 0.0, 1.0]),
+        upper_bounds=np.array([1.0, 1.0, 1.0]),
+        multipliers=np.array([-2.0, 3.0, 100.0]),
+    )
+
+    assert residual == pytest.approx(0.9)
+
+
+def test_bound_complementarity_rejects_multiplier_on_missing_side():
+    residual = bound_complementarity_inf_norm(
+        values=np.array([0.0]),
+        lower_bounds=np.array([-np.inf]),
+        upper_bounds=np.array([1.0]),
+        multipliers=np.array([-1.0]),
+    )
+
+    assert residual == np.inf
 
 
 def test_sparse_active_rows_do_not_materialize_dense_identity():

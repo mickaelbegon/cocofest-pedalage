@@ -2976,6 +2976,8 @@ jobs:
               all(.parametric_kkt_prediction_audits[];
                 (.repeat_stationarity_inf_norm | type) == "number" and
                 (.corrected_repeat_stationarity_inf_norm | type) == "number" and
+                (.repeat_complementarity_inf_norm | type) == "number" and
+                (.corrected_repeat_complementarity_inf_norm | type) == "number" and
                 (.predicted_dual_sign_guard_passes | type) == "boolean")
             ' "$predictor"
           done
