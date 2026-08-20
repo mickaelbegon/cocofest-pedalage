@@ -1566,6 +1566,7 @@ jobs:
               # contact-projected reference transfer is robust, whereas the
               # bound homotopy made its second RHO fail in run 30594236036.
               solver_options+=(
+                --acados-transfer-irk-rollout
                 --acados-transfer-bound-homotopy
                 --acados-transfer-bound-homotopy-fractions 0,0.125,0.25,0.375,0.5,0.625,0.75,0.875,1
                 --acados-transfer-bound-homotopy-padding 0.05

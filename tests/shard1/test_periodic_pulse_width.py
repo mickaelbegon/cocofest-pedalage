@@ -7663,6 +7663,7 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert "run_case sqp-byrd-projected-selector-cadence-reg-1-irk" in workflow
     assert "--acados-transfer-select-projected-candidate" in workflow
     assert "run_case sqp-irk-two-stage" in workflow
+    assert "--acados-transfer-irk-rollout" in workflow
     assert (
         "--acados-transfer-bound-homotopy-fractions "
         "0,0.125,0.25,0.375,0.5,0.625,0.75,0.875,1"
