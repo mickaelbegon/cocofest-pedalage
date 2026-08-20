@@ -2895,7 +2895,7 @@ jobs:
           fi
 
       - name: Run IPOPT full
-        if: ${{ matrix.solver == 'ipopt' && inputs.cycles != 'pw_transfer_ablation' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance' && inputs.cycles != 'fatigue_endurance_radau5' }}
+        if: ${{ matrix.solver == 'ipopt' && inputs.cycles != 'pw_transfer_ablation' && inputs.cycles != 'ipopt_dual' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance' && inputs.cycles != 'fatigue_endurance_radau5' }}
         # Compiling the full 26-state collocation NLP repeatedly terminates the
         # hosted runner with SIGTERM 143 before any artifact can be checkpointed.
         # Keep the scientific full reference interpreted; the reduced case
@@ -3345,6 +3345,10 @@ jobs:
             ipopt|madnlp|fatrop) expected=2 ;;
             *) echo "Unexpected benchmark solver: $BENCHMARK_SOLVER" >&2; exit 1 ;;
           esac
+          if [[ "$IPOPT_DUAL_ABLATION" == "true" && "$BENCHMARK_SOLVER" == "ipopt" ]]; then
+            # Only the two paired reduced cases belong to this focused gate.
+            expected=1
+          fi
           if [[ "$PARAMETRIC_KKT_ABLATION" == "true" && "$BENCHMARK_SOLVER" == "ipopt" ]]; then
             expected=$((expected + 3))
           fi
