@@ -1503,6 +1503,13 @@ jobs:
                 --terminal-qdot-regularization-weight 0.1
                 --terminal-qdot-regularization-target-source first_node
               )
+            elif [[ "$variant" == *"terminal-qdot-reg-100"* ]]; then
+              # Weights 0.1 and 1 moved terminal omega by less than 0.05
+              # rad/s in run 32386153400 and did not prevent RHO-2 MINSTEP.
+              solver_options+=(
+                --terminal-qdot-regularization-weight 100
+                --terminal-qdot-regularization-target-source first_node
+              )
             elif [[ "$variant" == *"terminal-qdot-reg-1"* ]]; then
               solver_options+=(
                 --terminal-qdot-regularization-weight 1
@@ -2024,9 +2031,10 @@ jobs:
               if (( ACADOS_SMOKE_RHOS <= 5 )) && [[ "$ACADOS_WINDOW_CYCLES" == "2" ]]; then
                 # The unregularized two-cycle horizon ends at the fast omega
                 # bound and the shifted RHO 2 immediately MINSTEPs. Compare
-                # two soft terminal weights before extending any candidate.
-                run_case sqp-irk-two-stage-fast-guard-2p6-trust-10us-terminal-qdot-reg-0p1 reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
-                run_case sqp-irk-two-stage-fast-guard-2p6-trust-10us-terminal-qdot-reg-1 reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
+                # a stronger soft cost and one explicit terminal invariant-set
+                # candidate before extending anything beyond this gate.
+                run_case sqp-irk-two-stage-fast-guard-2p6-trust-10us-terminal-qdot-reg-100 reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
+                run_case sqp-irk-two-stage-fast-guard-2p6-trust-10us-terminal-omega-0p5 reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
               elif (( ACADOS_SMOKE_RHOS <= 5 )); then
                 # The 5-RHO gate keeps both controls as negative evidence.
                 # Releasing transition nodes to 500 us made both variants hit
@@ -2365,14 +2373,14 @@ jobs:
             memoryless="acados-smoke-results/${active_set_prefix}-active-set-guard-memoryless-reduced/result.json"
             guarded="acados-smoke-results/${active_set_prefix}-active-set-guard-reduced/result.json"
             if [[ "$ACADOS_WINDOW_CYCLES" == "2" && "$BENCHMARK_ASSISTANCE" == signed:+* ]]; then
-              terminal_0p1="acados-smoke-results/${active_set_prefix}-terminal-qdot-reg-0p1-reduced/result.json"
-              terminal_1="acados-smoke-results/${active_set_prefix}-terminal-qdot-reg-1-reduced/result.json"
-              jq -e '.results[0].error == null' "$baseline" "$terminal_0p1" "$terminal_1"
+              terminal_soft="acados-smoke-results/${active_set_prefix}-terminal-qdot-reg-100-reduced/result.json"
+              terminal_set="acados-smoke-results/${active_set_prefix}-terminal-omega-0p5-reduced/result.json"
+              jq -e '.results[0].error == null' "$baseline" "$terminal_soft" "$terminal_set"
               jq -s -e '
                 any(.[].results[0];
                   (.error == null) and
                   (.validated_cycles == .requested_cycles))
-              ' "$terminal_0p1" "$terminal_1" || {
+              ' "$terminal_soft" "$terminal_set" || {
                 echo "Neither soft terminal-cadence candidate certified the two-cycle gate." >&2
                 exit 1
               }

@@ -7740,14 +7740,17 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     )[1].split("else", maxsplit=1)[0]
     assert "--acados-transfer-select-projected-candidate" in two_cycle_transfer
     assert "--acados-transfer-bound-homotopy" not in two_cycle_transfer
-    assert "--terminal-qdot-regularization-weight 0.1" in workflow
+    assert "--terminal-qdot-regularization-weight 100" in workflow
     assert "--terminal-qdot-regularization-target-source first_node" in workflow
+    assert workflow.index('terminal-qdot-reg-100"*') < workflow.index(
+        'terminal-qdot-reg-1"*'
+    )
     assert (
-        "run_case sqp-irk-two-stage-fast-guard-2p6-trust-10us-terminal-qdot-reg-0p1 reduced"
+        "run_case sqp-irk-two-stage-fast-guard-2p6-trust-10us-terminal-qdot-reg-100 reduced"
         in workflow
     )
     assert (
-        "run_case sqp-irk-two-stage-fast-guard-2p6-trust-10us-terminal-qdot-reg-1 reduced"
+        "run_case sqp-irk-two-stage-fast-guard-2p6-trust-10us-terminal-omega-0p5 reduced"
         in workflow
     )
     assert '--cycles-per-window "$window_cycles"' in workflow
