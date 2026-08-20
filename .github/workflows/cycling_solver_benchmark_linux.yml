@@ -1486,6 +1486,26 @@ jobs:
               # before their prediction quality could be compared.
               solver_options+=(--acados-control-homotopy-release-final-radius)
             fi
+            if [[ "$ACADOS_ACTIVE_SET_ONLY" == "true" ]]; then
+              # The seed-validation job has already solved the reduced IPOPT
+              # problem at the requested signed torque.  Loading that target-
+              # torque seed directly is the robust resistant bridge used by
+              # run 31589712434 (first ACADOS RHO: status 0 in 7 iterations).
+              # Re-running the legacy 0.22-Nm warmup, Phase-I and the PW
+              # homotopy moved the same seed to a point with a 1.54e2
+              # stationarity residual and caused MINSTEP before RHO 1 in run
+              # 31793240281.  Keep the collocation primal if the diagnostic
+              # IRK rollout exceeds the explicit bound guard.
+              solver_options+=(
+                --disable-acados-assisted-hot-start
+                --acados-disable-standard-ipopt-warmup
+                --common-initial-solution-recenter-first-node-bounds
+                --adopt-common-initial-solution-warmup-cycles
+              )
+              if [[ "$variant" == "sqp-irk-reference" && "$mechanics" == "reduced" ]]; then
+                solver_options+=(--acados-initial-irk-rollout)
+              fi
+            fi
             if [[ "$variant" == "sqp-irk-qp-hot" ]]; then
               solver_options+=(
                 --acados-qp-cond-n 30

@@ -7630,6 +7630,14 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert 'if [[ "$variant" != *"memoryless"* ]]; then' in workflow
     assert "--acados-transfer-pulse-width-trust-radius 1e-5" in workflow
     assert 'run_case sqp-irk-reference reduced 1 SQP IRK 5 5' in workflow
+    active_set_seed_bridge = workflow.split(
+        'if [[ "$ACADOS_ACTIVE_SET_ONLY" == "true" ]]; then', maxsplit=1
+    )[1].split('if [[ "$variant" == "sqp-irk-qp-hot" ]]', maxsplit=1)[0]
+    assert "--disable-acados-assisted-hot-start" in active_set_seed_bridge
+    assert "--acados-disable-standard-ipopt-warmup" in active_set_seed_bridge
+    assert "--common-initial-solution-recenter-first-node-bounds" in active_set_seed_bridge
+    assert "--adopt-common-initial-solution-warmup-cycles" in active_set_seed_bridge
+    assert "--acados-initial-irk-rollout" in active_set_seed_bridge
     assert "--acados-transfer-active-set-guard-radius 5e-4" in workflow
     assert "--acados-transfer-active-set-guard-margin 1" in workflow
     assert "--acados-transfer-active-set-threshold 5e-6" in workflow
@@ -7641,13 +7649,16 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert "tests/shard1/test_parametric_kkt.py" in workflow
     assert 'inputs.cycles == \'kkt_predictor\'' in workflow
     assert "inputs.refined_collocation_rhos" in workflow
-    assert "Run IPOPT reduced with guarded parametric KKT predictor" in workflow
+    assert "Run IPOPT reduced with KKT predictor and reset duals" in workflow
+    assert "Run IPOPT reduced with KKT predictor and preserved duals" in workflow
+    assert "Run IPOPT reduced with KKT predictor and predicted duals" in workflow
     assert 'PARAMETRIC_KKT_PREDICTOR: "true"' in workflow
-    assert "Validate the paired IPOPT KKT ablation" in workflow
+    assert "Validate the IPOPT KKT dual-policy ablation" in workflow
     assert "parametric_kkt_prediction_audits" in workflow
-    assert "cycling-fatigue-linux-ipopt-kkt-predictor-reduced" in workflow
+    assert "cycling-fatigue-linux-ipopt-kkt-dual-policies" in workflow
     assert (
-        "solver: ${{ fromJSON(inputs.cycles == 'kkt_predictor' && "
+        "solver: ${{ fromJSON((inputs.cycles == 'kkt_predictor' || "
+        "inputs.cycles == 'ipopt_dual') && "
         "'[\"ipopt\"]' || '[\"ipopt\",\"madnlp\",\"fatrop\"]') }}"
         in workflow
     )
@@ -7862,7 +7873,7 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert '--fatrop-state-scaling "$fatrop_state_scaling"' in benchmark_runner
     assert 'collocation_degree="${11:-3}"' in benchmark_runner
     assert 'ipopt_profile="${12:-periodic_collocation}"' in benchmark_runner
-    assert 'dual_warm_start="${13:-auto}"' in benchmark_runner
+    assert 'dual_warm_start="${DUAL_WARM_START:-${13:-auto}}"' in benchmark_runner
     assert 'target_refinement="${14:-auto}"' in benchmark_runner
     assert 'nlp_transfer_preparation="${NLP_TRANSFER_PREPARATION:-none}"' in benchmark_runner
     assert 'nlp_phase_one_mode="${NLP_PHASE_ONE_MODE:-mechanical}"' in benchmark_runner
