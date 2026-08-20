@@ -2950,6 +2950,7 @@ jobs:
         env:
           PARAMETRIC_KKT_PREDICTOR: "true"
           PARAMETRIC_KKT_DUAL_MODE: preserve
+          DUAL_WARM_START: all
         run: bash .github/scripts/run_cycling_benchmark_case.sh ipopt-kkt-preserve ipopt reduced mumps collocation benchmark-results "$BENCHMARK_CYCLES" "${{ inputs.compile_nlp_evaluators }}"
 
       - name: Run IPOPT reduced with KKT predictor and predicted duals
