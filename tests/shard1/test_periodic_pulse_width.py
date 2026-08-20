@@ -4540,6 +4540,65 @@ def test_terminal_wheel_qdot_continuation_rejects_full_mechanics_bounds():
         periodic_example.set_terminal_wheel_qdot_bound_margin(nmpc, 0.5)
 
 
+def test_terminal_wheel_qdot_continuation_densifies_offline_anchor_steps(
+    monkeypatch,
+):
+    class DenseStepSolver:
+        def set_convergence_tolerance(self, _value):
+            return None
+
+        def set_nlp_solver_tol_stat(self, _value):
+            return None
+
+    bounds = SimpleNamespace(
+        min=np.array([[-2.0 * np.pi, -2.0 * np.pi - 3.0, -2.0 * np.pi - 3.0]]),
+        max=np.array([[-2.0 * np.pi, -2.0 * np.pi + 3.0, -2.0 * np.pi + 3.0]]),
+    )
+    nmpc = SimpleNamespace(
+        nlp=[SimpleNamespace(x_bounds={"omega": bounds})],
+        _sync_acados_state_bounds=lambda: None,
+    )
+    observed = []
+
+    def solve_stage():
+        observed.append(float(bounds.max[0, 2] + 2.0 * np.pi))
+        return SimpleNamespace(
+            status=0,
+            residuals=np.zeros(4),
+            solver_time_to_optimize=0.0,
+            real_time_to_optimize=0.0,
+        )
+
+    monkeypatch.setattr(
+        periodic_example, "set_acados_runtime_max_iterations", lambda *_: None
+    )
+    monkeypatch.setattr(
+        periodic_example,
+        "snapshot_acados_diagnostics",
+        lambda solution: {"residuals": solution.residuals},
+    )
+    monkeypatch.setattr(
+        periodic_example,
+        "apply_solution_directly_to_periodic_nmpc_initial_guess",
+        lambda *_: None,
+    )
+
+    summaries = periodic_example.run_acados_terminal_wheel_qdot_bound_continuation(
+        nmpc,
+        DenseStepSolver(),
+        margins=(3.0, 0.5),
+        maximum_margin_step=1.0,
+        convergence_tolerance=1e-3,
+        stationarity_tolerance=5e-3,
+        echo=False,
+        solve_stage=solve_stage,
+    )
+
+    np.testing.assert_allclose([observed[0], observed[-1]], [3.0, 0.5])
+    assert np.max(np.abs(np.diff(observed))) <= 1.0
+    assert [summary["accepted"] for summary in summaries] == [True] * 4
+
+
 def test_acados_residual_history_selects_one_feasible_iterate():
     diagnostics = {
         "res_stat_all": np.array([5.0, 0.2, 1e-4]),

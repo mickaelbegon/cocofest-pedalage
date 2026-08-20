@@ -6309,6 +6309,7 @@ def run_acados_terminal_wheel_qdot_bound_continuation(
     convergence_tolerance: float,
     stationarity_tolerance: float | None,
     stage_iterations: int = 50,
+    maximum_margin_step: float | None = None,
     echo: bool = True,
     solve_stage=None,
 ) -> list[dict]:
@@ -6328,6 +6329,23 @@ def run_acados_terminal_wheel_qdot_bound_continuation(
         raise ValueError(
             "Terminal wheel-velocity continuation margins must decrease strictly."
         )
+    if maximum_margin_step is not None:
+        maximum_margin_step = float(maximum_margin_step)
+        if not np.isfinite(maximum_margin_step) or maximum_margin_step <= 0.0:
+            raise ValueError(
+                "The terminal wheel-velocity continuation maximum step must be "
+                "finite and positive."
+            )
+        dense_margins = [margins[0]]
+        for source_margin, target_margin in zip(margins, margins[1:]):
+            dense_margins.extend(
+                resolve_initial_fast_velocity_bound_margins(
+                    source_margin,
+                    target_margin,
+                    maximum_step=maximum_margin_step,
+                )[1:]
+            )
+        margins = tuple(dense_margins)
     stationarity_tolerance = (
         float(convergence_tolerance)
         if stationarity_tolerance is None
@@ -21117,6 +21135,11 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                 convergence_tolerance=args.acados_proximal_control_tolerance,
                 stationarity_tolerance=args.acados_stationarity_tolerance,
                 stage_iterations=args.acados_proximal_control_stage_iterations,
+                # This preparation is offline. Under resistance the first
+                # active terminal bound made the coarse 0.5-rad/s anchor jump
+                # immediately infeasible; keep each new violation below
+                # 0.01 rad/s without charging the measured RHO loop.
+                maximum_margin_step=0.01,
                 echo=echo,
             )
         )
