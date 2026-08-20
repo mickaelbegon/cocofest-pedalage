@@ -1266,6 +1266,7 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}
           ACADOS_SMOKE_RHOS: ${{ inputs.cycles == 'fatigue_endurance' && inputs.fatigue_endurance_max_rhos || inputs.acados_smoke_rhos }}
+          ACADOS_WINDOW_CYCLES: ${{ inputs.cycles_per_window }}
           ACADOS_OPTION_RHOS: ${{ inputs.acados_option_rhos }}
           ACADOS_HOMOTOPY_ONLY: ${{ inputs.cycles == 'acados_homotopy' }}
           ACADOS_CADENCE_GUARD_ONLY: ${{ inputs.cycles == 'acados_guard' }}
@@ -1287,6 +1288,10 @@ jobs:
               exit 1
             fi
           done
+          if [[ "$ACADOS_WINDOW_CYCLES" != "1" && "$ACADOS_WINDOW_CYCLES" != "2" ]]; then
+            echo "ACADOS cycles_per_window must be 1 or 2." >&2
+            exit 1
+          fi
           mkdir -p acados-smoke-results
           : > acados-smoke-results/expected-cases.txt
           : > acados-smoke-results/skipped-cases.tsv
@@ -1320,7 +1325,16 @@ jobs:
             local common_seed="$GITHUB_WORKSPACE/benchmark-seed/common-reduced.npz"
             local common_seed_options=()
             local stationarity=1e-3
+            local window_cycles=1
+            local total_cycles="$rhos"
             mkdir -p "$case_dir"
+            if [[ "$ACADOS_ACTIVE_SET_ONLY" == "true" && "$ACADOS_WINDOW_CYCLES" == "2" ]]; then
+              # An N-cycle RHO campaign with a two-cycle prediction horizon
+              # covers N+1 physical cycles: the first OCP exports two cycles,
+              # then every shift advances one cycle.
+              window_cycles=2
+              total_cycles=$((rhos + 1))
+            fi
             skip_case() {
               local reason="$1"
               printf '%s\t%s\n' "${variant}-${mechanics}" "$reason" \
@@ -1839,9 +1853,9 @@ jobs:
               --ipopt-use-sx \
               --ipopt-enforce-start-constraints \
               --disable-periodic-ipopt-refinement \
-              --cycles-per-window 1 \
+              --cycles-per-window "$window_cycles" \
               --stimulations-per-cycle 30 \
-              --n-windows "$rhos" \
+              --n-windows "$total_cycles" \
               --n-threads "$BENCHMARK_THREADS" \
               --crank-assistance "$BENCHMARK_ASSISTANCE" \
               --primal-feasibility-threshold 1e-5 \
@@ -1973,7 +1987,7 @@ jobs:
               # before the fatigue-optimal solve without imposing constant
               # cadence.
               run_case sqp-irk-two-stage-fast-guard-2p6-trust-10us reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
-              if (( ACADOS_SMOKE_RHOS <= 5 )); then
+              if (( ACADOS_SMOKE_RHOS <= 5 )) && [[ "$ACADOS_WINDOW_CYCLES" == "1" ]]; then
                 # The 5-RHO gate keeps both controls as negative evidence.
                 # Releasing transition nodes to 500 us made both variants hit
                 # MAXITER at resistant RHO 2, while the guarded baseline
@@ -2336,7 +2350,7 @@ jobs:
                 echo "The active-set campaign did not exercise persistent hysteresis." >&2
                 exit 1
               }
-            elif (( ACADOS_SMOKE_RHOS <= 5 )); then
+            elif (( ACADOS_SMOKE_RHOS <= 5 )) && [[ "$ACADOS_WINDOW_CYCLES" == "1" ]]; then
               # Rejected numerical controls remain valid benchmark outcomes:
               # both ran, wrote complete diagnostics, and failed for MAXITER
               # rather than an infrastructure error.

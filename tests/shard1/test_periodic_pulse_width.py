@@ -7728,6 +7728,11 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert "absolute terminal theta constraint" in workflow
     assert 'BENCHMARK_MODE: ${{ inputs.cycles }}' in workflow
     assert 'BENCHMARK_TORQUE: ${{ inputs.crank_assistance_nm }}' in workflow
+    assert 'ACADOS_WINDOW_CYCLES: ${{ inputs.cycles_per_window }}' in workflow
+    assert 'window_cycles=2' in workflow
+    assert 'total_cycles=$((rhos + 1))' in workflow
+    assert '--cycles-per-window "$window_cycles"' in workflow
+    assert '--n-windows "$total_cycles"' in workflow
     assert (
         '"$BENCHMARK_MODE" == "acados_active_set" && '
         '"$BENCHMARK_TORQUE" == signed:+*' in workflow
