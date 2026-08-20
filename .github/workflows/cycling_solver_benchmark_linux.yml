@@ -1946,9 +1946,16 @@ jobs:
               # even with 0.01-rad/s steps and reset dual/QP memory. Anti-drift
               # remains enforced by the absolute terminal theta constraint;
               # do not impose near-constant terminal cadence under load.
-              run_case sqp-irk-trust-10us reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
-              run_case sqp-irk-trust-10us-active-set-guard-memoryless reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
-              run_case sqp-irk-trust-10us-active-set-guard reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
+              # RHO 1 of the unconstrained resistant branch terminated exactly
+              # on the physical fast bound (-2*pi-3), so its cyclic shift made
+              # RHO 2 locally non-viable. Keep a 0.4-rad/s one-sided reserve at
+              # every optimized node; the slow bound and the physical audit
+              # remain unchanged. The two-stage transfer restores feasibility
+              # before the fatigue-optimal solve without imposing constant
+              # cadence.
+              run_case sqp-irk-two-stage-fast-guard-2p6-trust-10us reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
+              run_case sqp-irk-two-stage-fast-guard-2p6-trust-10us-active-set-guard-memoryless reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
+              run_case sqp-irk-two-stage-fast-guard-2p6-trust-10us-active-set-guard reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
             else
               run_case sqp-irk-terminal-omega-0p3-trust-10us reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
               run_case sqp-irk-terminal-omega-0p3-trust-10us-active-set-guard-memoryless reduced "$ACADOS_SMOKE_RHOS" SQP IRK 5 5
@@ -2273,7 +2280,7 @@ jobs:
           if [[ "$ACADOS_ACTIVE_SET_ONLY" == "true" ]]; then
             active_set_prefix="sqp-irk-terminal-omega-0p3-trust-10us"
             if [[ "$BENCHMARK_ASSISTANCE" == signed:+* ]]; then
-              active_set_prefix="sqp-irk-trust-10us"
+              active_set_prefix="sqp-irk-two-stage-fast-guard-2p6-trust-10us"
             fi
             baseline="acados-smoke-results/${active_set_prefix}-reduced/result.json"
             memoryless="acados-smoke-results/${active_set_prefix}-active-set-guard-memoryless-reduced/result.json"

@@ -7703,12 +7703,18 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert "--acados-transfer-pulse-width-trust-radius 1e-5" in workflow
     assert 'run_case sqp-irk-reference reduced 1 SQP IRK 5 5' in workflow
     assert 'if [[ "$BENCHMARK_ASSISTANCE" == signed:+* ]]; then' in workflow
-    assert 'run_case sqp-irk-trust-10us reduced "$ACADOS_SMOKE_RHOS"' in workflow
     assert (
-        'run_case sqp-irk-trust-10us-active-set-guard-memoryless reduced '
+        'run_case sqp-irk-two-stage-fast-guard-2p6-trust-10us reduced '
         '"$ACADOS_SMOKE_RHOS"' in workflow
     )
-    assert 'active_set_prefix="sqp-irk-trust-10us"' in workflow
+    assert (
+        'run_case sqp-irk-two-stage-fast-guard-2p6-trust-10us-active-set-guard-memoryless reduced '
+        '"$ACADOS_SMOKE_RHOS"' in workflow
+    )
+    assert (
+        'active_set_prefix="sqp-irk-two-stage-fast-guard-2p6-trust-10us"'
+        in workflow
+    )
     assert "absolute terminal theta constraint" in workflow
     active_set_seed_bridge = workflow.split(
         'if [[ "$ACADOS_ACTIVE_SET_ONLY" == "true" ]]; then', maxsplit=1
