@@ -3722,6 +3722,7 @@ def main(
     parametric_kkt_audit: bool = False,
     parametric_kkt_predictor: bool = False,
     parametric_kkt_predictor_maximum_residual_ratio: float = 0.95,
+    parametric_kkt_dual_mode: str = "reset",
     periodic_ipopt_refinement: bool = True,
     periodic_ipopt_refinement_iterations: int = 300,
     periodic_ipopt_refinement_use_sx: bool = True,
@@ -4527,6 +4528,9 @@ def main(
         )
         solver_configuration.parametric_kkt_predictor_maximum_residual_ratio = float(
             parametric_kkt_predictor_maximum_residual_ratio
+        )
+        solver_configuration.parametric_kkt_dual_mode = str(
+            parametric_kkt_dual_mode
         )
         solver_configuration.mechanical_equivalence_audit = True
         solver_configuration.full_contact_constraints_terminal = bool(
@@ -5911,6 +5915,11 @@ def build_cli() -> argparse.ArgumentParser:
         type=float,
         default=0.95,
     )
+    parser.add_argument(
+        "--parametric-kkt-dual-mode",
+        choices=("reset", "preserve", "predict"),
+        default="reset",
+    )
     parser.add_argument("--disable-periodic-fes-warmup-projection", action="store_true")
     parser.add_argument(
         "--periodic-fes-warmup-projection-weight", type=float, default=1.0
@@ -6517,6 +6526,7 @@ if __name__ == "__main__":
         parametric_kkt_predictor_maximum_residual_ratio=(
             args.parametric_kkt_predictor_maximum_residual_ratio
         ),
+        parametric_kkt_dual_mode=args.parametric_kkt_dual_mode,
         periodic_ipopt_refinement=args.periodic_ipopt_refinement,
         periodic_ipopt_refinement_iterations=args.periodic_ipopt_refinement_iterations,
         periodic_ipopt_refinement_use_sx=args.periodic_ipopt_refinement_use_sx,

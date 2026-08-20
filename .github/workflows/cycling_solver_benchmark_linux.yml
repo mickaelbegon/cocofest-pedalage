@@ -2938,47 +2938,77 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-      - name: Run IPOPT reduced with guarded parametric KKT predictor
+      - name: Run IPOPT reduced with KKT predictor and reset duals
         if: ${{ matrix.solver == 'ipopt' && inputs.cycles == 'kkt_predictor' }}
         env:
           PARAMETRIC_KKT_PREDICTOR: "true"
-        run: bash .github/scripts/run_cycling_benchmark_case.sh ipopt-kkt-predictor ipopt reduced mumps collocation benchmark-results "$BENCHMARK_CYCLES" "${{ inputs.compile_nlp_evaluators }}"
+          PARAMETRIC_KKT_DUAL_MODE: reset
+        run: bash .github/scripts/run_cycling_benchmark_case.sh ipopt-kkt-reset ipopt reduced mumps collocation benchmark-results "$BENCHMARK_CYCLES" "${{ inputs.compile_nlp_evaluators }}"
 
-      - name: Validate the paired IPOPT KKT ablation
+      - name: Run IPOPT reduced with KKT predictor and preserved duals
+        if: ${{ matrix.solver == 'ipopt' && inputs.cycles == 'kkt_predictor' }}
+        env:
+          PARAMETRIC_KKT_PREDICTOR: "true"
+          PARAMETRIC_KKT_DUAL_MODE: preserve
+        run: bash .github/scripts/run_cycling_benchmark_case.sh ipopt-kkt-preserve ipopt reduced mumps collocation benchmark-results "$BENCHMARK_CYCLES" "${{ inputs.compile_nlp_evaluators }}"
+
+      - name: Run IPOPT reduced with KKT predictor and predicted duals
+        if: ${{ matrix.solver == 'ipopt' && inputs.cycles == 'kkt_predictor' }}
+        env:
+          PARAMETRIC_KKT_PREDICTOR: "true"
+          PARAMETRIC_KKT_DUAL_MODE: predict
+        run: bash .github/scripts/run_cycling_benchmark_case.sh ipopt-kkt-predict ipopt reduced mumps collocation benchmark-results "$BENCHMARK_CYCLES" "${{ inputs.compile_nlp_evaluators }}"
+
+      - name: Validate the IPOPT KKT dual-policy ablation
         if: ${{ matrix.solver == 'ipopt' && inputs.cycles == 'kkt_predictor' }}
         run: |
           baseline="benchmark-results/ipopt-reduced/result.json"
-          predictor="benchmark-results/ipopt-kkt-predictor-reduced/result.json"
-          jq -e '
-            .results[0] |
-            (.success == true) and
-            (.parametric_kkt_prediction_audits | length > 0) and
-            any(.parametric_kkt_prediction_audits[]; .injected == true)
-          ' "$predictor"
-          python - "$baseline" "$predictor" <<'PY'
+          predictors=(
+            benchmark-results/ipopt-kkt-reset-reduced/result.json
+            benchmark-results/ipopt-kkt-preserve-reduced/result.json
+            benchmark-results/ipopt-kkt-predict-reduced/result.json
+          )
+          for predictor in "${predictors[@]}"; do
+            jq -e '
+              .results[0] |
+              (.success == true) and
+              (.parametric_kkt_prediction_audits | length > 0) and
+              all(.parametric_kkt_prediction_audits[];
+                (.repeat_stationarity_inf_norm | type) == "number" and
+                (.corrected_repeat_stationarity_inf_norm | type) == "number" and
+                (.predicted_dual_sign_guard_passes | type) == "boolean")
+            ' "$predictor"
+          done
+          python - "$baseline" "${predictors[@]}" <<'PY'
           import json
           import math
           import sys
 
           with open(sys.argv[1], encoding="utf-8") as stream:
               baseline = json.load(stream)["results"][0]
-          with open(sys.argv[2], encoding="utf-8") as stream:
-              predictor = json.load(stream)["results"][0]
           baseline_cost = float(baseline["executed_fatigue_objective"])
-          predictor_cost = float(predictor["executed_fatigue_objective"])
-          relative_cost = abs(predictor_cost - baseline_cost) / max(1.0, abs(baseline_cost))
-          if not math.isfinite(relative_cost) or relative_cost > 1e-7:
-              raise SystemExit(f"KKT predictor changed the executed cost by {relative_cost:.3e}")
-          print(f"KKT predictor relative executed-cost difference: {relative_cost:.3e}")
+          for path in sys.argv[2:]:
+              with open(path, encoding="utf-8") as stream:
+                  predictor = json.load(stream)["results"][0]
+              predictor_cost = float(predictor["executed_fatigue_objective"])
+              relative_cost = abs(predictor_cost - baseline_cost) / max(1.0, abs(baseline_cost))
+              if not math.isfinite(relative_cost) or relative_cost > 1e-7:
+                  raise SystemExit(f"{path} changed executed cost by {relative_cost:.3e}")
+              audits = predictor["parametric_kkt_prediction_audits"]
+              injected = sum(bool(audit.get("injected")) for audit in audits)
+              print(f"{path}: relative cost={relative_cost:.3e}, injected={injected}/{len(audits)}")
           PY
 
-      - name: Checkpoint IPOPT reduced KKT predictor
+      - name: Checkpoint IPOPT reduced KKT predictor policies
         if: ${{ always() && matrix.solver == 'ipopt' && inputs.cycles == 'kkt_predictor' }}
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
-          name: cycling-fatigue-linux-ipopt-kkt-predictor-reduced-${{ github.run_id }}
-          path: benchmark-results/ipopt-kkt-predictor-reduced/
+          name: cycling-fatigue-linux-ipopt-kkt-dual-policies-${{ github.run_id }}
+          path: |
+            benchmark-results/ipopt-kkt-reset-reduced/
+            benchmark-results/ipopt-kkt-preserve-reduced/
+            benchmark-results/ipopt-kkt-predict-reduced/
           if-no-files-found: warn
           retention-days: 30
 
@@ -3273,7 +3303,7 @@ jobs:
             *) echo "Unexpected benchmark solver: $BENCHMARK_SOLVER" >&2; exit 1 ;;
           esac
           if [[ "$PARAMETRIC_KKT_ABLATION" == "true" && "$BENCHMARK_SOLVER" == "ipopt" ]]; then
-            expected=$((expected + 1))
+            expected=$((expected + 3))
           fi
           if [[ "$BENCHMARK_CAMPAIGN" == "fatigue_endurance" ]]; then
             expected=1

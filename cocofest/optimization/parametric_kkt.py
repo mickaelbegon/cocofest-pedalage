@@ -47,6 +47,14 @@ class SparseKktSensitivityPrediction:
     used_least_squares: bool
 
 
+@dataclass(frozen=True)
+class ActiveDualPrediction:
+    constraint_multipliers: np.ndarray
+    variable_multipliers: np.ndarray
+    passes_sign_guard: bool
+    sign_violation_count: int
+
+
 class CanonicalNlpKktEvaluator:
     """Cache CasADi derivative graphs and return SciPy sparse numerical blocks.
 
@@ -540,11 +548,19 @@ def solve_sparse_bound_kkt_sensitivity(
     active_constraint_jacobian,
     active_target_step: np.ndarray,
     *,
+    stationarity_residual: np.ndarray | None = None,
     primal_regularization: float = 0.0,
     maximum_primal_step_inf_norm: float | None = None,
     least_squares_tolerance: float = 1e-10,
 ) -> SparseKktSensitivityPrediction:
-    """Solve ``[H J'; J 0] [dz, dl] = [0, db]`` sparsely."""
+    """Solve one sparse fixed-active-set Newton KKT system.
+
+    The convention is
+    ``[H J'; J 0] [dz, dl] = [-r_stationarity, b - c(z)]``.  Omitting
+    ``stationarity_residual`` preserves the former minimum-Hessian-norm
+    projection, but that projection must not be interpreted as a dual NLP
+    prediction.
+    """
 
     from scipy.sparse import bmat, csc_matrix, eye
     from scipy.sparse.linalg import MatrixRankWarning, lsmr, spsolve
@@ -559,6 +575,15 @@ def solve_sparse_bound_kkt_sensitivity(
         raise ValueError("The active-constraint Jacobian has an invalid shape.")
     if target_step.size != jacobian.shape[0]:
         raise ValueError("The active target step has an invalid dimension.")
+    stationarity = (
+        np.zeros(hessian.shape[0])
+        if stationarity_residual is None
+        else np.asarray(stationarity_residual, dtype=float).reshape(-1)
+    )
+    if stationarity.size != hessian.shape[0]:
+        raise ValueError("The stationarity residual has an invalid dimension.")
+    if not np.all(np.isfinite(stationarity)):
+        raise ValueError("The stationarity residual must be finite.")
     if not np.isfinite(primal_regularization) or primal_regularization < 0.0:
         raise ValueError("Primal KKT regularization must be finite and non-negative.")
     if maximum_primal_step_inf_norm is not None and (
@@ -579,7 +604,7 @@ def solve_sparse_bound_kkt_sensitivity(
         ],
         format="csc",
     )
-    right_hand_side = np.concatenate((np.zeros(hessian.shape[0]), target_step))
+    right_hand_side = np.concatenate((-stationarity, target_step))
     used_least_squares = False
     with warnings.catch_warnings():
         warnings.simplefilter("error", MatrixRankWarning)
@@ -616,6 +641,92 @@ def solve_sparse_bound_kkt_sensitivity(
         applied_step_scale=float(step_scale),
         linear_residual_inf_norm=float(np.linalg.norm(residual, ord=np.inf)),
         used_least_squares=used_least_squares,
+    )
+
+
+def sparse_active_jacobian_from_sources(
+    constraint_jacobian,
+    variable_count: int,
+    sources: tuple[tuple[str, int, str], ...],
+):
+    """Rebuild active rows at a new primal while preserving source order."""
+
+    from scipy.sparse import csc_matrix, eye, vstack
+
+    jacobian = csc_matrix(constraint_jacobian)
+    if variable_count < 0 or jacobian.shape[1] != variable_count:
+        raise ValueError("The active Jacobian variable dimension is invalid.")
+    identity = eye(variable_count, format="csc")
+    rows = []
+    for kind, index, side in sources:
+        if side not in ("lower", "upper", "equality"):
+            raise ValueError(f"Unknown active-row side '{side}'.")
+        if kind == "constraint":
+            if index < 0 or index >= jacobian.shape[0]:
+                raise IndexError("An active constraint index is out of range.")
+            rows.append(jacobian[index, :])
+        elif kind == "variable":
+            if index < 0 or index >= variable_count:
+                raise IndexError("An active variable index is out of range.")
+            rows.append(identity[index, :])
+        else:
+            raise ValueError(f"Unknown active-row kind '{kind}'.")
+    return (
+        vstack(rows, format="csc")
+        if rows
+        else csc_matrix((0, variable_count), dtype=float)
+    )
+
+
+def apply_active_dual_step(
+    sources: tuple[tuple[str, int, str], ...],
+    constraint_multipliers: np.ndarray,
+    variable_multipliers: np.ndarray,
+    dual_step: np.ndarray,
+    *,
+    sign_tolerance: float = 1e-10,
+) -> ActiveDualPrediction:
+    """Apply ``d lambda_A`` and audit IPOPT/CasADi bound-multiplier signs.
+
+    CasADi uses negative multipliers for lower bounds and positive
+    multipliers for upper bounds. Equality multipliers are unrestricted.
+    The function reports an invalid prediction instead of clipping it, since
+    clipping would destroy the Newton stationarity equation.
+    """
+
+    lam_g = np.asarray(constraint_multipliers, dtype=float).reshape(-1).copy()
+    lam_x = np.asarray(variable_multipliers, dtype=float).reshape(-1).copy()
+    delta = np.asarray(dual_step, dtype=float).reshape(-1)
+    if delta.size != len(sources):
+        raise ValueError("The active dual step has an invalid dimension.")
+    if not np.isfinite(sign_tolerance) or sign_tolerance < 0.0:
+        raise ValueError("The dual sign tolerance must be finite and non-negative.")
+    if not all(np.all(np.isfinite(values)) for values in (lam_g, lam_x, delta)):
+        raise ValueError("Dual prediction inputs must be finite.")
+
+    sign_violations = 0
+    for step, (kind, index, side) in zip(delta, sources):
+        if kind == "constraint":
+            target = lam_g
+        elif kind == "variable":
+            target = lam_x
+        else:
+            raise ValueError(f"Unknown active-row kind '{kind}'.")
+        if index < 0 or index >= target.size:
+            raise IndexError(f"Active-row index {index} is out of range for {kind}.")
+        target[index] += step
+        if side == "lower" and target[index] > sign_tolerance:
+            sign_violations += 1
+        elif side == "upper" and target[index] < -sign_tolerance:
+            sign_violations += 1
+        elif side not in ("lower", "upper", "equality"):
+            raise ValueError(f"Unknown active-row side '{side}'.")
+
+    return ActiveDualPrediction(
+        constraint_multipliers=lam_g,
+        variable_multipliers=lam_x,
+        passes_sign_guard=sign_violations == 0,
+        sign_violation_count=sign_violations,
     )
 
 

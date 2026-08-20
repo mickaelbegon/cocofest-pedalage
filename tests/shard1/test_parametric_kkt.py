@@ -5,11 +5,13 @@ from cocofest.optimization.parametric_kkt import (
     CanonicalNlpKktEvaluator,
     active_kkt_rhs_from_bound_changes,
     active_kkt_rhs_to_bound_targets,
+    apply_active_dual_step,
     assemble_active_kkt_rows,
     assemble_sparse_active_kkt_rows,
     kkt_prediction_passes_residual_guard,
     solve_parametric_kkt_sensitivity,
     solve_sparse_bound_kkt_sensitivity,
+    sparse_active_jacobian_from_sources,
 )
 
 
@@ -238,6 +240,65 @@ def test_canonical_sparse_kkt_predicts_moving_equality_solution():
     np.testing.assert_allclose(old_x + prediction.primal_step, [13.0 / 15.0, 13.0 / 30.0])
     assert prediction.linear_residual_inf_norm < 1e-13
     assert prediction.used_least_squares is False
+
+
+def test_sparse_newton_kkt_recovers_new_primal_and_dual_from_repeat():
+    from casadi import SX, vertcat
+
+    x = SX.sym("x", 2)
+    evaluator = CanonicalNlpKktEvaluator(
+        {"x": x, "f": x[0] ** 2 + 2 * x[1] ** 2, "g": vertcat(x[0] + x[1])}
+    )
+    repeat = np.array([0.8, 0.4])
+    old_lam_g = np.array([-4.0 / 3.0])
+    old_lam_x = np.zeros(2)
+    blocks = evaluator.evaluate(repeat, old_lam_g)
+    sources = (("constraint", 0, "equality"),)
+    active_jacobian = sparse_active_jacobian_from_sources(
+        blocks.constraint_jacobian,
+        variable_count=2,
+        sources=sources,
+    )
+    stationarity = (
+        blocks.objective_gradient
+        + np.asarray(blocks.constraint_jacobian.T @ old_lam_g).reshape(-1)
+        + old_lam_x
+    )
+    prediction = solve_sparse_bound_kkt_sensitivity(
+        blocks.lagrangian_hessian,
+        active_jacobian,
+        active_target_step=np.array([1.3 - blocks.constraint_values[0]]),
+        stationarity_residual=stationarity,
+    )
+    duals = apply_active_dual_step(
+        sources,
+        old_lam_g,
+        old_lam_x,
+        prediction.dual_step,
+    )
+
+    np.testing.assert_allclose(repeat + prediction.primal_step, [13 / 15, 13 / 30])
+    np.testing.assert_allclose(duals.constraint_multipliers, [-26 / 15])
+    np.testing.assert_allclose(duals.variable_multipliers, [0.0, 0.0])
+    assert duals.passes_sign_guard
+    assert prediction.linear_residual_inf_norm < 1e-13
+
+
+def test_active_dual_prediction_rejects_wrong_bound_sign_without_clipping():
+    prediction = apply_active_dual_step(
+        sources=(
+            ("constraint", 0, "lower"),
+            ("variable", 0, "upper"),
+        ),
+        constraint_multipliers=np.array([-0.2]),
+        variable_multipliers=np.array([0.3]),
+        dual_step=np.array([0.4, -0.5]),
+    )
+
+    np.testing.assert_allclose(prediction.constraint_multipliers, [0.2])
+    np.testing.assert_allclose(prediction.variable_multipliers, [-0.2])
+    assert not prediction.passes_sign_guard
+    assert prediction.sign_violation_count == 2
 
 
 def test_sparse_active_rows_do_not_materialize_dense_identity():

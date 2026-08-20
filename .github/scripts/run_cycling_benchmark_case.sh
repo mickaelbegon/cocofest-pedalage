@@ -39,6 +39,7 @@ high_accuracy_trace_cycle_milestones="${HIGH_ACCURACY_TRACE_CYCLE_MILESTONES:-43
 rho_pulse_width_transfer_mode="${RHO_PULSE_WIDTH_TRANSFER_MODE:-repeat}"
 rho_pulse_width_extrapolation_factor="${RHO_PULSE_WIDTH_EXTRAPOLATION_FACTOR:-1.0}"
 parametric_kkt_predictor="${PARAMETRIC_KKT_PREDICTOR:-false}"
+parametric_kkt_dual_mode="${PARAMETRIC_KKT_DUAL_MODE:-reset}"
 
 if ! [[ "$collocation_degree" =~ ^[2-9]$ ]]; then
   echo "COLLOCATION_DEGREE must be an integer between 2 and 9, got '$collocation_degree'." >&2
@@ -76,12 +77,23 @@ case "$parametric_kkt_predictor" in
   true|false) ;;
   *) echo "PARAMETRIC_KKT_PREDICTOR must be true or false." >&2; exit 2 ;;
 esac
+case "$parametric_kkt_dual_mode" in
+  reset|preserve|predict) ;;
+  *) echo "PARAMETRIC_KKT_DUAL_MODE must be reset, preserve, or predict." >&2; exit 2 ;;
+esac
 if [[ "$parametric_kkt_predictor" == "true" ]]; then
   if [[ "$solver" != "ipopt" && "$solver" != "madnlp" ]]; then
     echo "The parametric KKT predictor is available only for IPOPT/MadNLP." >&2
     exit 2
   fi
-  solver_options+=(--parametric-kkt-predictor)
+  if [[ "$solver" == "madnlp" && "$parametric_kkt_dual_mode" == "predict" ]]; then
+    echo "MadNLP does not consume predicted lam_g0/lam_x0; use reset or preserve." >&2
+    exit 2
+  fi
+  solver_options+=(
+    --parametric-kkt-predictor
+    --parametric-kkt-dual-mode "$parametric_kkt_dual_mode"
+  )
 fi
 
 if [[ "$ipopt_profile" =~ ^scientific[-_]radau[3456]$ ]]; then

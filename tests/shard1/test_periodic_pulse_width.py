@@ -13120,6 +13120,7 @@ def test_comparison_forwards_solver_neutral_seed_diagnostics(monkeypatch):
         parametric_kkt_audit=True,
         parametric_kkt_predictor=True,
         parametric_kkt_predictor_maximum_residual_ratio=0.8,
+        parametric_kkt_dual_mode="preserve",
         shared_transfer_phase_one=True,
         acados_transfer_phase_one_mode="mechanical",
         acados_transfer_phase_one_lookback_nodes=12,
@@ -13144,6 +13145,8 @@ def test_comparison_forwards_solver_neutral_seed_diagnostics(monkeypatch):
     assert captured["madnlp"].parametric_kkt_audit is True
     assert captured["ipopt"].parametric_kkt_predictor is True
     assert captured["madnlp"].parametric_kkt_predictor is True
+    assert captured["ipopt"].parametric_kkt_dual_mode == "preserve"
+    assert captured["madnlp"].parametric_kkt_dual_mode == "preserve"
     assert (
         captured["ipopt"].parametric_kkt_predictor_maximum_residual_ratio
         == pytest.approx(0.8)
@@ -13183,6 +13186,8 @@ def test_shared_transfer_rollout_cli_is_available_to_ipopt():
             "--exact-initial-nlp-audit",
             "--parametric-kkt-audit",
             "--parametric-kkt-predictor",
+            "--parametric-kkt-dual-mode",
+            "predict",
             "--transfer-full-dynamics-rollout",
             "--transfer-phase-one",
             "--acados-transfer-phase-one-mode",
@@ -13207,6 +13212,8 @@ def test_shared_transfer_rollout_cli_is_available_to_ipopt():
             "--exact-initial-nlp-audit",
             "--parametric-kkt-audit",
             "--parametric-kkt-predictor",
+            "--parametric-kkt-dual-mode",
+            "preserve",
             "--compact-rho-output",
             "--shared-transfer-phase-one",
             "--acados-transfer-phase-one",
@@ -13296,6 +13303,7 @@ def test_shared_transfer_rollout_cli_is_available_to_ipopt():
     assert args.exact_initial_nlp_audit is True
     assert args.parametric_kkt_audit is True
     assert args.parametric_kkt_predictor is True
+    assert args.parametric_kkt_dual_mode == "predict"
     assert args.acados_transfer_phase_one is True
     assert args.acados_transfer_phase_one_mode == "mechanical"
     assert args.acados_transfer_phase_one_lookback_nodes == 15
@@ -13308,6 +13316,7 @@ def test_shared_transfer_rollout_cli_is_available_to_ipopt():
     assert comparison_args.exact_initial_nlp_audit is True
     assert comparison_args.parametric_kkt_audit is True
     assert comparison_args.parametric_kkt_predictor is True
+    assert comparison_args.parametric_kkt_dual_mode == "preserve"
     assert comparison_args.compact_rho_output is True
     assert comparison_args.shared_transfer_phase_one is True
     assert comparison_args.acados_transfer_phase_one is True

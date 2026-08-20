@@ -1743,6 +1743,17 @@ def build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--parametric-kkt-dual-mode",
+        choices=("reset", "preserve", "predict"),
+        default="reset",
+        help=(
+            "Dual policy after an accepted KKT primal correction: reset the "
+            "multipliers, preserve the previous RHO multipliers, or inject "
+            "the active-set Newton prediction. The last mode is experimental "
+            "and currently meaningful only with IPOPT."
+        ),
+    )
+    parser.add_argument(
         "--acados-print-level",
         type=int,
         default=0,
@@ -8259,7 +8270,9 @@ def parametric_kkt_next_rho_prediction_audit(
     from cocofest.optimization.parametric_kkt import (
         active_kkt_rhs_from_bound_changes,
         active_kkt_rhs_to_bound_targets,
+        apply_active_dual_step,
         solve_sparse_bound_kkt_sensitivity,
+        sparse_active_jacobian_from_sources,
     )
 
     start = perf_counter()
@@ -8319,11 +8332,29 @@ def parametric_kkt_next_rho_prediction_audit(
         new_lbg,
         new_ubg,
     )
+    repeat_blocks = evaluator.evaluate(
+        repeat, snapshot["constraint_multipliers"]
+    )
+    repeat_active_jacobian = sparse_active_jacobian_from_sources(
+        repeat_blocks.constraint_jacobian,
+        variable_count=repeat.size,
+        sources=snapshot["active"].sources,
+    )
+    repeat_stationarity = (
+        repeat_blocks.objective_gradient
+        + np.asarray(
+            repeat_blocks.constraint_jacobian.T
+            @ snapshot["constraint_multipliers"],
+            dtype=float,
+        ).reshape(-1)
+        + snapshot["variable_multipliers"]
+    )
     correction_start = perf_counter()
     repeat_correction = solve_sparse_bound_kkt_sensitivity(
-        snapshot["blocks"].lagrangian_hessian,
-        snapshot["active"].jacobian,
+        repeat_blocks.lagrangian_hessian,
+        repeat_active_jacobian,
         repeat_target_residual,
+        stationarity_residual=repeat_stationarity,
         primal_regularization=1e-8,
         maximum_primal_step_inf_norm=100.0,
     )
@@ -8335,8 +8366,32 @@ def parametric_kkt_next_rho_prediction_audit(
     corrected_repeat = np.minimum(
         corrected_repeat, np.where(np.isfinite(new_ubx), new_ubx, np.inf)
     )
-    corrected_repeat_constraints = evaluator.evaluate_constraints(corrected_repeat)
+    dual_prediction = apply_active_dual_step(
+        snapshot["active"].sources,
+        snapshot["constraint_multipliers"],
+        snapshot["variable_multipliers"],
+        repeat_correction.dual_step,
+    )
+    corrected_repeat_blocks = evaluator.evaluate(
+        corrected_repeat, dual_prediction.constraint_multipliers
+    )
+    corrected_repeat_constraints = corrected_repeat_blocks.constraint_values
+    corrected_repeat_stationarity = (
+        corrected_repeat_blocks.objective_gradient
+        + np.asarray(
+            corrected_repeat_blocks.constraint_jacobian.T
+            @ dual_prediction.constraint_multipliers,
+            dtype=float,
+        ).reshape(-1)
+        + dual_prediction.variable_multipliers
+    )
     interface._cocofest_kkt_corrected_repeat_candidate = corrected_repeat.copy()
+    interface._cocofest_kkt_predicted_lam_g = (
+        dual_prediction.constraint_multipliers.copy()
+    )
+    interface._cocofest_kkt_predicted_lam_x = (
+        dual_prediction.variable_multipliers.copy()
+    )
 
     def combined_violation(candidate, constraints):
         variable_violation = _maximum_bound_violation(candidate, new_lbx, new_ubx)
@@ -8353,6 +8408,12 @@ def parametric_kkt_next_rho_prediction_audit(
     )
     corrected_repeat_residual = combined_violation(
         corrected_repeat, corrected_repeat_constraints
+    )
+    repeat_stationarity_inf_norm = float(
+        np.linalg.norm(repeat_stationarity, ord=np.inf)
+    )
+    corrected_repeat_stationarity_inf_norm = float(
+        np.linalg.norm(corrected_repeat_stationarity, ord=np.inf)
     )
     moving_targets = int(np.count_nonzero(np.abs(target_step) > 0.0))
     return {
@@ -8402,6 +8463,20 @@ def parametric_kkt_next_rho_prediction_audit(
         "corrected_repeat_primal_residual": float(corrected_repeat_residual),
         "repeat_correction_improves_primal_residual": bool(
             corrected_repeat_residual <= repeat_residual
+        ),
+        "repeat_stationarity_inf_norm": repeat_stationarity_inf_norm,
+        "corrected_repeat_stationarity_inf_norm": (
+            corrected_repeat_stationarity_inf_norm
+        ),
+        "repeat_correction_improves_stationarity": bool(
+            corrected_repeat_stationarity_inf_norm
+            <= repeat_stationarity_inf_norm
+        ),
+        "predicted_dual_sign_guard_passes": bool(
+            dual_prediction.passes_sign_guard
+        ),
+        "predicted_dual_sign_violation_count": int(
+            dual_prediction.sign_violation_count
         ),
         "solve_wall_time_s": float(solve_wall_time_s),
         "repeat_correction_wall_time_s": float(correction_wall_time_s),
@@ -16155,6 +16230,15 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                 "--parametric-kkt-predictor is available only for IPOPT and MadNLP."
             )
         args.parametric_kkt_audit = True
+    if (
+        args.solver == "madnlp"
+        and getattr(args, "parametric_kkt_dual_mode", "reset") == "predict"
+    ):
+        raise ValueError(
+            "--parametric-kkt-dual-mode=predict is not supported by the "
+            "current MadNLP/Bioptim interface because it does not consume "
+            "lam_g0/lam_x0. Use reset or preserve for the primal ablation."
+        )
     if not (
         np.isfinite(args.parametric_kkt_predictor_maximum_residual_ratio)
         and 0.0 < args.parametric_kkt_predictor_maximum_residual_ratio <= 1.0
@@ -20415,8 +20499,20 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                     and corrected_residual
                     <= args.parametric_kkt_predictor_maximum_residual_ratio
                     * repeat_residual
+                    and prediction_audit[
+                        "repeat_correction_improves_stationarity"
+                    ]
                 )
+                kkt_dual_mode = getattr(
+                    args, "parametric_kkt_dual_mode", "reset"
+                )
+                if kkt_dual_mode == "predict":
+                    accepted = bool(
+                        accepted
+                        and prediction_audit["predicted_dual_sign_guard_passes"]
+                    )
                 prediction_audit["passes_injection_guard"] = accepted
+                prediction_audit["dual_mode"] = kkt_dual_mode
                 if accepted:
                     interface = _nmpc.ocp_solver
                     inject = getattr(interface, "set_next_initial_guess_override", None)
@@ -20426,12 +20522,22 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                             "Bioptim one-shot initial-guess interface."
                         )
                     inject(interface._cocofest_kkt_corrected_repeat_candidate)
-                    if hasattr(interface, "lam_g"):
-                        interface.lam_g = None
-                    if hasattr(interface, "lam_x"):
-                        interface.lam_x = None
+                    if kkt_dual_mode == "reset":
+                        if hasattr(interface, "lam_g"):
+                            interface.lam_g = None
+                        if hasattr(interface, "lam_x"):
+                            interface.lam_x = None
+                    elif kkt_dual_mode == "predict":
+                        interface.lam_g = (
+                            interface._cocofest_kkt_predicted_lam_g.copy()
+                        )
+                        interface.lam_x = (
+                            interface._cocofest_kkt_predicted_lam_x.copy()
+                        )
                     prediction_audit["injected"] = True
-                    prediction_audit["dual_reset"] = True
+                    prediction_audit["dual_reset"] = bool(
+                        kkt_dual_mode == "reset"
+                    )
             prediction_audit["target_rho"] = completed_physical_rhos + 1
             parametric_kkt_prediction_audits.append(prediction_audit)
             if echo:
@@ -20445,6 +20551,11 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                     f"{prediction_audit.get('predicted_primal_residual')} "
                     f"corrected_repeat_residual="
                     f"{prediction_audit.get('corrected_repeat_primal_residual')} "
+                    f"repeat_stationarity="
+                    f"{prediction_audit.get('repeat_stationarity_inf_norm')} "
+                    f"corrected_stationarity="
+                    f"{prediction_audit.get('corrected_repeat_stationarity_inf_norm')} "
+                    f"dual_mode={prediction_audit.get('dual_mode')} "
                     f"injected={prediction_audit.get('injected')} "
                     f"wall_time_s={prediction_audit.get('total_wall_time_s')}"
                 )
