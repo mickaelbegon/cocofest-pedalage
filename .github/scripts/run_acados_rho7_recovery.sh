@@ -43,6 +43,7 @@ common_options=(
   --adopt-common-initial-solution-warmup-cycles
   --disable-acados-assisted-hot-start
   --acados-disable-standard-ipopt-warmup
+  --disable-periodic-fes-warmup-projection
   --retry-failed-rho-without-advance
   --max-consecutive-failing 2
   --acados-integrator-type IRK
@@ -50,7 +51,6 @@ common_options=(
   --acados-sim-steps 5
   --acados-wheel-qdot-fast-bound-margin "$qdot_margin"
   --acados-cyclical-transfer-mode extrapolate
-  --acados-initial-irk-rollout
   --acados-transfer-irk-rollout
   --acados-transfer-bound-homotopy
   --acados-transfer-bound-homotopy-fractions 0,0.125,0.25,0.375,0.5,0.625,0.75,0.875,1

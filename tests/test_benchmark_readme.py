@@ -143,6 +143,8 @@ def test_rho7_recovery_uses_a_pre_failure_checkpoint_and_acados_recertification(
 
     assert "inputs.cycles == 'acados_rho7_recovery'" in workflow
     assert "run_acados_rho7_recovery.sh" in workflow
+    assert 'ACADOS_RHO7_REFERENCE_RUN_ID: "32377237731"' in workflow
+    assert "reference-reduced-feasible-seed.npz" in workflow
     assert "--rho-prepared-checkpoint-windows 6" in script
     assert "prepared-after-6-for-7.npz" in script
     assert "--acados-ipopt-recovery-collocation-degree 5" in script
@@ -153,6 +155,8 @@ def test_rho7_recovery_uses_a_pre_failure_checkpoint_and_acados_recertification(
     assert "--wheel-qdot-bound-margin 2.6" in workflow
     assert "--acados-transfer-irk-rollout" in script
     assert "--acados-transfer-bound-homotopy" in script
+    assert "--disable-periodic-fes-warmup-projection" in script
+    assert "--acados-initial-irk-rollout" not in script
     assert "--acados-ipopt-fallback-advance" not in script
     assert ".results[0].validated_cycles >= 1" in script
     assert ".target_rho == 1 and .advanced == true" in script

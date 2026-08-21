@@ -149,6 +149,7 @@ concurrency:
 env:
   ACADOS_DROPOUT_RHOS: "100,150,430"
   ACADOS_DROPOUT_FOLLOWUP_RHOS: "30"
+  ACADOS_RHO7_REFERENCE_RUN_ID: "32377237731"
   CASADI_VERSION: "3.7.2"
   CASADI_COMMIT: f959d3175a444d763e4eda4aece48f4c5f4a6f90
   # Same 3.7.2 version, with the post-release libMad ABI integration.
@@ -566,6 +567,16 @@ jobs:
           repository: ${{ github.repository }}
           run-id: ${{ inputs.acados_control_seed_source_run_id }}
 
+      - name: Download the pinned resistant ACADOS reference seed
+        if: ${{ inputs.cycles == 'acados_rho7_recovery' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: cycling-acados-smoke-${{ env.ACADOS_RHO7_REFERENCE_RUN_ID }}
+          path: benchmark-rho7-reference
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ env.ACADOS_RHO7_REFERENCE_RUN_ID }}
+
       - name: Build the common-state ACADOS-control seed
         if: ${{ inputs.acados_control_seed_source_run_id != '' }}
         env:
@@ -636,7 +647,7 @@ jobs:
               "$ACADOS_DROPOUT_FOLLOWUP_RHOS"
           elif [[ "${{ inputs.cycles }}" == "acados_rho7_recovery" ]]; then
             bash .github/scripts/run_acados_rho7_recovery.sh \
-              "$common_seed_path" \
+              benchmark-rho7-reference/reference-reduced-feasible-seed.npz \
               "${{ inputs.crank_assistance_nm }}" \
               "${{ inputs.terminal_wheel_q_slack }}" \
               "${{ inputs.solver_max_iterations }}" \
