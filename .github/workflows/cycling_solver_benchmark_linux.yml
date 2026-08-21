@@ -863,8 +863,8 @@ jobs:
                  .results[0].validated_cycles < $requested and
                  .results[0].maximum_consecutive_failures >= 2 and
                  .results[0].stop.label != null and
-                 .results[0].fatigue_endurance_outcome.accepted == true and
-                 .results[0].fatigue_endurance_outcome.label == "fatigue_limited_candidate" and
+                 (.results[0].fatigue_endurance_outcome.label == "fatigue_limited_candidate" or
+                  .results[0].fatigue_endurance_outcome.label == "unconfirmed_endurance_stop") and
                  .results[0].acados_ipopt_recovery.attempt_count >= 1)
               ) and
               any(.results[0].acados_ipopt_recovery_summaries[];

@@ -5799,6 +5799,24 @@ def test_endurance_outcome_accepts_terminal_recruitment_saturation():
     assert outcome["accepted"] is True
 
 
+def test_endurance_outcome_rejects_small_early_capacity_loss():
+    outcome = comparison_example._fatigue_endurance_outcome(
+        success=False,
+        validated_cycles=6,
+        requested_cycles=30,
+        maximum_consecutive_failures=2,
+        minimum_capacity_ratio=0.8969,
+        control_saturation=[
+            {"upper_fraction": 0.25, "terminal_upper_fraction": 0.4}
+        ],
+    )
+
+    assert outcome["label"] == "unconfirmed_endurance_stop"
+    assert outcome["accepted"] is False
+    assert outcome["material_capacity_ratio_threshold"] == 0.8
+    assert "ding_force_capacity_materially_decreased" not in outcome["evidence"]
+
+
 def test_uncertified_attempt_streak_includes_filtered_same_rho_retries():
     result = {
         "solver_attempt_accounting": {

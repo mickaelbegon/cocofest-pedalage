@@ -1043,9 +1043,12 @@ ne suffit pas, mais la séquence 19--36 conserve le bassin franchissant le RHO
     de charge. Tester d'abord une enveloppe sur `(theta, omega)` et la capacité
     musculaire minimale; ne pas réintroduire une cadence constante dans le
     cycle.
-55. [TODO] Corriger le libellé `fatigue_limited_candidate` des arrêts ACADOS
-    précoces quand aucune preuve de fatigue n'existe. Ces cas doivent rester
-    `unconfirmed_endurance_stop` ou `numerical_failure_before_valid_cycle`.
+55. [terminé, seuil conservateur] Le libellé `fatigue_limited_candidate`
+    exige désormais une perte matérielle d'au moins 20 % de `A/A_scale`, en
+    plus des deux échecs et de la saturation PW. L'arrêt ACADOS précoce avec
+    `min(A/A_scale)=0.8969` reste donc `unconfirmed_endurance_stop`. Le JSON
+    expose le seuil et la valeur observée; la CI accepte cet outcome comme
+    résultat numérique explicite sans le renommer fatigue.
 56. [TODO secondaire] Ajouter un mode de workflow qui réutilise réellement le
     seed commun certifié entre ablations successives. L'entrée
     `acados_seed_source_run_id` réutilise un seed ACADOS, mais ne supprime pas

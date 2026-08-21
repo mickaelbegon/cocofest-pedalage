@@ -1104,8 +1104,17 @@ def _fatigue_endurance_outcome(
     evidence = []
     if maximum_consecutive_failures >= 2:
         evidence.append("two_consecutive_uncertified_windows")
-    if minimum_capacity_ratio is not None and minimum_capacity_ratio < 1.0 - 1e-9:
-        evidence.append("ding_force_capacity_decreased")
+    # A tiny decrease in A is expected after only a few certified cycles and
+    # cannot distinguish physiological exhaustion from a backend failure.
+    # Keep the endpoint label deliberately conservative: at least 20 % of the
+    # nominal Ding force capacity must be lost before fatigue is considered a
+    # plausible cause of the stop.
+    material_capacity_ratio_threshold = 0.8
+    if (
+        minimum_capacity_ratio is not None
+        and minimum_capacity_ratio <= material_capacity_ratio_threshold
+    ):
+        evidence.append("ding_force_capacity_materially_decreased")
     if any(
         max(
             row.get("upper_fraction", 0.0),
@@ -1118,7 +1127,7 @@ def _fatigue_endurance_outcome(
 
     fatigue_limited = set(evidence) == {
         "two_consecutive_uncertified_windows",
-        "ding_force_capacity_decreased",
+        "ding_force_capacity_materially_decreased",
         "pulse_width_upper_bound_active",
     }
     return {
@@ -1129,6 +1138,8 @@ def _fatigue_endurance_outcome(
         ),
         "accepted": fatigue_limited,
         "evidence": evidence,
+        "minimum_capacity_ratio": minimum_capacity_ratio,
+        "material_capacity_ratio_threshold": material_capacity_ratio_threshold,
     }
 
 

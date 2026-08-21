@@ -59,9 +59,10 @@ Les campagnes d'endurance emploient `fatigue_endurance_max_rhos` (par défaut
 `2000`)
 comme garde-fou, non comme une durée physiologique imposée. Un arrêt avant ce
 plafond ne passe pas automatiquement : il doit associer (i) deux fenêtres RHO
-consécutives non certifiées, (ii) une baisse observée de la capacité `A/A_scale`
-des muscles de Ding, et (iii) une activation notable de la borne supérieure de
-PW. Il est alors rapporté comme `fatigue_limited_candidate`, donc comme un
+consécutives non certifiées, (ii) une perte matérielle d'au moins 20 % de la
+capacité `A/A_scale` d'au moins un muscle de Ding, et (iii) une activation
+notable de la borne supérieure de PW. Il est alors rapporté comme
+`fatigue_limited_candidate`, donc comme un
 outcome expérimental important et non comme une erreur d'infrastructure. Sans
 ces trois indices, il reste `unconfirmed_endurance_stop` et fait échouer le
 gate : une non-convergence numérique ne doit pas être renommée fatigue.
