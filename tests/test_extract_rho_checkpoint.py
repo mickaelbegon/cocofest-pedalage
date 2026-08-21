@@ -92,3 +92,30 @@ def test_repeat_checkpoint_starts_from_last_certified_terminal(tmp_path):
         np.testing.assert_allclose(archive["controls__pw"], [[6.0, 7.0]])
     assert metadata["producer_mode"] == "certified_prefix_repeat_checkpoint"
     assert metadata["producer_repeat_last_certified"] is True
+
+
+def test_extrapolated_checkpoint_preserves_within_cycle_increments(tmp_path):
+    source = tmp_path / "prefix.npz"
+    certified_prefix(source)
+    output = tmp_path / "extrapolated.npz"
+
+    metadata = checkpoint_module.extract_rho_checkpoint(
+        source,
+        output,
+        completed_windows=4,
+        extrapolate_last_certified=True,
+    )
+
+    with np.load(output, allow_pickle=False) as archive:
+        # Both states gained +2 over the certified cycle. Translating the full
+        # profiles starts exactly at the certified terminal and retains each
+        # previous within-cycle increment.
+        np.testing.assert_allclose(archive["states__theta"], [[8.0, 9.0, 10.0]])
+        np.testing.assert_allclose(
+            archive["states__omega"], [[108.0, 109.0, 110.0]]
+        )
+        np.testing.assert_allclose(archive["controls__pw"], [[6.0, 7.0]])
+    assert metadata["producer_mode"] == (
+        "certified_prefix_extrapolated_checkpoint"
+    )
+    assert metadata["producer_extrapolate_last_certified"] is True

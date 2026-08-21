@@ -111,6 +111,19 @@ python examples/fes_multibody/cycling/extract_rho_checkpoint.py \
   --repeat-last-certified
 test -s "$repeat_checkpoint"
 
+# The repeat above is retained as the negative-control seed.  For recovery,
+# continue every state by the measured boundary-to-boundary increment of the
+# last certified cycle.  This preserves the phase-aligned within-cycle
+# increments and removes the artificial terminal-to-old-node-1 discontinuity.
+extrapolated_checkpoint="$baseline_dir/extrapolated-after-6-for-7.npz"
+python examples/fes_multibody/cycling/extract_rho_checkpoint.py \
+  --source "$baseline_dir/validated-prefix.npz" \
+  --output "$extrapolated_checkpoint" \
+  --completed-windows 6 \
+  --cycles-per-window 1 \
+  --extrapolate-last-certified
+test -s "$extrapolated_checkpoint"
+
 # Solver-neutral control experiment: solve the replay checkpoint directly
 # with reduced IPOPT/Radau-5, before any ACADOS bound/target transfer.  This
 # separates a genuinely infeasible replay formulation from corruption in the
@@ -137,7 +150,7 @@ python examples/fes_multibody/cycling/cycling_fes_solver_comparison.py \
   --first-node-wheel-q-slack 0 \
   --terminal-wheel-q-slack "$terminal_q_slack" \
   --state-scaling full \
-  --common-initial-solution "$repeat_checkpoint" \
+  --common-initial-solution "$extrapolated_checkpoint" \
   --common-initial-solution-recenter-first-node-bounds \
   --adopt-common-initial-solution-warmup-cycles \
   --compact-rho-output \
@@ -152,7 +165,7 @@ test -s "$reference_dir/result.json"
 python examples/fes_multibody/cycling/cycling_fes_solver_comparison.py \
   "${common_options[@]}" \
   --n-windows 2 \
-  --common-initial-solution "$repeat_checkpoint" \
+  --common-initial-solution "$extrapolated_checkpoint" \
   --disable-periodic-ipopt-refinement \
   --warmup-ipopt-linear-solver mumps \
   --acados-ipopt-recovery \
