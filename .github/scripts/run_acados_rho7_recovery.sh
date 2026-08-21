@@ -67,6 +67,7 @@ common_options=(
   --acados-control-homotopy-tolerance 2e-2
   --acados-control-homotopy-window-growth 10
   --acados-control-homotopy-window-max-radius 1e-5
+  --acados-transfer-pulse-width-trust-radius 1e-5
   --ipopt-linear-solver mumps
 )
 
