@@ -5814,7 +5814,7 @@ def test_endurance_outcome_requires_capacity_and_recruitment_evidence():
         validated_cycles=120,
         requested_cycles=1000,
         maximum_consecutive_failures=2,
-        minimum_capacity_ratio=0.83,
+        minimum_capacity_ratio=0.78,
         control_saturation=[{"upper_fraction": 0.2}],
     )
     rejected = comparison_example._fatigue_endurance_outcome(
