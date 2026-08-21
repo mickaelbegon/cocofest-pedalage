@@ -25,7 +25,8 @@ fi
 root_dir=acados-ipopt-hybrid-results
 baseline_dir="$root_dir/rho7-baseline"
 recovery_dir="$root_dir/rho7-r5-recertification"
-mkdir -p "$baseline_dir" "$recovery_dir"
+reference_dir="$root_dir/rho7-ipopt-r5-reference"
+mkdir -p "$baseline_dir" "$recovery_dir" "$reference_dir"
 
 common_options=(
   --solvers acados
@@ -109,6 +110,40 @@ python examples/fes_multibody/cycling/extract_rho_checkpoint.py \
   --cycles-per-window 1 \
   --repeat-last-certified
 test -s "$repeat_checkpoint"
+
+# Solver-neutral control experiment: solve the replay checkpoint directly
+# with reduced IPOPT/Radau-5, before any ACADOS bound/target transfer.  This
+# separates a genuinely infeasible replay formulation from corruption in the
+# cross-solver recovery bridge.  Its outcome is diagnostic and must not skip
+# the subsequent ACADOS recertification experiment.
+python examples/fes_multibody/cycling/cycling_fes_solver_comparison.py \
+  --solvers ipopt \
+  --objective fatigue \
+  --ipopt-profile periodic_collocation \
+  --ipopt-use-sx \
+  --ipopt-ode-solver collocation \
+  --ipopt-collocation-degree 5 \
+  --ipopt-collocation-method radau \
+  --ipopt-max-iter "$ipopt_max_iter" \
+  --ipopt-linear-solver mumps \
+  --ipopt-disable-historical-initial-guess \
+  --n-windows 1 \
+  --cycles-per-window 1 \
+  --stimulations-per-cycle 30 \
+  --n-threads "$threads" \
+  --crank-assistance "$resistive_torque" \
+  --mechanical-formulation reduced \
+  --wheel-qdot-bound-margin "$qdot_margin" \
+  --first-node-wheel-q-slack 0 \
+  --terminal-wheel-q-slack "$terminal_q_slack" \
+  --state-scaling full \
+  --common-initial-solution "$repeat_checkpoint" \
+  --common-initial-solution-recenter-first-node-bounds \
+  --adopt-common-initial-solution-warmup-cycles \
+  --compact-rho-output \
+  --output-json "$reference_dir/result.json" \
+  2>&1 | tee "$reference_dir/solver.log"
+test -s "$reference_dir/result.json"
 
 # Force IPOPT/Radau-5 on the frozen checkpoint, inject only its certified
 # primal, reset ACADOS memory, then require ACADOS itself to advance target
