@@ -1811,6 +1811,9 @@ e_{\theta,k}=\theta_k-\theta_k^{\mathrm{ref}}.
 ```
 
 Chaque échantillon contient `(e_theta, omega, tau_ext, min_m A_m/A_scale,m)`.
+Le minimum sert uniquement à construire des cellules assez peu dimensionnelles;
+le JSON conserve également les enveloppes séparées des quatre rapports
+`A_m/A_scale,m` pour identifier le muscle limitant.
 Les enveloppes sont groupées par couple externe et tranches de capacité de
 largeur `0.1`, puis élargies de `0.002 rad` en angle et `0.25 rad/s` en
 vitesse. Cette enveloppe ne suppose donc pas `omega` constant dans le cycle et
@@ -1854,6 +1857,22 @@ injection IPOPT acceptable, seule une résolution ACADOS certifiée peut avancer
 le MHE dans cette ablation. Cette séparation empêche de confondre récupération
 numérique et propagation silencieuse d'un terminal invalide.
 
+Les ablations causales suivantes montrent toutefois que ce recovery ne ferme
+pas encore le RHO 7. R3 et R5 ont le même défaut physique de continuité
+angulaire, environ `0.293 rad`; le solve direct R5 le rapporte à `0.0471816`
+dans les coordonnées scaled. Le décodeur de contraintes l'attribue à
+`STATE_CONTINUITY`, dernier intervalle, état `theta`. Une boîte terminale
+relâchée à `+/-0.05 rad` converge mais reste à `+0.04918 rad`, même avec une
+pénalité de Mayer de poids `1e8` vers la cible absolue. Cette Phase I est donc
+un diagnostic de reachability, pas un fallback acceptable.
+
+Le checkpoint reste très loin d'un critère de fatigue : la capacité minimale
+vaut `0.9762 A_scale` et la saturation PW haute est faible. Le résultat est
+correctement étiqueté `unconfirmed_endurance_stop`. La piste prioritaire est
+maintenant de certifier/projeter le terminal de chaque RHO ACADOS par R5 avant
+qu'une erreur IRK accumulée ne devienne l'état initial strict du RHO suivant,
+puis de comparer ce coût à la terminal set hors ligne multi-charge.
+
 Les preuves principales sont les runs
 [`32376558196`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/32376558196),
 [`32377237731`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/32377237731),
@@ -1862,6 +1881,8 @@ Les preuves principales sont les runs
 [`32386153400`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/32386153400)
 et
 [`32387600192`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/32387600192).
+Les runs de recovery causal sont `32440913337`, `32442358620`,
+`32442985918`, `32443712869` et `32444468013`.
 
 La direction de production redevient donc l'horizon reduced d'un cycle avec
 borne angulaire absolue, garde de cadence, warm start primal et recovery

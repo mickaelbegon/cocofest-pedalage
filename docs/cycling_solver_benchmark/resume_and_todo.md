@@ -1033,7 +1033,7 @@ ne suffit pas, mais la séquence 19--36 conserve le bassin franchissant le RHO
     terminal set `+/-0.5 rad/s` échouent tous avant le RHO 2 certifié. Ne pas
     lancer 30/100 RHO avec ces variantes. Revenir à un cycle et déclencher le
     recovery IPOPT/Radau-5 sur le même RHO dès le premier échec ACADOS.
-53. [CI dédiée active; premier bridge R5 rejeté au run `32438910177`] Sur le profil ACADOS un-cycle résistant, mesurer le
+53. [diagnostic terminé négatif jusqu'au run `32444468013`] Sur le profil ACADOS un-cycle résistant, mesurer le
     recovery IPOPT/Radau-5 à partir du checkpoint exact précédant le RHO 7 :
     temps de restauration, recertification ACADOS, coût/fatigue et continuité
     des quatre muscles. Le mode `acados_rho7_recovery` exporte le checkpoint
@@ -1048,11 +1048,19 @@ ne suffit pas, mais la séquence 19--36 conserve le bassin franchissant le RHO
     faisabilité; R5 reste le seul certifieur IPOPT, et ACADOS doit toujours
     recertifier avant l'avance. Le run `32439741318` donne cependant la même
     infeasibility `2.224` en R3 et R5 : le degré n'est pas le blocage. Le
-    prochain run repart du dernier cycle certifié répété et décalé en angle,
-    sans réutiliser le rollout/projection invalide du RHO 7 préparé.
+    seed causal répété puis extrapolé est maintenant confirmé, mais R3/R5
+    conservent `inf_pr=0.2930758` et le solve direct R5 `0.0471816` sous
+    scaling. La ligne limitante est la continuité de `theta` au dernier
+    intervalle, pas le calcium ni les PW. Une Phase I à `+/-0.05 rad`
+    converge, mais reste à `+0.04918 rad` même avec une attraction terminale
+    de poids `1e8`; elle ne recertifie donc pas `+/-0.002 rad`. Prochaine
+    expérience : certification R5 de chaque terminal ACADOS avant transfert,
+    comparée à une projection terminal-set; ne pas avancer un RHO invalide.
 54. [prototype terminé; campagne TODO] `build_terminal_set_profile.py`
     construit une enveloppe sur l'erreur d'angle absolue et `omega`,
     conditionnée par la charge et la capacité musculaire minimale `A/A_scale`.
+    Chaque cellule rapporte aussi séparément les quatre rapports `A_m/A_scale,m`
+    afin de ne pas masquer le muscle limitant derrière le minimum scalaire.
     Les exports RHO enregistrent maintenant les quatre `A_scale`, l'origine
     angulaire globale et l'indice absolu du premier cycle; une source legacy
     normalisée par son premier nœud reste strictement diagnostique. Le profil

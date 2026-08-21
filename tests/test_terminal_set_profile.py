@@ -62,6 +62,12 @@ def test_terminal_set_profile_uses_absolute_angle_and_reports_coverage(tmp_path)
     assert profile["coverage"]["legacy_capacity_sources"] == []
     assert profile["coverage"]["legacy_angle_sources"] == []
     assert profile["status"] == "diagnostic_only"
+    assert profile["reported_fatigue_state_ratios"] == ["A_Biceps", "A_Triceps"]
+    for terminal_bin in profile["bins"]:
+        assert set(terminal_bin["capacity_ratio_by_state"]) == {
+            "A_Biceps",
+            "A_Triceps",
+        }
     assert np.isclose(
         max(
             row["theta_phase_error_rad"]["observed_max"]

@@ -6002,3 +6002,29 @@ décalage signé mesuré sur ce cycle. Le checkpoint préparé ACADOS reste dans
 l'artefact pour l'audit, mais aucune valeur du RHO 7 non certifié n'entre dans
 ce seed. R3 reste seed-only, R5 le seul certifieur IPOPT, et ACADOS doit
 toujours recertifier avant l'avance.
+
+Les runs `32440913337`, `32442358620`, `32442985918` et `32443712869`
+ferment ensuite plusieurs faux diagnostics. Le seed causal est bien utilisé,
+interpolé sur les grilles R3/R5 et extrapolé d'un cycle sans réintroduire le
+primal ACADOS échoué. Pourtant R3 et R5 gardent un défaut physique voisin de
+`0.293 rad`; le solve direct R5 l'exprime sous scaling par `0.0471816`. Le
+décodage des lignes de contraintes localise exactement cette valeur sur
+`STATE_CONTINUITY`, intervalle de tir 29, état `theta`, première colonne de
+défaut. Ce n'est donc ni une contrainte calcium, ni une borne PW, ni un effet
+de l'ordre de collocation.
+
+Une relaxation terminale de `0.05 rad` rend le RHO soluble en environ 50
+itérations, mais la solution reste sur sa borne supérieure avec une erreur de
+phase de `0.04918--0.05000 rad`. Une pénalité terminale correctement recentrée
+sur la cible absolue, testée jusqu'au poids `1e8`, ne ramène pas la trajectoire
+dans la boîte nominale `+/-0.002 rad`. L'ancien code recentrait la borne sans
+recentrer la cible de Mayer; cette incohérence est corrigée, mais elle
+n'expliquait pas l'inaccessibilité. Au checkpoint, `min(A/A_scale)=0.9762` et
+la saturation PW haute reste faible : l'arrêt demeure
+`unconfirmed_endurance_stop`, pas une fatigue démontrée.
+
+Décision numérique : ne pas injecter une Phase I qui ne restaure pas la boîte
+nominale. La prochaine ablation doit distinguer (a) perte de récursivité due au
+transfert IRK ACADOS et (b) véritable inaccessibilité un-cycle, en certifiant
+chaque terminal ACADOS par R5 avant son exécution ou en projetant l'état
+terminal sur une terminal set hors ligne multi-charge.

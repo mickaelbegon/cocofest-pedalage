@@ -84,9 +84,12 @@ def _load_certified_boundaries(path: Path) -> tuple[dict, list[dict], str, str]:
     samples = []
     for cycle, node in enumerate(boundary_nodes):
         ratios = []
+        ratios_by_state = {}
         for key, values in capacities.items():
             flattened = values.reshape(-1, values.shape[-1])
-            ratios.extend((flattened[:, node] / capacity_scales[key]).tolist())
+            state_ratios = flattened[:, node] / capacity_scales[key]
+            ratios.extend(state_ratios.tolist())
+            ratios_by_state[key] = float(np.min(state_ratios))
         samples.append(
             {
                 "cycle": int(cycle),
@@ -95,6 +98,7 @@ def _load_certified_boundaries(path: Path) -> tuple[dict, list[dict], str, str]:
                 ),
                 "omega_rad_s": float(omega_boundary[cycle]),
                 "minimum_capacity_ratio": float(min(ratios)),
+                "capacity_ratio_by_state": ratios_by_state,
             }
         )
     return metadata, samples, normalization, angle_reference
@@ -165,6 +169,9 @@ def build_terminal_set_profile(
         )
 
     bins = []
+    fatigue_state_keys = sorted(
+        {key for row in rows for key in row["capacity_ratio_by_state"]}
+    )
     grouped_keys = sorted({(row["load_nm"], row["capacity_bin_index"]) for row in rows})
     for load_nm, bin_index in grouped_keys:
         group = [
@@ -188,6 +195,15 @@ def build_terminal_set_profile(
                     np.asarray([row["omega_rad_s"] for row in group]),
                     omega_padding_rad_s,
                 ),
+                "capacity_ratio_by_state": {
+                    key: _interval(
+                        np.asarray(
+                            [row["capacity_ratio_by_state"][key] for row in group]
+                        ),
+                        0.0,
+                    )
+                    for key in fatigue_state_keys
+                },
             }
         )
 
@@ -218,6 +234,7 @@ def build_terminal_set_profile(
         "status": "candidate" if certification_ready else "diagnostic_only",
         "absolute_angle_target": "theta_initial_minus_2pi_times_cycle",
         "conditioning_variables": ["constant_crank_torque", "minimum_A_capacity_ratio"],
+        "reported_fatigue_state_ratios": fatigue_state_keys,
         "sources": source_summaries,
         "coverage": {
             "distinct_loads_nm": distinct_loads,
