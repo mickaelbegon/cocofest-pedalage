@@ -6514,7 +6514,17 @@ def run_acados_initial_fast_velocity_bound_continuation(
         stage_solver.set_convergence_tolerance(convergence_tolerance)
     if stationarity_tolerance is not None:
         stage_solver.set_nlp_solver_tol_stat(stationarity_tolerance)
-    stage_solver.set_maximum_iterations(stage_iterations)
+    # The first continuation solve also builds the ACADOS shared library.  It
+    # must therefore use the same structural solver options as the subsequent
+    # RHO solves.  In particular, compiling here with ``stage_iterations``
+    # (300 for the offline bridge) and then passing the nominal solver (100)
+    # made Bioptim reject the first RHO because ``nlp_solver_max_iter`` is not
+    # a mutable post-build option.  Keep the nominal value in the solver
+    # object; ``set_acados_runtime_max_iterations`` below raises the budget on
+    # the already-built capsule from the second continuation stage onward.
+    nominal_iterations = getattr(solver, "nlp_solver_max_iter", None)
+    if nominal_iterations is not None:
+        stage_solver.set_maximum_iterations(int(nominal_iterations))
     acados_interface = getattr(periodic_nmpc, "ocp_solver", None)
     if getattr(acados_interface, "ocp_solver", None) is not None:
         mark_options_unchanged = getattr(
@@ -6597,7 +6607,6 @@ def run_acados_initial_fast_velocity_bound_continuation(
             periodic_nmpc.nlp[0].u_init[key].init[:, :] = values
         omega_bounds.min[:, :] = original_lower
         periodic_nmpc._sync_acados_state_bounds()
-        nominal_iterations = getattr(solver, "nlp_solver_max_iter", None)
         if nominal_iterations is not None:
             set_acados_runtime_max_iterations(periodic_nmpc, int(nominal_iterations))
 

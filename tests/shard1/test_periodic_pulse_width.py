@@ -8469,11 +8469,14 @@ def test_initial_fast_velocity_bound_continuation_preserves_first_node(monkeypat
         ocp_solver=SimpleNamespace(ocp_solver=object()),
     )
 
+    maximum_iteration_requests = []
+
     class Solver:
         nlp_solver_max_iter = 100
 
         def __init__(self):
             self.only_first_options_has_changed = True
+            self.maximum_iterations = None
 
         def set_convergence_tolerance(self, _value):
             raise AssertionError(
@@ -8485,8 +8488,9 @@ def test_initial_fast_velocity_bound_continuation_preserves_first_node(monkeypat
                 "Native ACADOS stationarity tolerance must be preserved."
             )
 
-        def set_maximum_iterations(self, _value):
-            pass
+        def set_maximum_iterations(self, value):
+            self.maximum_iterations = value
+            maximum_iteration_requests.append(value)
 
         def set_only_first_options_has_changed(self, value):
             self.only_first_options_has_changed = value
@@ -8519,9 +8523,10 @@ def test_initial_fast_velocity_bound_continuation_preserves_first_node(monkeypat
 
     first_node_lower = float(omega_bounds.min[0, 0])
     strict_lower = omega_bounds.min.copy()
+    solver = Solver()
     summary = periodic_example.run_acados_initial_fast_velocity_bound_continuation(
         nmpc,
-        Solver(),
+        solver,
         margins=(3.0, 2.85, 2.70, 2.55),
         convergence_tolerance=None,
         stationarity_tolerance=None,
@@ -8533,6 +8538,8 @@ def test_initial_fast_velocity_bound_continuation_preserves_first_node(monkeypat
     assert summary["accepted_margin_rad_s"] == 2.55
     assert summary["solver_convergence_tolerance"] is None
     assert summary["audit_convergence_tolerance"] == 1e-4
+    assert solver.maximum_iterations is None
+    assert maximum_iteration_requests == [100]
     np.testing.assert_allclose(
         [bounds[0, 1] for bounds in observed],
         -2.0 * np.pi - np.array([3.0, 2.85, 2.70, 2.55]),
