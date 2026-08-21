@@ -1797,6 +1797,32 @@ est introduite par une homotopie compatible avec la borne path
 ni une erreur d'angle terminal : le problème est le bassin de faisabilité de
 la continuation mécanique sous charge.
 
+### Terminal set hors ligne : contrat avant intégration
+
+Le script `build_terminal_set_profile.py` construit maintenant une enveloppe
+mécanique à partir de préfixes RHO certifiés. À la frontière du cycle `k`, il
+ne compare pas l'angle au terminal optimisé précédent, mais à la cible absolue
+
+```math
+\theta_k^{\mathrm{ref}}=\theta_0-2\pi k,
+\qquad
+e_{\theta,k}=\theta_k-\theta_k^{\mathrm{ref}}.
+```
+
+Chaque échantillon contient `(e_theta, omega, tau_ext, min_m A_m/A_m(0))`.
+Les enveloppes sont groupées par couple externe et tranches de capacité de
+largeur `0.1`, puis élargies de `0.002 rad` en angle et `0.25 rad/s` en
+vitesse. Cette enveloppe ne suppose donc pas `omega` constant dans le cycle et
+ne réintroduit pas le drift angulaire que l'état terminal absolu a supprimé.
+
+Le JSON reste `diagnostic_only` tant qu'il ne couvre pas au moins trois
+charges distinctes et 20 frontières certifiées par cellule charge/fatigue.
+Il n'est pas encore injecté comme contrainte ACADOS : les essais deux-cycles
+ont montré qu'une terminal set trop étroite peut supprimer le bassin de
+faisabilité. La prochaine campagne doit l'alimenter avec IPOPT/Radau-5 reduced
+certifié sous plusieurs résistances, puis réaliser une validation hors
+échantillon avant toute activation online.
+
 Les preuves principales sont les runs
 [`32376558196`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/32376558196),
 [`32377237731`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/32377237731),

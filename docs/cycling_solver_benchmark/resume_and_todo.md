@@ -1038,11 +1038,13 @@ ne suffit pas, mais la séquence 19--36 conserve le bassin franchissant le RHO
     temps de restauration, recertification ACADOS, coût/fatigue et continuité
     des quatre muscles. Aucun terminal ACADOS non certifié ne doit avancer le
     MHE.
-54. [TODO] Construire une terminal set mécanique hors ligne à partir de
-    trajectoires IPOPT/Radau-5 certifiées sous plusieurs niveaux de fatigue et
-    de charge. Tester d'abord une enveloppe sur `(theta, omega)` et la capacité
-    musculaire minimale; ne pas réintroduire une cadence constante dans le
-    cycle.
+54. [prototype terminé; campagne TODO] `build_terminal_set_profile.py`
+    construit une enveloppe sur l'erreur d'angle absolue et `omega`,
+    conditionnée par la charge et la capacité musculaire minimale. Le profil
+    reste `diagnostic_only` sous trois charges ou 20 frontières par cellule.
+    Il faut maintenant générer les préfixes IPOPT/Radau-5 multi-charge,
+    valider l'enveloppe hors échantillon, puis seulement tester son injection
+    dans ACADOS; aucune cadence constante n'est imposée dans le cycle.
 55. [terminé, seuil conservateur] Le libellé `fatigue_limited_candidate`
     exige désormais une perte matérielle d'au moins 20 % de `A/A_scale`, en
     plus des deux échecs et de la saturation PW. L'arrêt ACADOS précoce avec

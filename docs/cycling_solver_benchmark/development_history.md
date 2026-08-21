@@ -5959,3 +5959,14 @@ Décision : ne pas prolonger ces variantes à 30 RHO. Pour cette charge, deux
 cycles aggravent le terminal effect au lieu de fournir un warm start viable.
 La branche de production reste un cycle reduced; le recovery doit être lancé
 au même RHO avant toute propagation d'un terminal non certifié.
+
+### Profil de terminal set hors ligne
+
+Une première brique indépendante du solveur a été ajoutée dans
+`build_terminal_set_profile.py`. Elle extrait les frontières de cycles de
+préfixes RHO certifiés, calcule l'erreur par rapport à l'angle absolu
+`theta(0)-2*pi*k`, puis conditionne les intervalles de `(theta, omega)` par le
+couple externe et la capacité Ding minimale. Le profil refuse implicitement
+le statut de candidat online tant que la couverture reste inférieure à trois
+charges ou 20 échantillons par cellule. Ce choix sépare la construction de
+données de l'activation d'une contrainte susceptible de casser la faisabilité.
