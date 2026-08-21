@@ -104,14 +104,13 @@ python examples/fes_multibody/cycling/cycling_fes_solver_comparison.py \
   "${common_options[@]}" \
   --n-windows 2 \
   --common-initial-solution "$checkpoint" \
-  --periodic-ipopt-refinement-ode-solver collocation \
-  --periodic-ipopt-refinement-collocation-degree 5 \
-  --periodic-ipopt-refinement-collocation-method radau \
-  --periodic-ipopt-refinement-iterations "$ipopt_max_iter" \
+  --disable-periodic-ipopt-refinement \
   --warmup-ipopt-linear-solver mumps \
   --acados-ipopt-recovery \
   --acados-ipopt-recovery-max-iterations "$ipopt_max_iter" \
   --acados-ipopt-recovery-collocation-degree 5 \
+  --acados-ipopt-recovery-seed-collocation-degree 3 \
+  --acados-ipopt-recovery-seed-max-iterations "$ipopt_max_iter" \
   --acados-ipopt-recovery-irk-seed-audit \
   --acados-ipopt-recovery-force-first-rho \
   --ipopt-linear-solver mumps \
@@ -127,7 +126,15 @@ jq -e '
   .results[0].acados_ipopt_recovery.fallback_advance_enabled == false and
   any(.results[0].acados_ipopt_recovery_summaries[];
       .forced_for_ci == true and
-      .collocation_degree == 5 and
+      .recovery_role == "seed_only" and
+      .collocation_degree == 3 and
+      .fallback_advanced == false) and
+  all(.results[0].acados_ipopt_recovery_summaries[];
+      if .recovery_role == "certifying_fallback_candidate"
+      then .collocation_degree == 5
+      else true
+      end) and
+  any(.results[0].acados_ipopt_recovery_summaries[];
       .quality == "converged" and
       .feasibility.passes_tolerance == true and
       .seed_injected == true and

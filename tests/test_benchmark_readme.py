@@ -153,6 +153,10 @@ def test_rho7_recovery_uses_a_pre_failure_checkpoint_and_acados_recertification(
     assert "--rho-prepared-checkpoint-windows 6" in script
     assert "prepared-after-6-for-7.npz" in script
     assert "--acados-ipopt-recovery-collocation-degree 5" in script
+    assert "--acados-ipopt-recovery-seed-collocation-degree 3" in script
+    assert "--acados-ipopt-recovery-seed-max-iterations" in script
+    assert "--disable-periodic-ipopt-refinement" in script
+    assert "--periodic-ipopt-refinement-ode-solver" not in script
     assert '[[ "$qdot_margin" != "2.6" ]]' in script
     assert "--acados-max-iter 100" in script
     assert "--acados-maxiter-retries" not in script
