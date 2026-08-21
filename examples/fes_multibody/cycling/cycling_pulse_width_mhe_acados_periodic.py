@@ -3959,6 +3959,8 @@ def _receding_horizon_solution_metadata(
     cycle_count: int,
     maximum_boundary_jump: float,
     fatigue_capacity_scales: dict[str, float] | None = None,
+    absolute_wheel_q_origin_reference: float | None = None,
+    absolute_wheel_q_start_cycle_index: int | None = None,
 ) -> dict:
     """Describe a concatenated RHO trace as one multi-cycle primal seed."""
 
@@ -3980,6 +3982,16 @@ def _receding_horizon_solution_metadata(
                 str(key): float(value)
                 for key, value in (fatigue_capacity_scales or {}).items()
             },
+            "absolute_wheel_q_origin_reference": (
+                None
+                if absolute_wheel_q_origin_reference is None
+                else float(absolute_wheel_q_origin_reference)
+            ),
+            "absolute_wheel_q_start_cycle_index": (
+                None
+                if absolute_wheel_q_start_cycle_index is None
+                else int(absolute_wheel_q_start_cycle_index)
+            ),
         }
     )
     return metadata
@@ -4046,6 +4058,8 @@ def _save_receding_horizon_solution(
             cycle_count,
             maximum_boundary_jump,
             summary.get("fatigue_capacity_scales"),
+            summary.get("absolute_wheel_q_origin_reference"),
+            summary.get("absolute_wheel_q_start_cycle_index"),
         ),
     )
 

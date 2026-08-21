@@ -3,15 +3,23 @@ import json
 import numpy as np
 
 from examples.fes_multibody.cycling.build_terminal_set_profile import (
+    FULL_TURN,
     build_terminal_set_profile,
 )
 
 
-def _write_prefix(path, *, load_nm, omega_offset=0.0, include_scales=True):
+def _write_prefix(
+    path,
+    *,
+    load_nm,
+    omega_offset=0.0,
+    include_scales=True,
+    start_cycle=0,
+):
     stimulations = 2
     cycles = 3
     nodes = cycles * stimulations + 1
-    theta = -np.pi * np.arange(nodes, dtype=float)
+    theta = -FULL_TURN * start_cycle - np.pi * np.arange(nodes, dtype=float)
     theta[-1] += 1e-3
     metadata = {
         "producer_mode": "receding_horizon_concatenation",
@@ -20,6 +28,8 @@ def _write_prefix(path, *, load_nm, omega_offset=0.0, include_scales=True):
         "cycles_per_window": cycles,
         "stimulations_per_cycle": stimulations,
         "constant_crank_torque": load_nm,
+        "absolute_wheel_q_origin_reference": 0.0,
+        "absolute_wheel_q_start_cycle_index": start_cycle,
     }
     if include_scales:
         metadata["fatigue_capacity_scales"] = {
@@ -50,6 +60,7 @@ def test_terminal_set_profile_uses_absolute_angle_and_reports_coverage(tmp_path)
     assert profile["coverage"]["boundary_sample_count"] == 8
     assert profile["coverage"]["certification_ready"] is False
     assert profile["coverage"]["legacy_capacity_sources"] == []
+    assert profile["coverage"]["legacy_angle_sources"] == []
     assert profile["status"] == "diagnostic_only"
     assert np.isclose(
         max(
@@ -74,4 +85,20 @@ def test_legacy_capacity_normalization_cannot_certify_terminal_set(tmp_path):
     assert (
         profile["sources"][0]["capacity_normalization"]
         == "legacy_source_initial_diagnostic_only"
+    )
+
+
+def test_replay_uses_global_cycle_index_for_absolute_angle(tmp_path):
+    replay = tmp_path / "replay.npz"
+    _write_prefix(replay, load_nm=0.15, start_cycle=7)
+
+    profile = build_terminal_set_profile([replay])
+
+    assert profile["sources"][0]["angle_reference"] == "global_absolute_cycle"
+    assert np.isclose(
+        max(
+            row["theta_phase_error_rad"]["observed_max"]
+            for row in profile["bins"]
+        ),
+        1e-3,
     )

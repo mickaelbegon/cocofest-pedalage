@@ -3012,6 +3012,8 @@ def test_receding_horizon_solution_is_exported_as_one_multi_cycle_seed(
             },
         },
         "fatigue_capacity_scales": {"A_Biceps": 3000.0},
+        "absolute_wheel_q_origin_reference": 0.25,
+        "absolute_wheel_q_start_cycle_index": 4,
     }
 
     periodic_example._save_receding_horizon_solution(output_path, summary, args)
@@ -3022,6 +3024,8 @@ def test_receding_horizon_solution_is_exported_as_one_multi_cycle_seed(
     assert seed.metadata["producer_cycles_per_window"] == 1
     assert seed.metadata["producer_requested_cycles"] == 2
     assert seed.metadata["fatigue_capacity_scales"] == {"A_Biceps": 3000.0}
+    assert seed.metadata["absolute_wheel_q_origin_reference"] == 0.25
+    assert seed.metadata["absolute_wheel_q_start_cycle_index"] == 4
     assert (
         seed.metadata["state_boundary_maximum_absolute_jump"]
         == pytest.approx(2e-10)

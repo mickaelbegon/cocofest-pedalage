@@ -5971,9 +5971,10 @@ le statut de candidat online tant que la couverture reste inférieure à trois
 charges ou 20 échantillons par cellule. Ce choix sépare la construction de
 données de l'activation d'une contrainte susceptible de casser la faisabilité.
 
-Un audit ultérieur a corrigé la normalisation de fatigue : les exports RHO
-stockent désormais les `A_scale` reposés des quatre muscles et le profil
-utilise `A/A_scale`. Une normalisation par le premier nœud du fichier aurait
-effacé la fatigue antérieure d'un warmup ou d'un checkpoint. Les artefacts
-legacy sans ces références restent diagnostiques, mais ne peuvent pas rendre
-le profil candidat online.
+Un audit ultérieur a corrigé les deux références absolues : les exports RHO
+stockent désormais les `A_scale` reposés des quatre muscles, l'origine
+angulaire globale et l'indice du premier cycle. Le profil utilise
+`A/A_scale` et `theta_origin-2*pi*k_global`. Une normalisation par le premier
+nœud du fichier aurait effacé la fatigue et le drift antérieurs d'un warmup ou
+d'un checkpoint. Les artefacts legacy sans ces références restent
+diagnostiques, mais ne peuvent pas rendre le profil candidat online.

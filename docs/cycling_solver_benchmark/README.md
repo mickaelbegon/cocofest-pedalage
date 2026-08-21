@@ -1816,8 +1816,11 @@ largeur `0.1`, puis élargies de `0.002 rad` en angle et `0.25 rad/s` en
 vitesse. Cette enveloppe ne suppose donc pas `omega` constant dans le cycle et
 ne réintroduit pas le drift angulaire que l'état terminal absolu a supprimé.
 
-Les exports RHO conservent maintenant les quatre références Ding `A_scale`
-dans leurs métadonnées. Les anciens exports qui ne les contiennent pas restent
+Les exports RHO conservent maintenant les quatre références Ding `A_scale`,
+l'origine angulaire globale et l'indice absolu du premier cycle dans leurs
+métadonnées. Un replay évalue donc encore `theta` contre le cycle global et ne
+redéfinit pas artificiellement son premier nœud comme une origine sans erreur.
+Les anciens exports qui ne contiennent pas ces informations restent
 acceptés pour une visualisation diagnostique en se normalisant par leur
 première frontière, mais ils sont explicitement exclus de toute certification.
 Cette garde évite de faire passer pour un état reposé un checkpoint déjà
@@ -1825,7 +1828,8 @@ fatigué.
 
 Le JSON reste `diagnostic_only` tant qu'il ne couvre pas au moins trois
 charges distinctes et 20 frontières certifiées par cellule charge/fatigue,
-ou qu'une source ne fournit pas sa référence `A_scale`.
+ou qu'une source ne fournit pas sa référence `A_scale` ou sa référence
+angulaire globale.
 Il n'est pas encore injecté comme contrainte ACADOS : les essais deux-cycles
 ont montré qu'une terminal set trop étroite peut supprimer le bassin de
 faisabilité. La prochaine campagne doit l'alimenter avec IPOPT/Radau-5 reduced

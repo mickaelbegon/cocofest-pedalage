@@ -15,7 +15,7 @@ STATE_PREFIX = "states__"
 FULL_TURN = 2.0 * np.pi
 
 
-def _load_certified_boundaries(path: Path) -> tuple[dict, list[dict], str]:
+def _load_certified_boundaries(path: Path) -> tuple[dict, list[dict], str, str]:
     with np.load(path, allow_pickle=False) as archive:
         if METADATA_KEY not in archive.files:
             raise ValueError(f"{path} has no trajectory metadata.")
@@ -43,10 +43,19 @@ def _load_certified_boundaries(path: Path) -> tuple[dict, list[dict], str]:
     boundary_nodes = np.arange(cycles + 1, dtype=int) * stimulations
     theta_boundary = theta[0, boundary_nodes]
     omega_boundary = omega[0, boundary_nodes]
-    # The benchmark pedals with omega < 0. The absolute target prevents drift;
-    # this residual is therefore relative to theta(0) - 2*pi*k, not relative
-    # to the preceding optimized terminal state.
-    theta_targets = theta_boundary[0] - FULL_TURN * np.arange(cycles + 1)
+    # The benchmark pedals with omega < 0. A replay checkpoint must retain the
+    # original experiment reference and its global cycle index: resetting the
+    # target to theta_boundary[0] would hide drift accumulated before replay.
+    origin_reference = metadata.get("absolute_wheel_q_origin_reference")
+    start_cycle = metadata.get("absolute_wheel_q_start_cycle_index")
+    if origin_reference is not None and start_cycle is not None:
+        theta_targets = float(origin_reference) - FULL_TURN * (
+            int(start_cycle) + np.arange(cycles + 1)
+        )
+        angle_reference = "global_absolute_cycle"
+    else:
+        theta_targets = theta_boundary[0] - FULL_TURN * np.arange(cycles + 1)
+        angle_reference = "legacy_local_source_diagnostic_only"
     source_initial_capacity = {
         key: float(values.reshape(-1, values.shape[-1])[0, 0])
         for key, values in capacities.items()
@@ -88,7 +97,7 @@ def _load_certified_boundaries(path: Path) -> tuple[dict, list[dict], str]:
                 "minimum_capacity_ratio": float(min(ratios)),
             }
         )
-    return metadata, samples, normalization
+    return metadata, samples, normalization, angle_reference
 
 
 def _interval(values: np.ndarray, padding: float) -> dict:
@@ -124,7 +133,9 @@ def build_terminal_set_profile(
     source_summaries = []
     for source in sources:
         source = Path(source).resolve()
-        metadata, samples, normalization = _load_certified_boundaries(source)
+        metadata, samples, normalization, angle_reference = (
+            _load_certified_boundaries(source)
+        )
         load_nm = float(metadata["constant_crank_torque"])
         for sample in samples:
             clipped = np.clip(sample["minimum_capacity_ratio"], 0.0, 1.0)
@@ -149,6 +160,7 @@ def build_terminal_set_profile(
                 "load_nm": load_nm,
                 "certified_cycles": int(metadata["cycles_per_window"]),
                 "capacity_normalization": normalization,
+                "angle_reference": angle_reference,
             }
         )
 
@@ -190,10 +202,16 @@ def build_terminal_set_profile(
         for row in source_summaries
         if row["capacity_normalization"] != "rested_ding_a_scale"
     ]
+    legacy_angle_sources = [
+        row["path"]
+        for row in source_summaries
+        if row["angle_reference"] != "global_absolute_cycle"
+    ]
     certification_ready = (
         len(distinct_loads) >= 3
         and not under_sampled
         and not legacy_capacity_sources
+        and not legacy_angle_sources
     )
     return {
         "schema": "cocofest-mechanical-terminal-set-profile-v1",
@@ -208,6 +226,7 @@ def build_terminal_set_profile(
             "minimum_required_samples_per_bin": 20,
             "under_sampled_bins": under_sampled,
             "legacy_capacity_sources": legacy_capacity_sources,
+            "legacy_angle_sources": legacy_angle_sources,
             "certification_ready": certification_ready,
         },
         "bins": bins,

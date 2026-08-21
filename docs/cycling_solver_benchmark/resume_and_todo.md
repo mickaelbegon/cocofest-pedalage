@@ -1043,10 +1043,11 @@ ne suffit pas, mais la séquence 19--36 conserve le bassin franchissant le RHO
 54. [prototype terminé; campagne TODO] `build_terminal_set_profile.py`
     construit une enveloppe sur l'erreur d'angle absolue et `omega`,
     conditionnée par la charge et la capacité musculaire minimale `A/A_scale`.
-    Les exports RHO enregistrent maintenant les quatre `A_scale`; une source
-    legacy normalisée par son premier nœud reste strictement diagnostique. Le
-    profil reste `diagnostic_only` sous trois charges, sous 20 frontières par
-    cellule ou en présence d'une source legacy.
+    Les exports RHO enregistrent maintenant les quatre `A_scale`, l'origine
+    angulaire globale et l'indice absolu du premier cycle; une source legacy
+    normalisée par son premier nœud reste strictement diagnostique. Le profil
+    reste `diagnostic_only` sous trois charges, sous 20 frontières par cellule
+    ou en présence d'une source legacy.
     Il faut maintenant générer les préfixes IPOPT/Radau-5 multi-charge,
     valider l'enveloppe hors échantillon, puis seulement tester son injection
     dans ACADOS; aucune cadence constante n'est imposée dans le cycle.
