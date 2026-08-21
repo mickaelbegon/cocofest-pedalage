@@ -7178,6 +7178,57 @@ def test_feasibility_uses_constraint_and_decision_bounds():
     assert feasibility["passes_tolerance"] is False
 
 
+def test_constraint_vector_block_maps_global_row_to_penalty_and_node():
+    dynamics = SimpleNamespace(
+        name="dynamics_defect",
+        type="ConstraintFcn.CONTINUITY",
+        node_idx=[0, 1],
+        rows_by_node={0: 3, 1: 3},
+    )
+    terminal = SimpleNamespace(
+        name="terminal_angle",
+        type="ConstraintFcn.CUSTOM",
+        node_idx=[1],
+        rows_by_node={1: 2},
+    )
+    nlp = SimpleNamespace(
+        ns=1,
+        g_internal=[dynamics],
+        g=[terminal],
+    )
+    ocp = SimpleNamespace(g_internal=[], g=[], nlp=[nlp])
+
+    class Interface:
+        def __init__(self):
+            self.ocp = ocp
+
+        @staticmethod
+        def get_all_penalties(owner, penalties, get_bounds=False):
+            penalty = penalties[0]
+            highest_node = max(penalty.rows_by_node)
+            values = {
+                node: np.zeros((penalty.rows_by_node.get(node, 0), 1))
+                for node in range(highest_node + 1)
+            }
+            return values, {node: None for node in values}
+
+    ocp.ocp_solver = Interface()
+    solution = SimpleNamespace(ocp=ocp)
+
+    # Node 0 dynamics occupies rows [0, 3); node 1 dynamics [3, 6), then
+    # the user terminal constraint [6, 8).
+    block = periodic_example._constraint_vector_block(solution, 6)
+
+    assert block["scope"] == "phase"
+    assert block["phase"] == 0
+    assert block["category"] == "user"
+    assert block["penalty_name"] == "terminal_angle"
+    assert block["node"] == 1
+    assert block["local_row"] == 0
+    assert block["global_start"] == 6
+    assert block["global_stop"] == 8
+
+
 def test_feasibility_recomputes_constraints_from_compiled_nlp():
     from casadi import MX
 

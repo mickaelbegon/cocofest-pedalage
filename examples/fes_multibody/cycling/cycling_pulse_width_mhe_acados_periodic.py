@@ -7757,6 +7757,108 @@ def _decision_vector_block(solution, index: int | None) -> str | None:
     return None
 
 
+def _constraint_vector_block(solution, index: int | None) -> dict | None:
+    """Map one flattened NLP constraint row back to its Bioptim penalty."""
+
+    if index is None:
+        return None
+    ocp = getattr(solution, "ocp", None)
+    interface = getattr(ocp, "ocp_solver", None)
+    if ocp is None or interface is None or not hasattr(
+        interface, "get_all_penalties"
+    ):
+        return None
+
+    def penalty_rows(owner, penalties, *, scope, category, phase=None):
+        buckets = {}
+        for penalty_index, penalty in enumerate(penalties):
+            if not penalty:
+                continue
+            try:
+                values, _ = interface.get_all_penalties(
+                    owner, [penalty], get_bounds=True
+                )
+            except Exception:
+                return None
+            for node, value in values.items():
+                rows = int(value.shape[0])
+                if rows == 0:
+                    continue
+                buckets.setdefault(int(node), []).append(
+                    {
+                        "scope": scope,
+                        "phase": phase,
+                        "category": category,
+                        "penalty_index": penalty_index,
+                        "penalty_name": getattr(penalty, "name", None),
+                        "penalty_type": str(getattr(penalty, "type", None)),
+                        "declared_nodes": [
+                            int(node_idx)
+                            for node_idx in getattr(penalty, "node_idx", ())
+                        ],
+                        "node": int(node),
+                        "row_count": rows,
+                    }
+                )
+        return buckets
+
+    ordered_entries = []
+    global_buckets = {}
+    for category, penalties in (
+        ("internal", getattr(ocp, "g_internal", ())),
+        ("user", getattr(ocp, "g", ())),
+    ):
+        buckets = penalty_rows(
+            ocp,
+            penalties,
+            scope="ocp",
+            category=category,
+        )
+        if buckets is None:
+            return None
+        for node, entries in buckets.items():
+            global_buckets.setdefault(node, []).extend(entries)
+    for node in sorted(global_buckets):
+        ordered_entries.extend(global_buckets[node])
+
+    for phase, nlp in enumerate(getattr(ocp, "nlp", ())):
+        phase_buckets = {node: [] for node in range(int(nlp.ns) + 1)}
+        for category, penalties in (
+            ("internal", getattr(nlp, "g_internal", ())),
+            ("user", getattr(nlp, "g", ())),
+        ):
+            buckets = penalty_rows(
+                nlp,
+                penalties,
+                scope="phase",
+                category=category,
+                phase=phase,
+            )
+            if buckets is None:
+                return None
+            for node, entries in buckets.items():
+                phase_buckets.setdefault(node, []).extend(entries)
+        for node in sorted(phase_buckets):
+            ordered_entries.extend(phase_buckets[node])
+
+    offset = 0
+    for entry in ordered_entries:
+        stop = offset + entry["row_count"]
+        if offset <= index < stop:
+            return {
+                **entry,
+                "global_start": offset,
+                "global_stop": stop,
+                "local_row": index - offset,
+            }
+        offset = stop
+    return {
+        "scope": "unmapped",
+        "global_constraint_count_from_penalties": offset,
+        "requested_index": int(index),
+    }
+
+
 def _solution_constraint_values(solution) -> tuple[np.ndarray | None, str]:
     """Return ``g(x)`` even when a compiled CasADi solve omits ``Solution.constraints``."""
 
@@ -7828,6 +7930,9 @@ def _independent_solution_bound_violations(
         "constraint_values_source": constraint_values_source,
         "constraint_bound_violation": constraint_violation,
         "constraint_bound_violation_index": constraint_details["index"],
+        "constraint_bound_violation_block": _constraint_vector_block(
+            solution, constraint_details["index"]
+        ),
         "decision_bound_violation": decision_violation,
         "decision_bound_violation_index": decision_details["index"],
         "decision_bound_violation_value": decision_details["value"],
