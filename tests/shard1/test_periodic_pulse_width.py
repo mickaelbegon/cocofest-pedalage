@@ -989,16 +989,23 @@ def test_acados_ipopt_recovery_requires_identical_full_physical_structure():
 
 
 def test_acados_ipopt_recovery_restores_last_certified_pre_solve_primal():
+    def entry(init_columns, *, bound_columns=3, fill=99.0):
+        return SimpleNamespace(
+            init=np.full((1, init_columns), fill),
+            min=np.full((1, bound_columns), -1000.0),
+            max=np.full((1, bound_columns), 1000.0),
+        )
+
     class Program:
-        def __init__(self):
+        def __init__(self, state_columns):
+            theta = entry(state_columns)
+            pulse_width = entry(2)
             self.nlp = [
                 SimpleNamespace(
-                    x_init={"theta": SimpleNamespace(init=np.full((1, 3), 99.0))},
-                    u_init={
-                        "last_pulse_width_Biceps": SimpleNamespace(
-                            init=np.full((1, 2), 99.0)
-                        )
-                    },
+                    x_init={"theta": theta},
+                    u_init={"last_pulse_width_Biceps": pulse_width},
+                    x_bounds={"theta": theta},
+                    u_bounds={"last_pulse_width_Biceps": pulse_width},
                 )
             ]
             self.corrected = []
@@ -1006,7 +1013,9 @@ def test_acados_ipopt_recovery_restores_last_certified_pre_solve_primal():
         def _correct_init_guess_to_fit_bounds(self, *, corrected_input):
             self.corrected.append(corrected_input)
 
-    program = Program()
+    source = Program(state_columns=3)
+    recovery = Program(state_columns=9)
+    failed_source_theta = source.nlp[0].x_init["theta"].init.copy()
     checkpoint = {
         "states": {"theta": np.array([[-1.0, -2.0, -3.0]])},
         "controls": {
@@ -1014,19 +1023,26 @@ def test_acados_ipopt_recovery_restores_last_certified_pre_solve_primal():
         },
     }
 
-    audit = periodic_example.restore_last_certified_recovery_seed(
-        program, checkpoint
+    audit = periodic_example.copy_last_certified_recovery_seed(
+        source, recovery, checkpoint
     )
 
+    # The failed target primal is retained for diagnostics and retry.
     np.testing.assert_allclose(
-        program.nlp[0].x_init["theta"].init,
-        checkpoint["states"]["theta"],
+        source.nlp[0].x_init["theta"].init,
+        failed_source_theta,
+    )
+    # The 3 shooting nodes are interpolated onto a Radau-3-like 9-node state
+    # grid rather than assigned with incompatible array shapes.
+    np.testing.assert_allclose(
+        recovery.nlp[0].x_init["theta"].init,
+        np.interp(np.arange(9) / 4.0, np.arange(3), [-1.0, -2.0, -3.0])[None, :],
     )
     np.testing.assert_allclose(
-        program.nlp[0].u_init["last_pulse_width_Biceps"].init,
+        recovery.nlp[0].u_init["last_pulse_width_Biceps"].init,
         checkpoint["controls"]["last_pulse_width_Biceps"],
     )
-    assert program.corrected == ["states", "controls"]
+    assert recovery.corrected == ["states", "controls"]
     assert audit["finite"] is True
     assert "snapshot" not in audit
 

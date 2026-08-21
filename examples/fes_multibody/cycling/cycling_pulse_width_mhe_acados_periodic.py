@@ -11703,19 +11703,6 @@ def _restore_initial_guess_snapshot(periodic_nmpc, snapshot: dict) -> None:
         nlp.u_init[key].init[:, :] = values
 
 
-def restore_last_certified_recovery_seed(
-    periodic_nmpc, snapshot: dict
-) -> dict[str, object]:
-    """Restore and audit the causal pre-solve primal for one frozen RHO."""
-
-    _restore_initial_guess_snapshot(periodic_nmpc, snapshot)
-    periodic_nmpc._correct_init_guess_to_fit_bounds(corrected_input="states")
-    periodic_nmpc._correct_init_guess_to_fit_bounds(corrected_input="controls")
-    audit = audit_initial_guess(periodic_nmpc)
-    audit.pop("snapshot", None)
-    return audit
-
-
 def apply_failed_rho_alternate_pulse_width_predictor(
     periodic_nmpc,
     checkpoint: dict,
@@ -14915,6 +14902,30 @@ def _copy_initial_guesses_and_bounds(source_nmpc, target_nmpc) -> None:
     _copy_list_values(source_nmpc.nlp[0].x_bounds, target_nmpc.nlp[0].x_bounds, "max")
     _copy_list_values(source_nmpc.nlp[0].u_bounds, target_nmpc.nlp[0].u_bounds, "min")
     _copy_list_values(source_nmpc.nlp[0].u_bounds, target_nmpc.nlp[0].u_bounds, "max")
+
+
+def copy_last_certified_recovery_seed(
+    source_nmpc, recovery_nmpc, snapshot: dict
+) -> dict[str, object]:
+    """Interpolate a causal ACADOS shooting-grid seed onto a recovery grid.
+
+    The target solver's failed primal remains in ``source_nmpc`` after its
+    solve. Temporarily restore the last-certified pre-solve snapshot there so
+    the normal shooting-to-collocation interpolation can be reused, then put
+    the failed primal back for diagnostics and target-solver retry.
+    """
+
+    failed_target_snapshot = snapshot_initial_guess(source_nmpc)
+    try:
+        _restore_initial_guess_snapshot(source_nmpc, snapshot)
+        _copy_initial_guesses_and_bounds(source_nmpc, recovery_nmpc)
+    finally:
+        _restore_initial_guess_snapshot(source_nmpc, failed_target_snapshot)
+    recovery_nmpc._correct_init_guess_to_fit_bounds(corrected_input="states")
+    recovery_nmpc._correct_init_guess_to_fit_bounds(corrected_input="controls")
+    audit = audit_initial_guess(recovery_nmpc)
+    audit.pop("snapshot", None)
+    return audit
 
 
 def _copy_objective_targets(source_nmpc, target_nmpc) -> None:
@@ -19407,14 +19418,14 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                 _copy_periodic_runtime_settings(self, active_ipopt_recovery_nmpc)
                 runtime_settings_wall_time_s = perf_counter() - stage_start
                 stage_start = perf_counter()
-                _copy_initial_guesses_and_bounds(self, active_ipopt_recovery_nmpc)
                 # ``self`` now contains the primal returned by the failed
                 # target solve.  Keep its frozen RHO bounds, but restore the
                 # primal that had been prepared *before* that solve from the
                 # last certified physical state.  Otherwise a recovery NLP
                 # merely starts from the failed ACADOS iterate it is meant to
                 # repair, which defeats the causal replay/checkpoint path.
-                recovery_seed_audit = restore_last_certified_recovery_seed(
+                recovery_seed_audit = copy_last_certified_recovery_seed(
+                    self,
                     active_ipopt_recovery_nmpc,
                     prepared_rho_primal_checkpoint,
                 )
