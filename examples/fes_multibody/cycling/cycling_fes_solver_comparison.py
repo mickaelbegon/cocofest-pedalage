@@ -1489,6 +1489,7 @@ def _solver_config(
     acados_terminal_wheel_qdot_homotopy_margins: tuple[float, ...] | None,
     terminal_qdot_regularization_weight: float,
     terminal_qdot_regularization_target_source: str,
+    terminal_wheel_regularization_weight: float | None,
     first_node_wheel_q_slack: float,
     acados_terminal_wheel_q_slack: float,
     state_scaling: str,
@@ -1625,6 +1626,9 @@ def _solver_config(
             terminal_qdot_regularization_weight=(terminal_qdot_regularization_weight),
             terminal_qdot_regularization_target_source=(
                 terminal_qdot_regularization_target_source
+            ),
+            terminal_wheel_regularization_weight=(
+                terminal_wheel_regularization_weight
             ),
             acados_wheel_q_slack=first_node_wheel_q_slack,
             acados_terminal_wheel_q_slack=acados_terminal_wheel_q_slack,
@@ -1775,6 +1779,9 @@ def _solver_config(
             terminal_qdot_regularization_weight=(terminal_qdot_regularization_weight),
             terminal_qdot_regularization_target_source=(
                 terminal_qdot_regularization_target_source
+            ),
+            terminal_wheel_regularization_weight=(
+                terminal_wheel_regularization_weight
             ),
             acados_wheel_q_slack=first_node_wheel_q_slack,
             acados_terminal_wheel_q_slack=acados_terminal_wheel_q_slack,
@@ -3580,6 +3587,7 @@ def main(
     acados_terminal_wheel_qdot_homotopy_margins: tuple[float, ...] | None = None,
     terminal_qdot_regularization_weight: float = 0.0,
     terminal_qdot_regularization_target_source: str = "previous",
+    terminal_wheel_regularization_weight: float | None = None,
     first_node_wheel_q_slack: float = 0.0,
     acados_terminal_wheel_q_slack: float = 0.002,
     acados_terminal_wheel_q_homotopy_slacks: tuple[float, ...] | None = None,
@@ -3862,6 +3870,7 @@ def main(
         terminal_qdot_regularization_target_source=(
             terminal_qdot_regularization_target_source
         ),
+        terminal_wheel_regularization_weight=terminal_wheel_regularization_weight,
         first_node_wheel_q_slack=first_node_wheel_q_slack,
         acados_terminal_wheel_q_slack=acados_terminal_wheel_q_slack,
         state_scaling=state_scaling,
@@ -3983,6 +3992,7 @@ def main(
         terminal_qdot_regularization_target_source=(
             terminal_qdot_regularization_target_source
         ),
+        terminal_wheel_regularization_weight=terminal_wheel_regularization_weight,
         first_node_wheel_q_slack=first_node_wheel_q_slack,
         acados_terminal_wheel_q_slack=acados_terminal_wheel_q_slack,
         state_scaling=(
@@ -5573,6 +5583,16 @@ def build_cli() -> argparse.ArgumentParser:
         default="previous",
     )
     parser.add_argument(
+        "--terminal-wheel-regularization-weight",
+        type=float,
+        default=None,
+        help=(
+            "Penalty weight that attracts the terminal crank angle to its "
+            "absolute one-cycle target. Useful for a feasibility Phase I "
+            "before restoring the strict terminal-angle bound."
+        ),
+    )
+    parser.add_argument(
         "--first-node-wheel-q-slack",
         type=float,
         default=0.0,
@@ -6255,6 +6275,9 @@ if __name__ == "__main__":
         terminal_qdot_regularization_weight=(args.terminal_qdot_regularization_weight),
         terminal_qdot_regularization_target_source=(
             args.terminal_qdot_regularization_target_source
+        ),
+        terminal_wheel_regularization_weight=(
+            args.terminal_wheel_regularization_weight
         ),
         first_node_wheel_q_slack=args.first_node_wheel_q_slack,
         acados_terminal_wheel_q_slack=args.acados_terminal_wheel_q_slack,

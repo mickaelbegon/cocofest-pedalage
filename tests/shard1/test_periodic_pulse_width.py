@@ -7179,11 +7179,27 @@ def test_feasibility_uses_constraint_and_decision_bounds():
 
 
 def test_constraint_vector_block_maps_global_row_to_penalty_and_node():
+    class StateList:
+        shape = 3
+        variables = {
+            "A_Biceps": SimpleNamespace(index=range(0, 1)),
+            "theta": SimpleNamespace(index=range(1, 2)),
+            "omega": SimpleNamespace(index=range(2, 3)),
+        }
+
+        def keys(self):
+            return list(self.variables)
+
+        def __getitem__(self, key):
+            return self.variables[key]
+
     dynamics = SimpleNamespace(
-        name="dynamics_defect",
+        name="STATE_CONTINUITY",
         type="ConstraintFcn.CONTINUITY",
         node_idx=[0, 1],
-        rows_by_node={0: 3, 1: 3},
+        # Multi-thread continuity is flattened at dispatch node zero: three
+        # state rows for each of the two shooting intervals.
+        rows_by_node={0: 6},
     )
     terminal = SimpleNamespace(
         name="terminal_angle",
@@ -7193,6 +7209,7 @@ def test_constraint_vector_block_maps_global_row_to_penalty_and_node():
     )
     nlp = SimpleNamespace(
         ns=1,
+        states=StateList(),
         g_internal=[dynamics],
         g=[terminal],
     )
@@ -7227,6 +7244,44 @@ def test_constraint_vector_block_maps_global_row_to_penalty_and_node():
     assert block["local_row"] == 0
     assert block["global_start"] == 6
     assert block["global_stop"] == 8
+
+    continuity = periodic_example._constraint_vector_block(solution, 4)
+    assert continuity["penalty_name"] == "STATE_CONTINUITY"
+    assert continuity["state_continuity"] == {
+        "shooting_interval": 1,
+        "rows_per_interval": 3,
+        "state_count": 3,
+        "defect_column": 0,
+        "state_row": 1,
+        "state_key": "theta",
+        "state_local_row": 0,
+    }
+
+
+def test_terminal_wheel_objective_tracks_absolute_bound_center():
+    terminal_theta = SimpleNamespace(
+        target=np.array([[123.0]]),
+        extra_parameters={"key": "theta", "index": 0},
+        node_idx=[30],
+    )
+    fatigue = SimpleNamespace(
+        target=np.array([[456.0]]),
+        extra_parameters={"key": "A_Biceps"},
+        node_idx=list(range(31)),
+    )
+    nmpc = SimpleNamespace(
+        position_state_key="theta",
+        wheel_state_index=0,
+        nlp=[SimpleNamespace(ns=30, J=[fatigue, terminal_theta])],
+    )
+
+    updated = periodic_example.synchronize_terminal_wheel_objective_target(
+        nmpc, -8.0 * np.pi
+    )
+
+    assert updated == 1
+    np.testing.assert_allclose(terminal_theta.target, -8.0 * np.pi)
+    np.testing.assert_allclose(fatigue.target, 456.0)
 
 
 def test_feasibility_recomputes_constraints_from_compiled_nlp():
@@ -8506,11 +8561,14 @@ def test_comparison_cli_exposes_first_node_terminal_velocity_target():
             "0.1",
             "--terminal-qdot-regularization-target-source",
             "first_node",
+            "--terminal-wheel-regularization-weight",
+            "10000",
         ]
     )
 
     assert args.terminal_qdot_regularization_weight == 0.1
     assert args.terminal_qdot_regularization_target_source == "first_node"
+    assert args.terminal_wheel_regularization_weight == 10000.0
 
 
 def test_acados_internal_wheel_speed_guard_keeps_physical_audit_margin_separate():

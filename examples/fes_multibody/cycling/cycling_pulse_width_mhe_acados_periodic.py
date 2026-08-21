@@ -7845,12 +7845,43 @@ def _constraint_vector_block(solution, index: int | None) -> dict | None:
     for entry in ordered_entries:
         stop = offset + entry["row_count"]
         if offset <= index < stop:
-            return {
+            block = {
                 **entry,
                 "global_start": offset,
                 "global_stop": stop,
                 "local_row": index - offset,
             }
+            if (
+                entry["penalty_name"] == "STATE_CONTINUITY"
+                and entry["phase"] is not None
+                and entry["declared_nodes"]
+            ):
+                nlp = ocp.nlp[entry["phase"]]
+                state_count = int(getattr(nlp.states, "shape", 0))
+                node_count = len(entry["declared_nodes"])
+                rows_per_node, remainder = divmod(entry["row_count"], node_count)
+                if state_count and not remainder and rows_per_node % state_count == 0:
+                    local_row = block["local_row"]
+                    node_position, row_at_node = divmod(local_row, rows_per_node)
+                    state_row = row_at_node % state_count
+                    state_key = None
+                    state_local_row = None
+                    for key in nlp.states.keys():
+                        indexes = list(nlp.states[key].index)
+                        if state_row in indexes:
+                            state_key = key
+                            state_local_row = indexes.index(state_row)
+                            break
+                    block["state_continuity"] = {
+                        "shooting_interval": entry["declared_nodes"][node_position],
+                        "rows_per_interval": rows_per_node,
+                        "state_count": state_count,
+                        "defect_column": row_at_node // state_count,
+                        "state_row": state_row,
+                        "state_key": state_key,
+                        "state_local_row": state_local_row,
+                    }
+            return block
         offset = stop
     return {
         "scope": "unmapped",
@@ -15755,6 +15786,39 @@ def set_acados_runtime_control_regularization_weight(
     }
 
 
+def synchronize_terminal_wheel_objective_target(
+    periodic_nmpc, target: float
+) -> int:
+    """Keep a terminal crank objective aligned with the absolute bound center."""
+
+    position_key = getattr(periodic_nmpc, "position_state_key", "q")
+    position_index = int(getattr(periodic_nmpc, "wheel_state_index", 2))
+    updated = 0
+    for penalty in periodic_nmpc.nlp[0].J:
+        if not penalty or getattr(penalty, "target", None) is None:
+            continue
+        extra_parameters = getattr(penalty, "extra_parameters", {}) or {}
+        if extra_parameters.get("key") != position_key:
+            continue
+        index = extra_parameters.get("index")
+        if index is not None:
+            indexes = np.asarray(index, dtype=int).reshape(-1)
+            if position_index not in indexes:
+                continue
+        nodes = tuple(getattr(penalty, "node_idx", ()) or ())
+        if nodes and int(periodic_nmpc.nlp[0].ns) not in nodes:
+            continue
+        penalty.target = np.full_like(
+            np.asarray(penalty.target, dtype=float), float(target), dtype=float
+        )
+        updated += 1
+    if updated:
+        refresh_acados_cached_objective_targets(periodic_nmpc)
+    periodic_nmpc._cocofest_terminal_wheel_objective_target = float(target)
+    periodic_nmpc._cocofest_terminal_wheel_objective_target_updates = updated
+    return updated
+
+
 def set_terminal_wheel_q_bound_slack(periodic_nmpc, slack: float) -> None:
     if slack < 0:
         raise ValueError("Terminal wheel q slack must be non-negative.")
@@ -15768,6 +15832,7 @@ def set_terminal_wheel_q_bound_slack(periodic_nmpc, slack: float) -> None:
         periodic_nmpc._cocofest_terminal_wheel_q_center = center
     bounds.min[position_index, 2] = center - slack
     bounds.max[position_index, 2] = center + slack
+    synchronize_terminal_wheel_objective_target(periodic_nmpc, center)
     periodic_nmpc._sync_acados_state_bounds()
 
 
@@ -16524,10 +16589,11 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
     args.crank_assistance_nm = torque_diagnostics["assistance_nm"]
     args.expected_external_crank_power_w = torque_diagnostics["expected_power_w"]
     args.warmup_cycles_consumed = 0
-    # The requested scientific benchmark is strictly fatigue-only. Other
-    # objective combinations retain the historical weak terminal wheel term.
+    # Preserve an explicit Phase-I terminal-angle attraction. With no
+    # override, the scientific fatigue-only benchmark remains unregularized
+    # and other objective combinations retain the historical weak term.
     args.terminal_wheel_regularization_weight = (
-        0.0 if objectives == {"fatigue"} else 1e-2
+        _terminal_wheel_objective_weight(args)
     )
 
     if args.n_windows < 1:
