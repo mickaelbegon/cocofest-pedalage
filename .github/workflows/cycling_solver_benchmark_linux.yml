@@ -270,7 +270,7 @@ jobs:
             local mechanics_options=()
             if [[ "$mechanics" == "reduced" ]]; then
               mechanics_options+=(--mechanical-formulation reduced)
-              if [[ "$BENCHMARK_MODE" == "acados_active_set" && "$BENCHMARK_TORQUE" == signed:+* ]]; then
+              if [[ ( "$BENCHMARK_MODE" == "acados_active_set" || "$BENCHMARK_MODE" == "acados_rho7_recovery" ) && "$BENCHMARK_TORQUE" == signed:+* ]]; then
                 # Build the resistant ACADOS seed on a dynamically coherent
                 # trajectory inside the future one-sided 2.6-rad/s fast box.
                 # A symmetric seed-only box is acceptable here: ACADOS later

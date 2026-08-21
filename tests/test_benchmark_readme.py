@@ -149,6 +149,10 @@ def test_rho7_recovery_uses_a_pre_failure_checkpoint_and_acados_recertification(
     assert '[[ "$qdot_margin" != "2.6" ]]' in script
     assert "--acados-max-iter 100" in script
     assert "--acados-maxiter-retries" not in script
+    assert '"$BENCHMARK_MODE" == "acados_rho7_recovery"' in workflow
+    assert "--wheel-qdot-bound-margin 2.6" in workflow
+    assert "--acados-transfer-irk-rollout" in script
+    assert "--acados-transfer-bound-homotopy" in script
     assert "--acados-ipopt-fallback-advance" not in script
     assert ".results[0].validated_cycles >= 1" in script
     assert ".target_rho == 1 and .advanced == true" in script

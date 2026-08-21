@@ -51,6 +51,15 @@ common_options=(
   --acados-wheel-qdot-fast-bound-margin "$qdot_margin"
   --acados-cyclical-transfer-mode extrapolate
   --acados-initial-irk-rollout
+  --acados-transfer-irk-rollout
+  --acados-transfer-bound-homotopy
+  --acados-transfer-bound-homotopy-fractions 0,0.125,0.25,0.375,0.5,0.625,0.75,0.875,1
+  --acados-transfer-bound-homotopy-padding 0.05
+  --acados-transfer-bound-homotopy-iterations 40
+  --acados-transfer-bound-homotopy-tolerance 1e-4
+  --acados-transfer-bound-homotopy-solver-tolerance 1e-4
+  --acados-transfer-bound-homotopy-min-fraction-step 0.001953125
+  --acados-transfer-bound-homotopy-max-refinements 16
   --acados-max-iter 100
 )
 
