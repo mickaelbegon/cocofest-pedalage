@@ -164,8 +164,12 @@ test -s "$reference_dir/result.json"
 # ACADOS solve. The previous ablation showed that a successful R5 refinement
 # was immediately destroyed by the subsequent IRK rollout (omega reached
 # +8.56 rad/s). Keep the R5 primal intact here; ACADOS itself remains the
-# mandatory native recertifier. A negative result remains a scientific
-# outcome and must not be mislabeled as fatigue.
+# mandatory native recertifier. The first preserved-primal run reached two
+# certified RHO but then stalled with a 1.12e-3 IRK dynamics residual while
+# the R5 primal itself had inf_pr near 1e-9. The original +/-10 us PW trust
+# region was still active around that cross-transcription seed. Widen it to
+# +/-50 us in this next causal ablation so ACADOS can reconcile collocation
+# and IRK without releasing the physical [pd0, 600 us] bounds.
 refined_common_options=()
 for option in "${common_options[@]}"; do
   case "$option" in
@@ -188,6 +192,7 @@ python examples/fes_multibody/cycling/cycling_fes_solver_comparison.py \
   --periodic-ipopt-refinement-collocation-degree 5 \
   --periodic-ipopt-refinement-collocation-method radau \
   --acados-reset-solver-before-solve \
+  --acados-transfer-pulse-width-trust-radius 5e-5 \
   --receding-horizon-solution-output "$each_window_dir/validated-prefix.npz" \
   --allow-partial-receding-horizon-solution-output \
   --output-json "$each_window_dir/result.json" \

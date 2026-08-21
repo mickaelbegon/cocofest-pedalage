@@ -158,7 +158,10 @@ def test_rho7_recovery_uses_a_pre_failure_checkpoint_and_acados_recertification(
     assert "--acados-ipopt-recovery-seed-collocation-degree 3" in script
     assert "--acados-ipopt-recovery-seed-max-iterations" in script
     assert "--disable-periodic-ipopt-refinement" in script
-    assert "--periodic-ipopt-refinement-ode-solver" not in script
+    recertification_call = script.split(
+        "# Force IPOPT/Radau-5 on the frozen checkpoint", maxsplit=1
+    )[1]
+    assert "--periodic-ipopt-refinement-ode-solver" not in recertification_call
     assert '[[ "$qdot_margin" != "2.6" ]]' in script
     assert "--acados-max-iter 100" in script
     assert "--acados-maxiter-retries" not in script
@@ -170,6 +173,7 @@ def test_rho7_recovery_uses_a_pre_failure_checkpoint_and_acados_recertification(
     assert "--acados-control-homotopy-window-growth 10" in script
     assert "--acados-control-homotopy-window-max-radius 1e-5" in script
     assert "--acados-transfer-pulse-width-trust-radius 1e-5" in script
+    assert "--acados-transfer-pulse-width-trust-radius 5e-5" in script
     assert "--acados-stationarity-tolerance 5e-3" in script
     assert "--primal-feasibility-threshold 1e-5" in script
     assert "--disable-periodic-fes-warmup-projection" in script

@@ -3880,6 +3880,17 @@ def _common_initial_solution_metadata(args: argparse.Namespace) -> dict:
         args, "acados_terminal_wheel_q_homotopy_slacks", None
     )
     terminal_target_slack = _terminal_wheel_q_target_slack(args)
+    signed_crank_torque_nm = float(args.constant_crank_torque)
+    torque_diagnostics = crank_torque_diagnostics(
+        signed_crank_torque_nm,
+        float(
+            getattr(
+                args,
+                "wheel_qdot_regularization_target",
+                DEFAULT_CRANK_QDOT_RAD_S,
+            )
+        ),
+    )
     return {
         "schema": "cocofest-common-periodic-initial-solution-v2",
         "model_formulation": args.model_formulation,
@@ -3889,6 +3900,13 @@ def _common_initial_solution_metadata(args: argparse.Namespace) -> dict:
         "objective": sorted(parse_objectives(args.objective)),
         "objective_shape": args.objective_shape,
         "constant_crank_torque": float(args.constant_crank_torque),
+        # ``constant_crank_torque`` is already signed, but preserve its
+        # interpretation explicitly. An offline terminal-set dataset must not
+        # merge +0.15 N.m resistance with -0.15 N.m drive merely because an
+        # older CLI called both values "assistance".
+        "signed_crank_torque_nm": signed_crank_torque_nm,
+        "crank_torque_role": torque_diagnostics["role"],
+        "expected_crank_power_w": torque_diagnostics["expected_power_w"],
         "torque_application": args.torque_application,
         "enforce_start_constraints": bool(args.enforce_start_constraints),
         "full_contact_constraints_terminal": bool(

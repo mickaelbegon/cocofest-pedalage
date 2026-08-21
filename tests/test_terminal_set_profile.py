@@ -28,6 +28,8 @@ def _write_prefix(
         "cycles_per_window": cycles,
         "stimulations_per_cycle": stimulations,
         "constant_crank_torque": load_nm,
+        "signed_crank_torque_nm": load_nm,
+        "crank_torque_role": "resistive" if load_nm > 0.0 else "neutral",
         "absolute_wheel_q_origin_reference": 0.0,
         "absolute_wheel_q_start_cycle_index": start_cycle,
     }
@@ -56,6 +58,10 @@ def test_terminal_set_profile_uses_absolute_angle_and_reports_coverage(tmp_path)
     profile = build_terminal_set_profile([first, second])
 
     assert profile["absolute_angle_target"] == "theta_initial_minus_2pi_times_cycle"
+    assert profile["conditioning_variables"] == [
+        "signed_crank_torque_nm",
+        "minimum_A_capacity_ratio",
+    ]
     assert profile["coverage"]["distinct_loads_nm"] == [0.0, 0.15]
     assert profile["coverage"]["boundary_sample_count"] == 8
     assert profile["coverage"]["certification_ready"] is False
@@ -63,6 +69,7 @@ def test_terminal_set_profile_uses_absolute_angle_and_reports_coverage(tmp_path)
     assert profile["coverage"]["legacy_angle_sources"] == []
     assert profile["status"] == "diagnostic_only"
     assert profile["reported_fatigue_state_ratios"] == ["A_Biceps", "A_Triceps"]
+    assert profile["sources"][1]["load_role"] == "resistive"
     for terminal_bin in profile["bins"]:
         assert set(terminal_bin["capacity_ratio_by_state"]) == {
             "A_Biceps",

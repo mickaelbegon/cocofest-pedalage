@@ -1880,6 +1880,15 @@ IRK appelé ensuite le remplace par une trajectoire atteignant
 préparations incompatibles : elle injecte le primal R5, remet la mémoire SQP à
 zéro et laisse ACADOS effectuer directement la recertification native.
 
+Le run `32446676553` valide ce changement sur deux RHO consécutifs. Les
+raffinements R5 ont des défauts primaux de `4.87e-10` et `1.16e-9`; ACADOS les
+recertifie en deux SQP, environ `0.126 s` chacun. Il bloque ensuite au RHO 3
+avec `1.12e-3` de défaut dynamique IRK après 100 SQP. Ce n'est toujours pas un
+arrêt de fatigue (`min A/A_scale=0.9829`). La prochaine ablation élargit donc
+uniquement le trust region PW inter-fenêtre de `+/-10` à `+/-50 us`, tout en
+conservant les bornes Ding physiques `[pd0, 600 us]`, le primal R5 et la
+recertification ACADOS obligatoire.
+
 Les preuves principales sont les runs
 [`32376558196`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/32376558196),
 [`32377237731`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/32377237731),

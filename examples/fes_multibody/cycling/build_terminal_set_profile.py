@@ -140,7 +140,13 @@ def build_terminal_set_profile(
         metadata, samples, normalization, angle_reference = (
             _load_certified_boundaries(source)
         )
-        load_nm = float(metadata["constant_crank_torque"])
+        load_nm = float(
+            metadata.get(
+                "signed_crank_torque_nm",
+                metadata["constant_crank_torque"],
+            )
+        )
+        load_role = metadata.get("crank_torque_role", "legacy_signed_convention")
         for sample in samples:
             clipped = np.clip(sample["minimum_capacity_ratio"], 0.0, 1.0)
             bin_count = int(np.ceil(1.0 / capacity_bin_width))
@@ -162,6 +168,7 @@ def build_terminal_set_profile(
                 "solver": metadata.get("producer_solver"),
                 "collocation_degree": metadata.get("producer_collocation_degree"),
                 "load_nm": load_nm,
+                "load_role": load_role,
                 "certified_cycles": int(metadata["cycles_per_window"]),
                 "capacity_normalization": normalization,
                 "angle_reference": angle_reference,
@@ -233,7 +240,10 @@ def build_terminal_set_profile(
         "schema": "cocofest-mechanical-terminal-set-profile-v1",
         "status": "candidate" if certification_ready else "diagnostic_only",
         "absolute_angle_target": "theta_initial_minus_2pi_times_cycle",
-        "conditioning_variables": ["constant_crank_torque", "minimum_A_capacity_ratio"],
+        "conditioning_variables": [
+            "signed_crank_torque_nm",
+            "minimum_A_capacity_ratio",
+        ],
         "reported_fatigue_state_ratios": fatigue_state_keys,
         "sources": source_summaries,
         "coverage": {

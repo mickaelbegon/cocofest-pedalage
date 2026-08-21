@@ -2739,6 +2739,9 @@ def test_common_initial_solution_metadata_rejects_an_incompatible_horizon(
         warmup_cycles_consumed=1,
     )
     metadata = periodic_example._common_initial_solution_metadata(args)
+    assert metadata["signed_crank_torque_nm"] == -0.2
+    assert metadata["crank_torque_role"] == "driving"
+    assert metadata["expected_crank_power_w"] > 0.0
     metadata["cycles_per_window"] = 2
     seed = periodic_example._WarmupSolutionAdapter({}, {}, metadata=metadata)
 

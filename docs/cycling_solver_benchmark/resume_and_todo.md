@@ -1058,10 +1058,19 @@ ne suffit pas, mais la séquence 19--36 conserve le bassin franchissant le RHO
     rollout IRK suivant détruit le primal (`omega=+8.56 rad/s`, violation
     `11.84 rad/s`) et provoque `MINSTEP`. La campagne suivante conserve le
     primal R5 sans rollout, réinitialise SQP et exige toujours une
-    recertification ACADOS; ne jamais avancer un RHO invalide.
+    recertification ACADOS; ne jamais avancer un RHO invalide. Le run
+    `32446676553` confirme le gain causal : sans rollout, les deux premiers
+    raffinements R5 convergent à `4.87e-10` et `1.16e-9`, puis ACADOS les
+    recertifie en deux SQP chacun (`0.126 s/RHO`). Le troisième RHO atteint
+    toutefois 100 SQP avec un défaut IRK de `1.12e-3`. Le trust region PW
+    `+/-10 us`, hérité du seed brut, est le prochain facteur isolé; tester
+    `+/-50 us` sans changer la boîte physique `[pd0, 600 us]`.
 54. [prototype terminé; campagne TODO] `build_terminal_set_profile.py`
     construit une enveloppe sur l'erreur d'angle absolue et `omega`,
-    conditionnée par la charge et la capacité musculaire minimale `A/A_scale`.
+    conditionnée par la charge signée et la capacité musculaire minimale
+    `A/A_scale`. Les nouveaux exports écrivent explicitement le couple signé,
+    son rôle mécanique et la puissance attendue afin de ne jamais confondre
+    résistance et assistance dans une cellule.
     Chaque cellule rapporte aussi séparément les quatre rapports `A_m/A_scale,m`
     afin de ne pas masquer le muscle limitant derrière le minimum scalaire.
     Les exports RHO enregistrent maintenant les quatre `A_scale`, l'origine

@@ -6037,3 +6037,12 @@ mais le rollout IRK exécuté juste après l'écrase : il atteint
 raffinement R5. L'ablation suivante conserve directement le primal R5,
 supprime rollout/homotopie de transfert pour cette variante et réinitialise
 la mémoire SQP avant la recertification ACADOS.
+
+Le run `32446676553` porte alors le préfixe certifié de un à deux RHO. R5
+converge à `4.87e-10` puis `1.16e-9`, et chaque recertification ACADOS demande
+deux SQP (`0.126 s`). Au troisième RHO, ACADOS reste toutefois à
+`1.12e-3` de défaut dynamique après 100 SQP malgré le primal R5 certifié. La
+prochaine ablation ne modifie ni la dynamique ni les bornes Ding : elle élargit
+seulement le trust region inter-fenêtre de `10` à `50 us` pour distinguer une
+restriction artificielle des contrôles d'une incompatibilité R5/IRK plus
+profonde.
