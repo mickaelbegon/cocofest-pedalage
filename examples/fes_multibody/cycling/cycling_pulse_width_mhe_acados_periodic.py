@@ -6621,6 +6621,18 @@ def run_acados_initial_fast_velocity_bound_continuation(
         periodic_nmpc._sync_acados_state_bounds()
         if nominal_iterations is not None:
             set_acados_runtime_max_iterations(periodic_nmpc, int(nominal_iterations))
+        # ``stage_solver`` built the capsule, while the RHO loop will pass the
+        # equivalent nominal ``solver`` object. Bioptim does not compare these
+        # options value by value on reuse: it rejects any solver whose
+        # structural-change flag is still armed. This reset is safe only
+        # because the continuation is compiled with the nominal maximum-iter
+        # value above; numerical iteration budgets are changed on the native
+        # capsule at runtime.
+        mark_nominal_options_reusable = getattr(
+            solver, "set_only_first_options_has_changed", None
+        )
+        if mark_nominal_options_reusable is not None:
+            mark_nominal_options_reusable(False)
 
     completed = bool(
         accepted_margin is not None and np.isclose(accepted_margin, strict_margin)

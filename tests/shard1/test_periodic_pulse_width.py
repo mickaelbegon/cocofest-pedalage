@@ -8542,6 +8542,7 @@ def test_initial_fast_velocity_bound_continuation_preserves_first_node(monkeypat
     assert summary["audit_convergence_tolerance"] == 1e-4
     assert solver.maximum_iterations is None
     assert maximum_iteration_requests == [100]
+    assert solver.only_first_options_has_changed is False
     np.testing.assert_allclose(
         [bounds[0, 1] for bounds in observed],
         -2.0 * np.pi - np.array([3.0, 2.85, 2.70, 2.55]),
