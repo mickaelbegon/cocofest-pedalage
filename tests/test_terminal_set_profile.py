@@ -7,7 +7,7 @@ from examples.fes_multibody.cycling.build_terminal_set_profile import (
 )
 
 
-def _write_prefix(path, *, load_nm, omega_offset=0.0):
+def _write_prefix(path, *, load_nm, omega_offset=0.0, include_scales=True):
     stimulations = 2
     cycles = 3
     nodes = cycles * stimulations + 1
@@ -21,6 +21,11 @@ def _write_prefix(path, *, load_nm, omega_offset=0.0):
         "stimulations_per_cycle": stimulations,
         "constant_crank_torque": load_nm,
     }
+    if include_scales:
+        metadata["fatigue_capacity_scales"] = {
+            "A_Biceps": 100.0,
+            "A_Triceps": 80.0,
+        }
     np.savez(
         path,
         states__theta=theta[None, :],
@@ -44,6 +49,7 @@ def test_terminal_set_profile_uses_absolute_angle_and_reports_coverage(tmp_path)
     assert profile["coverage"]["distinct_loads_nm"] == [0.0, 0.15]
     assert profile["coverage"]["boundary_sample_count"] == 8
     assert profile["coverage"]["certification_ready"] is False
+    assert profile["coverage"]["legacy_capacity_sources"] == []
     assert profile["status"] == "diagnostic_only"
     assert np.isclose(
         max(
@@ -51,4 +57,21 @@ def test_terminal_set_profile_uses_absolute_angle_and_reports_coverage(tmp_path)
             for row in profile["bins"]
         ),
         1e-3,
+    )
+
+
+def test_legacy_capacity_normalization_cannot_certify_terminal_set(tmp_path):
+    legacy = tmp_path / "legacy.npz"
+    _write_prefix(legacy, load_nm=0.0, include_scales=False)
+
+    profile = build_terminal_set_profile([legacy])
+
+    assert profile["status"] == "diagnostic_only"
+    assert profile["coverage"]["certification_ready"] is False
+    assert profile["coverage"]["legacy_capacity_sources"] == [
+        str(legacy.resolve())
+    ]
+    assert (
+        profile["sources"][0]["capacity_normalization"]
+        == "legacy_source_initial_diagnostic_only"
     )

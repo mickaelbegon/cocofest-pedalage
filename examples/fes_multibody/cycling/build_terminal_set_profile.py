@@ -15,7 +15,7 @@ STATE_PREFIX = "states__"
 FULL_TURN = 2.0 * np.pi
 
 
-def _load_certified_boundaries(path: Path) -> tuple[dict, list[dict]]:
+def _load_certified_boundaries(path: Path) -> tuple[dict, list[dict], str]:
     with np.load(path, allow_pickle=False) as archive:
         if METADATA_KEY not in archive.files:
             raise ValueError(f"{path} has no trajectory metadata.")
@@ -47,11 +47,29 @@ def _load_certified_boundaries(path: Path) -> tuple[dict, list[dict]]:
     # this residual is therefore relative to theta(0) - 2*pi*k, not relative
     # to the preceding optimized terminal state.
     theta_targets = theta_boundary[0] - FULL_TURN * np.arange(cycles + 1)
-    initial_capacity = {
+    source_initial_capacity = {
         key: float(values.reshape(-1, values.shape[-1])[0, 0])
         for key, values in capacities.items()
     }
-    if any(value <= 0.0 or not np.isfinite(value) for value in initial_capacity.values()):
+    metadata_scales = metadata.get("fatigue_capacity_scales") or {}
+    capacity_scales = {
+        key: float(metadata_scales[key])
+        for key in capacities
+        if key in metadata_scales
+    }
+    if len(capacity_scales) == len(capacities):
+        normalization = "rested_ding_a_scale"
+    else:
+        # Legacy RHO exports did not retain a_scale.  They remain useful for a
+        # diagnostic plot, but can never make the profile certification-ready:
+        # normalizing each source by its own first boundary would hide fatigue
+        # already accumulated during warmup or a replay checkpoint.
+        capacity_scales = source_initial_capacity
+        normalization = "legacy_source_initial_diagnostic_only"
+    if any(
+        value <= 0.0 or not np.isfinite(value)
+        for value in capacity_scales.values()
+    ):
         raise ValueError(f"{path} has invalid initial Ding capacity values.")
 
     samples = []
@@ -59,16 +77,18 @@ def _load_certified_boundaries(path: Path) -> tuple[dict, list[dict]]:
         ratios = []
         for key, values in capacities.items():
             flattened = values.reshape(-1, values.shape[-1])
-            ratios.extend((flattened[:, node] / initial_capacity[key]).tolist())
+            ratios.extend((flattened[:, node] / capacity_scales[key]).tolist())
         samples.append(
             {
                 "cycle": int(cycle),
-                "theta_phase_error_rad": float(theta_boundary[cycle] - theta_targets[cycle]),
+                "theta_phase_error_rad": float(
+                    theta_boundary[cycle] - theta_targets[cycle]
+                ),
                 "omega_rad_s": float(omega_boundary[cycle]),
                 "minimum_capacity_ratio": float(min(ratios)),
             }
         )
-    return metadata, samples
+    return metadata, samples, normalization
 
 
 def _interval(values: np.ndarray, padding: float) -> dict:
@@ -104,7 +124,7 @@ def build_terminal_set_profile(
     source_summaries = []
     for source in sources:
         source = Path(source).resolve()
-        metadata, samples = _load_certified_boundaries(source)
+        metadata, samples, normalization = _load_certified_boundaries(source)
         load_nm = float(metadata["constant_crank_torque"])
         for sample in samples:
             clipped = np.clip(sample["minimum_capacity_ratio"], 0.0, 1.0)
@@ -128,6 +148,7 @@ def build_terminal_set_profile(
                 "collocation_degree": metadata.get("producer_collocation_degree"),
                 "load_nm": load_nm,
                 "certified_cycles": int(metadata["cycles_per_window"]),
+                "capacity_normalization": normalization,
             }
         )
 
@@ -164,7 +185,16 @@ def build_terminal_set_profile(
         for row in bins
         if row["sample_count"] < 20
     ]
-    certification_ready = len(distinct_loads) >= 3 and not under_sampled
+    legacy_capacity_sources = [
+        row["path"]
+        for row in source_summaries
+        if row["capacity_normalization"] != "rested_ding_a_scale"
+    ]
+    certification_ready = (
+        len(distinct_loads) >= 3
+        and not under_sampled
+        and not legacy_capacity_sources
+    )
     return {
         "schema": "cocofest-mechanical-terminal-set-profile-v1",
         "status": "candidate" if certification_ready else "diagnostic_only",
@@ -177,6 +207,7 @@ def build_terminal_set_profile(
             "minimum_required_distinct_loads": 3,
             "minimum_required_samples_per_bin": 20,
             "under_sampled_bins": under_sampled,
+            "legacy_capacity_sources": legacy_capacity_sources,
             "certification_ready": certification_ready,
         },
         "bins": bins,

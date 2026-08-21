@@ -3011,6 +3011,7 @@ def test_receding_horizon_solution_is_exported_as_one_multi_cycle_seed(
                 "omega": {"maximum_absolute_jump": 2e-10},
             },
         },
+        "fatigue_capacity_scales": {"A_Biceps": 3000.0},
     }
 
     periodic_example._save_receding_horizon_solution(output_path, summary, args)
@@ -3020,6 +3021,7 @@ def test_receding_horizon_solution_is_exported_as_one_multi_cycle_seed(
     assert seed.metadata["producer_mode"] == "receding_horizon_concatenation"
     assert seed.metadata["producer_cycles_per_window"] == 1
     assert seed.metadata["producer_requested_cycles"] == 2
+    assert seed.metadata["fatigue_capacity_scales"] == {"A_Biceps": 3000.0}
     assert (
         seed.metadata["state_boundary_maximum_absolute_jump"]
         == pytest.approx(2e-10)

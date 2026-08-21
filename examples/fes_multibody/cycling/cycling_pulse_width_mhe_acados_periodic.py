@@ -3958,6 +3958,7 @@ def _receding_horizon_solution_metadata(
     args: argparse.Namespace,
     cycle_count: int,
     maximum_boundary_jump: float,
+    fatigue_capacity_scales: dict[str, float] | None = None,
 ) -> dict:
     """Describe a concatenated RHO trace as one multi-cycle primal seed."""
 
@@ -3971,6 +3972,14 @@ def _receding_horizon_solution_metadata(
             "state_boundary_maximum_absolute_jump": float(
                 maximum_boundary_jump
             ),
+            # Preserve the rested Ding reference explicitly.  A terminal-set
+            # dataset assembled from several loads or replay checkpoints must
+            # compare A/A_scale, not A relative to the first (possibly already
+            # fatigued) boundary of each source file.
+            "fatigue_capacity_scales": {
+                str(key): float(value)
+                for key, value in (fatigue_capacity_scales or {}).items()
+            },
         }
     )
     return metadata
@@ -4033,7 +4042,10 @@ def _save_receding_horizon_solution(
         output_path,
         _WarmupSolutionAdapter(states, controls),
         metadata=_receding_horizon_solution_metadata(
-            args, cycle_count, maximum_boundary_jump
+            args,
+            cycle_count,
+            maximum_boundary_jump,
+            summary.get("fatigue_capacity_scales"),
         ),
     )
 

@@ -5970,3 +5970,10 @@ couple externe et la capacité Ding minimale. Le profil refuse implicitement
 le statut de candidat online tant que la couverture reste inférieure à trois
 charges ou 20 échantillons par cellule. Ce choix sépare la construction de
 données de l'activation d'une contrainte susceptible de casser la faisabilité.
+
+Un audit ultérieur a corrigé la normalisation de fatigue : les exports RHO
+stockent désormais les `A_scale` reposés des quatre muscles et le profil
+utilise `A/A_scale`. Une normalisation par le premier nœud du fichier aurait
+effacé la fatigue antérieure d'un warmup ou d'un checkpoint. Les artefacts
+legacy sans ces références restent diagnostiques, mais ne peuvent pas rendre
+le profil candidat online.
