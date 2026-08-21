@@ -36,6 +36,7 @@ common_options=(
   --crank-assistance "$resistive_torque"
   --first-node-wheel-q-slack 0
   --terminal-wheel-q-slack "$terminal_q_slack"
+  --primal-feasibility-threshold 1e-5
   --mechanical-formulation reduced
   --experimental-reduced-acados
   --compact-rho-output
@@ -61,6 +62,12 @@ common_options=(
   --acados-transfer-bound-homotopy-min-fraction-step 0.001953125
   --acados-transfer-bound-homotopy-max-refinements 16
   --acados-max-iter 100
+  --acados-stationarity-tolerance 5e-3
+  --acados-control-homotopy-radii 1e-6,1e-5
+  --acados-control-homotopy-tolerance 2e-2
+  --acados-control-homotopy-window-growth 10
+  --acados-control-homotopy-window-max-radius 1e-5
+  --ipopt-linear-solver mumps
 )
 
 # First reproduce the chain that exposed the resistant RHO-7 failure. The

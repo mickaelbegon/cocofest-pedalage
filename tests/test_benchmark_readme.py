@@ -160,6 +160,11 @@ def test_rho7_recovery_uses_a_pre_failure_checkpoint_and_acados_recertification(
     assert "--wheel-qdot-bound-margin 2.6" in workflow
     assert "--acados-transfer-irk-rollout" in script
     assert "--acados-transfer-bound-homotopy" in script
+    assert "--acados-control-homotopy-radii 1e-6,1e-5" in script
+    assert "--acados-control-homotopy-window-growth 10" in script
+    assert "--acados-control-homotopy-window-max-radius 1e-5" in script
+    assert "--acados-stationarity-tolerance 5e-3" in script
+    assert "--primal-feasibility-threshold 1e-5" in script
     assert "--disable-periodic-fes-warmup-projection" in script
     assert "--acados-initial-irk-rollout" not in script
     assert "--acados-ipopt-fallback-advance" not in script
