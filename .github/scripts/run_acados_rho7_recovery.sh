@@ -17,6 +17,10 @@ if [[ "$resistive_torque" != "signed:+0.15" ]]; then
   echo "acados_rho7_recovery requires signed:+0.15 N.m." >&2
   exit 2
 fi
+if [[ "$qdot_margin" != "2.6" ]]; then
+  echo "acados_rho7_recovery must reproduce the reference 2.6 rad/s guard." >&2
+  exit 2
+fi
 
 root_dir=acados-ipopt-hybrid-results
 baseline_dir="$root_dir/rho7-baseline"
@@ -47,10 +51,7 @@ common_options=(
   --acados-wheel-qdot-fast-bound-margin "$qdot_margin"
   --acados-cyclical-transfer-mode extrapolate
   --acados-initial-irk-rollout
-  --acados-max-iter 30
-  --acados-store-iterates
-  --acados-maxiter-retries 1
-  --acados-maxiter-retry-iterations 70
+  --acados-max-iter 100
 )
 
 # First reproduce the chain that exposed the resistant RHO-7 failure. The
