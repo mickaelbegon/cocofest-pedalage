@@ -1873,6 +1873,13 @@ maintenant de certifier/projeter le terminal de chaque RHO ACADOS par R5 avant
 qu'une erreur IRK accumulée ne devienne l'état initial strict du RHO suivant,
 puis de comparer ce coût à la terminal set hors ligne multi-charge.
 
+Le premier essai de cette certification préventive (`32445828055`) montre que
+R5 sait résoudre le primal transféré (`inf_pr=2.41e-8`), mais que le rollout
+IRK appelé ensuite le remplace par une trajectoire atteignant
+`omega=+8.56 rad/s`. La variante corrigée ne combine donc plus ces deux
+préparations incompatibles : elle injecte le primal R5, remet la mémoire SQP à
+zéro et laisse ACADOS effectuer directement la recertification native.
+
 Les preuves principales sont les runs
 [`32376558196`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/32376558196),
 [`32377237731`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/32377237731),

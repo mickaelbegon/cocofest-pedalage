@@ -3314,6 +3314,9 @@ def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
                 "acados_ipopt_recovery_summaries": (
                     result.get("acados_ipopt_recovery_summaries") or []
                 ),
+                "inter_window_refinement_summaries": (
+                    result.get("inter_window_refinement_summaries") or []
+                ),
                 "nlp_ipopt_recovery": result.get("nlp_ipopt_recovery"),
                 "nlp_ipopt_recovery_summaries": (
                     result.get("nlp_ipopt_recovery_summaries") or []

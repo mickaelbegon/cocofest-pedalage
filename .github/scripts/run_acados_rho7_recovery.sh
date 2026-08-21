@@ -26,7 +26,7 @@ root_dir=acados-ipopt-hybrid-results
 baseline_dir="$root_dir/rho7-baseline"
 recovery_dir="$root_dir/rho7-r5-recertification"
 reference_dir="$root_dir/rho7-ipopt-r5-reference"
-each_window_dir="$root_dir/rho7-r5-each-window"
+each_window_dir="$root_dir/rho7-r5-each-window-no-irk-rollout"
 mkdir -p "$baseline_dir" "$recovery_dir" "$reference_dir" "$each_window_dir"
 
 common_options=(
@@ -160,12 +160,24 @@ python examples/fes_multibody/cycling/cycling_fes_solver_comparison.py \
 test -s "$reference_dir/result.json"
 
 # Determine whether the loss of recursive feasibility is accumulated by the
-# ACADOS IRK transfer.  R5 now refines every shifted primal before the next
-# ACADOS solve, rather than intervening only after RHO 7 has become
-# unreachable.  A negative result remains a scientific outcome and is kept
-# in the artifact; it must not be mislabeled as fatigue.
+# ACADOS IRK transfer. R5 now refines every shifted primal before the next
+# ACADOS solve. The previous ablation showed that a successful R5 refinement
+# was immediately destroyed by the subsequent IRK rollout (omega reached
+# +8.56 rad/s). Keep the R5 primal intact here; ACADOS itself remains the
+# mandatory native recertifier. A negative result remains a scientific
+# outcome and must not be mislabeled as fatigue.
+refined_common_options=()
+for option in "${common_options[@]}"; do
+  case "$option" in
+    --acados-transfer-irk-rollout|--acados-transfer-bound-homotopy)
+      ;;
+    *)
+      refined_common_options+=("$option")
+      ;;
+  esac
+done
 python examples/fes_multibody/cycling/cycling_fes_solver_comparison.py \
-  "${common_options[@]}" \
+  "${refined_common_options[@]}" \
   --n-windows 7 \
   --common-initial-solution "$seed_path" \
   --periodic-ipopt-refinement \
@@ -175,6 +187,7 @@ python examples/fes_multibody/cycling/cycling_fes_solver_comparison.py \
   --periodic-ipopt-refinement-ode-solver collocation \
   --periodic-ipopt-refinement-collocation-degree 5 \
   --periodic-ipopt-refinement-collocation-method radau \
+  --acados-reset-solver-before-solve \
   --receding-horizon-solution-output "$each_window_dir/validated-prefix.npz" \
   --allow-partial-receding-horizon-solution-output \
   --output-json "$each_window_dir/result.json" \

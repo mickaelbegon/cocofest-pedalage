@@ -6028,3 +6028,12 @@ nominale. La prochaine ablation doit distinguer (a) perte de récursivité due a
 transfert IRK ACADOS et (b) véritable inaccessibilité un-cycle, en certifiant
 chaque terminal ACADOS par R5 avant son exécution ou en projetant l'état
 terminal sur une terminal set hors ligne multi-charge.
+
+Le run `32445828055` teste ensuite R5 avant chaque nouveau RHO. Le premier
+raffinement inter-fenêtre converge réellement (`inf_pr=2.41e-8`, `6.59 s`),
+mais le rollout IRK exécuté juste après l'écrase : il atteint
+`omega=+8.56 rad/s`, soit `11.84 rad/s` hors boîte, puis l'homotopie ACADOS
+échoue par `MINSTEP`. La cause est donc séquentielle, pas un échec du
+raffinement R5. L'ablation suivante conserve directement le primal R5,
+supprime rollout/homotopie de transfert pour cette variante et réinitialise
+la mémoire SQP avant la recertification ACADOS.

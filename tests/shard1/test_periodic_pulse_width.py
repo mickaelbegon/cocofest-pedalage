@@ -6795,6 +6795,14 @@ def test_acados_hybrid_recovery_diagnostics_survive_benchmark_serialization():
             "quality": "feasible_nonconverged",
         }
     ]
+    result["inter_window_refinement_summaries"] = [
+        {
+            "window": 1,
+            "success": True,
+            "status": 0,
+            "solver_time_s": 0.4,
+        }
+    ]
     result["solver_attempt_accounting"] = {
         "attempt_count": 2,
         "certified_physical_rho_count": 1,
@@ -6809,6 +6817,7 @@ def test_acados_hybrid_recovery_diagnostics_survive_benchmark_serialization():
     assert row["initial_acados_irk_rollout"]["retained_collocation_seed"] is True
     assert row["acados_ipopt_recovery"]["injected_count"] == 1
     assert row["acados_ipopt_recovery_summaries"][0]["provisional"] is True
+    assert row["inter_window_refinement_summaries"][0]["success"] is True
     assert row["solver_attempt_accounting"]["attempt_count"] == 2
     assert row["execution_timing"]["rho_solve_loop_wall_time_s"] == 1.25
     assert row["execution_timing"]["post_solve_wall_time_s"] == 0.5

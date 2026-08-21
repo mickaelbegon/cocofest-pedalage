@@ -1054,8 +1054,11 @@ ne suffit pas, mais la séquence 19--36 conserve le bassin franchissant le RHO
     intervalle, pas le calcium ni les PW. Une Phase I à `+/-0.05 rad`
     converge, mais reste à `+0.04918 rad` même avec une attraction terminale
     de poids `1e8`; elle ne recertifie donc pas `+/-0.002 rad`. Prochaine
-    expérience : certification R5 de chaque terminal ACADOS avant transfert,
-    comparée à une projection terminal-set; ne pas avancer un RHO invalide.
+    expérience `32445828055` : R5 inter-fenêtre converge à `2.41e-8`, mais le
+    rollout IRK suivant détruit le primal (`omega=+8.56 rad/s`, violation
+    `11.84 rad/s`) et provoque `MINSTEP`. La campagne suivante conserve le
+    primal R5 sans rollout, réinitialise SQP et exige toujours une
+    recertification ACADOS; ne jamais avancer un RHO invalide.
 54. [prototype terminé; campagne TODO] `build_terminal_set_profile.py`
     construit une enveloppe sur l'erreur d'angle absolue et `omega`,
     conditionnée par la charge et la capacité musculaire minimale `A/A_scale`.
