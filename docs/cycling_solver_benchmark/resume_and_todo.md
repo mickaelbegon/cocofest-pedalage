@@ -1067,7 +1067,14 @@ ne suffit pas, mais la séquence 19--36 conserve le bassin franchissant le RHO
     run `32447647189`. Le préfixe reste à deux RHO et le défaut du troisième
     augmente à `2.95e-2`; conserver `+/-10 us`. La prochaine ablation aligne
     le tableau ACADOS sur R5 : `GAUSS_RADAU_IIA`, cinq stages et un step, sans
-    changer la formulation SX ni les bornes physiques `[pd0, 600 us]`.
+    changer la formulation SX ni les bornes physiques `[pd0, 600 us]`. Le run
+    `32448464731` reste lui aussi à deux RHO et donne `1.16e-3` au troisième :
+    l'incompatibilité de tableau n'explique pas l'arrêt. Il réduit néanmoins
+    le coût ACADOS d'environ `0.126` à `0.048 s` sur les RHO convergés et de
+    `5.05` à `1.96 s` pour 100 SQP. Conserver Radau IIA comme candidat rapide;
+    la prochaine étape robuste est d'avancer le même RHO avec le primal R5
+    déjà certifié lorsque sa recertification ACADOS échoue, puis de revenir à
+    ACADOS au RHO suivant.
 54. [prototype terminé; campagne TODO] `build_terminal_set_profile.py`
     construit une enveloppe sur l'erreur d'angle absolue et `omega`,
     conditionnée par la charge signée et la capacité musculaire minimale

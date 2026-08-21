@@ -26,7 +26,7 @@ root_dir=acados-ipopt-hybrid-results
 baseline_dir="$root_dir/rho7-baseline"
 recovery_dir="$root_dir/rho7-r5-recertification"
 reference_dir="$root_dir/rho7-ipopt-r5-reference"
-each_window_dir="$root_dir/rho7-r5-each-window-radau-iia"
+each_window_dir="$root_dir/rho7-r5-each-window-radau-iia-fallback"
 mkdir -p "$baseline_dir" "$recovery_dir" "$reference_dir" "$each_window_dir"
 
 common_options=(
@@ -172,6 +172,12 @@ test -s "$reference_dir/result.json"
 # with the SX/Radau-5 collocation seed: Radau IIA, five stages, one integration
 # step per shooting interval. This isolates transcription mismatch without
 # changing the OCP or using the unsupported Bioptim SX+IRK bridge.
+# The aligned-tableau run remained at two RHO, although it made ACADOS about
+# 2.6x faster. The next production-like gate therefore keeps ACADOS as the
+# first certifier, then re-solves the same frozen RHO with R5 after an ACADOS
+# failure. Only a converged, feasible R5 result may advance that RHO, and the
+# following RHO returns to ACADOS. Two attempts preserve the benchmark's
+# original consecutive-failure contract.
 refined_common_options=()
 for option in "${common_options[@]}"; do
   case "$option" in
@@ -197,6 +203,12 @@ python examples/fes_multibody/cycling/cycling_fes_solver_comparison.py \
   --acados-collocation-type GAUSS_RADAU_IIA \
   --acados-sim-stages 5 \
   --acados-sim-steps 1 \
+  --acados-ipopt-recovery \
+  --acados-ipopt-recovery-max-iterations "$ipopt_max_iter" \
+  --acados-ipopt-recovery-collocation-degree 5 \
+  --acados-ipopt-recovery-seed-collocation-degree 5 \
+  --acados-ipopt-recovery-seed-max-iterations "$ipopt_max_iter" \
+  --acados-ipopt-fallback-advance \
   --receding-horizon-solution-output "$each_window_dir/validated-prefix.npz" \
   --allow-partial-receding-horizon-solution-output \
   --output-json "$each_window_dir/result.json" \
@@ -205,7 +217,8 @@ test -s "$each_window_dir/result.json"
 jq '{
   validated_cycles: .results[0].validated_cycles,
   outcome: .results[0].fatigue_endurance_outcome.label,
-  refinements: .results[0].inter_window_refinement_summaries
+  refinements: .results[0].inter_window_refinement_summaries,
+  recoveries: .results[0].acados_ipopt_recovery_summaries
 }' "$each_window_dir/result.json" > "$each_window_dir/summary.json"
 
 # Force IPOPT/Radau-5 on the frozen checkpoint, inject only its certified

@@ -176,11 +176,12 @@ def test_rho7_recovery_uses_a_pre_failure_checkpoint_and_acados_recertification(
     assert "--acados-collocation-type GAUSS_RADAU_IIA" in script
     assert "--acados-sim-stages 5" in script
     assert "--acados-sim-steps 1" in script
+    assert "--acados-ipopt-fallback-advance" in script
     assert "--acados-stationarity-tolerance 5e-3" in script
     assert "--primal-feasibility-threshold 1e-5" in script
     assert "--disable-periodic-fes-warmup-projection" in script
     assert "--acados-initial-irk-rollout" not in script
-    assert "--acados-ipopt-fallback-advance" not in script
+    assert "--acados-ipopt-fallback-advance" not in recertification_call
     assert ".results[0].validated_cycles >= 1" in script
     assert ".target_rho == 1 and .advanced == true" in script
 

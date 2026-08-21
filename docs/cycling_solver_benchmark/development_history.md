@@ -6053,3 +6053,11 @@ trust region `10 us` est rétabli. La campagne suivante garde IPOPT/R5 en SX et
 aligne plutôt le tableau natif ACADOS sur ses endpoints : Radau IIA, cinq
 stages et un step par intervalle. Le bridge Bioptim `OdeSolver.IRK` n'est pas
 utilisé puisqu'il impose MX dans la version épinglée.
+
+Le run `32448464731` ne change pas la portée du préfixe : deux RHO, puis
+`1.16e-3` de défaut au troisième. Il divise cependant le temps natif ACADOS
+par environ `2.6` (`0.047--0.048 s` sur un succès; `1.94--1.97 s` pour 100
+SQP). La différence R5/IRK ne vient donc pas seulement du tableau. La stratégie
+suivante réutilisera le primal R5 déjà certifié comme fallback explicite au RHO
+où ACADOS échoue, puis rendra la main à ACADOS; le JSON devra attribuer ce RHO
+à `ipopt_radau`, jamais à ACADOS.

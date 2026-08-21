@@ -1894,6 +1894,20 @@ step par intervalle. Ses shooting endpoints utilisent ainsi le même schéma
 Radau-5 que le primal IPOPT, sans appeler le bridge Bioptim IRK qui n'est pas
 compatible SX. Les bornes Ding et la recertification ACADOS restent inchangées.
 
+Le run `32448464731` montre que cet alignement ne restaure pas la récursivité :
+deux RHO sont encore certifiés, puis le troisième termine à `1.16e-3` de défaut
+dynamique. Il est cependant environ 2.6 fois plus rapide pour la partie ACADOS
+sur ce cas : `0.047--0.048 s` contre `0.124--0.126 s` par RHO convergé, et
+`1.94--1.97 s` contre `5.04--5.05 s` pour 100 SQP. Radau IIA est donc un
+candidat de performance, pas une preuve de convergence accrue.
+
+La suite la plus robuste n'est plus de forcer une troisième transcription du
+même primal. Lorsque R5 est déjà convergé et certifié avant ACADOS, son primal
+peut servir de fallback certifiant pour avancer exactement ce RHO; le solveur
+rapide reprend au RHO suivant. Ce chemin doit conserver séparément le statut du
+certifieur (`ipopt_radau`) et ne jamais présenter l'échec ACADOS comme une
+solution ACADOS.
+
 Les preuves principales sont les runs
 [`32376558196`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/32376558196),
 [`32377237731`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/32377237731),
