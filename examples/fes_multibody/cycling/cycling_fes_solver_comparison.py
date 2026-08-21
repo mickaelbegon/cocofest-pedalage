@@ -3744,6 +3744,7 @@ def main(
     parametric_kkt_predictor_maximum_residual_ratio: float = 0.95,
     parametric_kkt_dual_mode: str = "reset",
     periodic_ipopt_refinement: bool = True,
+    periodic_ipopt_refinement_each_window: bool = False,
     periodic_ipopt_refinement_iterations: int = 300,
     periodic_ipopt_refinement_use_sx: bool = True,
     periodic_ipopt_refinement_ode_solver: str = "target",
@@ -4064,6 +4065,9 @@ def main(
     )
     ipopt_args.max_consecutive_failing = max_consecutive_failing
     acados_args.max_consecutive_failing = max_consecutive_failing
+    acados_args.periodic_ipopt_refinement_each_window = bool(
+        periodic_ipopt_refinement_each_window
+    )
     _set_rho_retry_without_advance(
         (ipopt_args, acados_args), retry_failed_rho_without_advance
     )
@@ -6038,6 +6042,14 @@ def build_cli() -> argparse.ArgumentParser:
         help="Maximum IPOPT iterations for the periodic ACADOS warmstart refinement.",
     )
     parser.add_argument(
+        "--periodic-ipopt-refinement-each-window",
+        action="store_true",
+        help=(
+            "Re-solve every shifted ACADOS warm start with the configured "
+            "IPOPT refinement before the next RHO."
+        ),
+    )
+    parser.add_argument(
         "--periodic-ipopt-refinement-use-sx",
         action="store_true",
         default=True,
@@ -6573,6 +6585,9 @@ if __name__ == "__main__":
         ),
         parametric_kkt_dual_mode=args.parametric_kkt_dual_mode,
         periodic_ipopt_refinement=args.periodic_ipopt_refinement,
+        periodic_ipopt_refinement_each_window=(
+            args.periodic_ipopt_refinement_each_window
+        ),
         periodic_ipopt_refinement_iterations=args.periodic_ipopt_refinement_iterations,
         periodic_ipopt_refinement_use_sx=args.periodic_ipopt_refinement_use_sx,
         periodic_ipopt_refinement_ode_solver=(
