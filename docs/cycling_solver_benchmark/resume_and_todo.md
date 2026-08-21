@@ -1063,8 +1063,11 @@ ne suffit pas, mais la séquence 19--36 conserve le bassin franchissant le RHO
     raffinements R5 convergent à `4.87e-10` et `1.16e-9`, puis ACADOS les
     recertifie en deux SQP chacun (`0.126 s/RHO`). Le troisième RHO atteint
     toutefois 100 SQP avec un défaut IRK de `1.12e-3`. Le trust region PW
-    `+/-10 us`, hérité du seed brut, est le prochain facteur isolé; tester
-    `+/-50 us` sans changer la boîte physique `[pd0, 600 us]`.
+    `+/-10 us`, hérité du seed brut, a ensuite été élargi à `+/-50 us` dans le
+    run `32447647189`. Le préfixe reste à deux RHO et le défaut du troisième
+    augmente à `2.95e-2`; conserver `+/-10 us`. La prochaine ablation aligne
+    le tableau ACADOS sur R5 : `GAUSS_RADAU_IIA`, cinq stages et un step, sans
+    changer la formulation SX ni les bornes physiques `[pd0, 600 us]`.
 54. [prototype terminé; campagne TODO] `build_terminal_set_profile.py`
     construit une enveloppe sur l'erreur d'angle absolue et `omega`,
     conditionnée par la charge signée et la capacité musculaire minimale

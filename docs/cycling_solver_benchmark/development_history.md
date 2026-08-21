@@ -6046,3 +6046,10 @@ prochaine ablation ne modifie ni la dynamique ni les bornes Ding : elle élargit
 seulement le trust region inter-fenêtre de `10` à `50 us` pour distinguer une
 restriction artificielle des contrôles d'une incompatibilité R5/IRK plus
 profonde.
+
+Le run `32447647189` rejette cette hypothèse : il certifie encore deux RHO,
+mais le défaut dynamique du troisième passe de `1.12e-3` à `2.95e-2`. Le
+trust region `10 us` est rétabli. La campagne suivante garde IPOPT/R5 en SX et
+aligne plutôt le tableau natif ACADOS sur ses endpoints : Radau IIA, cinq
+stages et un step par intervalle. Le bridge Bioptim `OdeSolver.IRK` n'est pas
+utilisé puisqu'il impose MX dans la version épinglée.

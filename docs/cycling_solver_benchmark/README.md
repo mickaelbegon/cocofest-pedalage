@@ -1884,10 +1884,15 @@ Le run `32446676553` valide ce changement sur deux RHO consécutifs. Les
 raffinements R5 ont des défauts primaux de `4.87e-10` et `1.16e-9`; ACADOS les
 recertifie en deux SQP, environ `0.126 s` chacun. Il bloque ensuite au RHO 3
 avec `1.12e-3` de défaut dynamique IRK après 100 SQP. Ce n'est toujours pas un
-arrêt de fatigue (`min A/A_scale=0.9829`). La prochaine ablation élargit donc
-uniquement le trust region PW inter-fenêtre de `+/-10` à `+/-50 us`, tout en
-conservant les bornes Ding physiques `[pd0, 600 us]`, le primal R5 et la
-recertification ACADOS obligatoire.
+arrêt de fatigue (`min A/A_scale=0.9829`). Le run `32447647189` élargit
+uniquement le trust region PW de `+/-10` à `+/-50 us`; il reste à deux RHO et
+dégrade le défaut du troisième à `2.95e-2`. Cette piste est donc rejetée.
+
+L'ablation suivante conserve R5 en SX et restaure `+/-10 us`, mais remplace le
+tableau ACADOS Gauss-Legendre par `GAUSS_RADAU_IIA`, cinq stages et un seul
+step par intervalle. Ses shooting endpoints utilisent ainsi le même schéma
+Radau-5 que le primal IPOPT, sans appeler le bridge Bioptim IRK qui n'est pas
+compatible SX. Les bornes Ding et la recertification ACADOS restent inchangées.
 
 Les preuves principales sont les runs
 [`32376558196`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/32376558196),

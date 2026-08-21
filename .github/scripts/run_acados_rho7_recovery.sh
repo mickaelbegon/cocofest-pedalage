@@ -26,7 +26,7 @@ root_dir=acados-ipopt-hybrid-results
 baseline_dir="$root_dir/rho7-baseline"
 recovery_dir="$root_dir/rho7-r5-recertification"
 reference_dir="$root_dir/rho7-ipopt-r5-reference"
-each_window_dir="$root_dir/rho7-r5-each-window-no-irk-rollout"
+each_window_dir="$root_dir/rho7-r5-each-window-radau-iia"
 mkdir -p "$baseline_dir" "$recovery_dir" "$reference_dir" "$each_window_dir"
 
 common_options=(
@@ -166,10 +166,12 @@ test -s "$reference_dir/result.json"
 # +8.56 rad/s). Keep the R5 primal intact here; ACADOS itself remains the
 # mandatory native recertifier. The first preserved-primal run reached two
 # certified RHO but then stalled with a 1.12e-3 IRK dynamics residual while
-# the R5 primal itself had inf_pr near 1e-9. The original +/-10 us PW trust
-# region was still active around that cross-transcription seed. Widen it to
-# +/-50 us in this next causal ablation so ACADOS can reconcile collocation
-# and IRK without releasing the physical [pd0, 600 us] bounds.
+# the R5 primal itself had inf_pr near 1e-9. Widening the PW trust region from
+# +/-10 to +/-50 us did not advance farther and increased the residual to
+# 2.95e-2. Restore +/-10 us and instead align the one-step ACADOS IRK tableau
+# with the SX/Radau-5 collocation seed: Radau IIA, five stages, one integration
+# step per shooting interval. This isolates transcription mismatch without
+# changing the OCP or using the unsupported Bioptim SX+IRK bridge.
 refined_common_options=()
 for option in "${common_options[@]}"; do
   case "$option" in
@@ -192,7 +194,9 @@ python examples/fes_multibody/cycling/cycling_fes_solver_comparison.py \
   --periodic-ipopt-refinement-collocation-degree 5 \
   --periodic-ipopt-refinement-collocation-method radau \
   --acados-reset-solver-before-solve \
-  --acados-transfer-pulse-width-trust-radius 5e-5 \
+  --acados-collocation-type GAUSS_RADAU_IIA \
+  --acados-sim-stages 5 \
+  --acados-sim-steps 1 \
   --receding-horizon-solution-output "$each_window_dir/validated-prefix.npz" \
   --allow-partial-receding-horizon-solution-output \
   --output-json "$each_window_dir/result.json" \
