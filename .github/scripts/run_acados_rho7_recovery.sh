@@ -96,6 +96,20 @@ jq -e '
       .completed_windows == 6 and .target_rho == 7)
 ' "$baseline_dir/result.json"
 
+# The prepared checkpoint above is retained for audit, but its ACADOS rollout
+# has already been projected onto moving bounds. Rebuild the recovery seed
+# causally from the last certified cycle: preserve its terminal state as the
+# new first node, repeat the phase-aligned PW/state profile, and shift theta by
+# the measured signed revolution. This never consumes the failed RHO-7 primal.
+repeat_checkpoint="$baseline_dir/repeat-after-6-for-7.npz"
+python examples/fes_multibody/cycling/extract_rho_checkpoint.py \
+  --source "$baseline_dir/validated-prefix.npz" \
+  --output "$repeat_checkpoint" \
+  --completed-windows 6 \
+  --cycles-per-window 1 \
+  --repeat-last-certified
+test -s "$repeat_checkpoint"
+
 # Force IPOPT/Radau-5 on the frozen checkpoint, inject only its certified
 # primal, reset ACADOS memory, then require ACADOS itself to advance target
 # RHO 1 of the replay (the physical RHO 7). Fallback advance is intentionally
@@ -103,7 +117,7 @@ jq -e '
 python examples/fes_multibody/cycling/cycling_fes_solver_comparison.py \
   "${common_options[@]}" \
   --n-windows 2 \
-  --common-initial-solution "$checkpoint" \
+  --common-initial-solution "$repeat_checkpoint" \
   --disable-periodic-ipopt-refinement \
   --warmup-ipopt-linear-solver mumps \
   --acados-ipopt-recovery \

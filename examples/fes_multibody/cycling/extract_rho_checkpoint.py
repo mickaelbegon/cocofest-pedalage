@@ -15,6 +15,7 @@ def extract_rho_checkpoint(
     *,
     completed_windows: int,
     cycles_per_window: int = 1,
+    repeat_last_certified: bool = False,
 ) -> dict:
     """Slice the next complete OCP window after ``completed_windows`` cycles.
 
@@ -27,6 +28,8 @@ def extract_rho_checkpoint(
         raise ValueError("completed_windows must be non-negative.")
     if cycles_per_window < 1:
         raise ValueError("cycles_per_window must be positive.")
+    if repeat_last_certified and cycles_per_window != 1:
+        raise ValueError("repeat_last_certified currently requires one cycle per window.")
 
     with np.load(source, allow_pickle=False) as archive:
         if "metadata__json" not in archive.files:
@@ -50,10 +53,18 @@ def extract_rho_checkpoint(
                 f"{first_control.shape[1]} != {expected_controls}."
             )
 
-        first_control_node = completed_windows * stimulations_per_cycle
-        last_control_node = (
-            completed_windows + cycles_per_window
-        ) * stimulations_per_cycle
+        if repeat_last_certified:
+            if completed_windows < 1:
+                raise ValueError(
+                    "repeat_last_certified requires at least one certified cycle."
+                )
+            first_control_node = (completed_windows - 1) * stimulations_per_cycle
+            last_control_node = completed_windows * stimulations_per_cycle
+        else:
+            first_control_node = completed_windows * stimulations_per_cycle
+            last_control_node = (
+                completed_windows + cycles_per_window
+            ) * stimulations_per_cycle
         if last_control_node > expected_controls:
             raise ValueError(
                 "The requested checkpoint exceeds the certified prefix: "
@@ -69,7 +80,9 @@ def extract_rho_checkpoint(
                     f"State trace {key} has {values.shape[1]} nodes; "
                     f"expected {expected_controls + 1}."
                 )
-            payload[key] = values[:, first_control_node : last_control_node + 1]
+            payload[key] = values[
+                :, first_control_node : last_control_node + 1
+            ].copy()
         for key in control_keys:
             values = np.asarray(archive[key])
             if values.shape[1] != expected_controls:
@@ -77,16 +90,40 @@ def extract_rho_checkpoint(
                     f"Control trace {key} has {values.shape[1]} nodes; "
                     f"expected {expected_controls}."
                 )
-            payload[key] = values[:, first_control_node:last_control_node]
+            payload[key] = values[:, first_control_node:last_control_node].copy()
+
+    if repeat_last_certified:
+        theta_key = "states__theta"
+        if theta_key not in payload:
+            raise ValueError(
+                "repeat_last_certified requires the reduced mechanical state 'theta'."
+            )
+        theta = payload[theta_key]
+        signed_cycle_shift = theta[:, -1] - theta[:, 0]
+        if not np.all(np.isfinite(signed_cycle_shift)):
+            raise ValueError("The certified crank-angle shift is not finite.")
+        payload[theta_key] = theta + signed_cycle_shift[:, np.newaxis]
+        for key in state_keys:
+            if key == theta_key:
+                continue
+            # The new RHO starts at the exact terminal state of the last
+            # certified RHO. Interior nodes remain the phase-aligned previous
+            # cycle and are only an initial guess for the target solver.
+            payload[key][:, 0] = payload[key][:, -1]
 
     checkpoint_metadata = dict(metadata)
     checkpoint_metadata.update(
         {
             "cycles_per_window": int(cycles_per_window),
-            "producer_mode": "certified_prefix_checkpoint",
+            "producer_mode": (
+                "certified_prefix_repeat_checkpoint"
+                if repeat_last_certified
+                else "certified_prefix_checkpoint"
+            ),
             "producer_completed_windows": int(completed_windows),
             "producer_checkpoint_cycles": int(cycles_per_window),
             "producer_source_cycles": int(source_cycles),
+            "producer_repeat_last_certified": bool(repeat_last_certified),
         }
     )
     payload["metadata__json"] = np.asarray(
@@ -103,6 +140,7 @@ def build_cli() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--completed-windows", type=int, required=True)
     parser.add_argument("--cycles-per-window", type=int, default=1)
+    parser.add_argument("--repeat-last-certified", action="store_true")
     return parser
 
 
@@ -113,6 +151,7 @@ def main() -> None:
         args.output,
         completed_windows=args.completed_windows,
         cycles_per_window=args.cycles_per_window,
+        repeat_last_certified=args.repeat_last_certified,
     )
     print(json.dumps(metadata, indent=2, sort_keys=True))
 
