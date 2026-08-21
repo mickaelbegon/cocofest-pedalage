@@ -651,7 +651,7 @@ jobs:
               "${{ inputs.crank_assistance_nm }}" \
               "${{ inputs.terminal_wheel_q_slack }}" \
               "${{ inputs.solver_max_iterations }}" \
-              "${{ inputs.acados_reduced_fast_bound_margin }}" \
+              "2.6" \
               "$BENCHMARK_THREADS"
           elif [[ "${{ inputs.cycles }}" == "acados_recovery_speed" ]]; then
             if [[ "${{ inputs.crank_assistance_nm }}" != "signed:+0.15" ]]; then

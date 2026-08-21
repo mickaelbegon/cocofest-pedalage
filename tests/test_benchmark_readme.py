@@ -143,6 +143,11 @@ def test_rho7_recovery_uses_a_pre_failure_checkpoint_and_acados_recertification(
 
     assert "inputs.cycles == 'acados_rho7_recovery'" in workflow
     assert "run_acados_rho7_recovery.sh" in workflow
+    rho7_call = workflow.split(
+        "bash .github/scripts/run_acados_rho7_recovery.sh", maxsplit=1
+    )[1].split("elif", maxsplit=1)[0]
+    assert '"2.6" \\' in rho7_call
+    assert "inputs.acados_reduced_fast_bound_margin" not in rho7_call
     assert 'ACADOS_RHO7_REFERENCE_RUN_ID: "32377237731"' in workflow
     assert "reference-reduced-feasible-seed.npz" in workflow
     assert "--rho-prepared-checkpoint-windows 6" in script
