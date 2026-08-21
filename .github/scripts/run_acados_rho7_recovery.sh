@@ -142,6 +142,9 @@ jq -e '
       .forced_for_ci == true and
       .recovery_role == "seed_only" and
       .collocation_degree == 3 and
+      .seed_source ==
+        "last_certified_prepared_rho_primal_projected_to_current_bounds" and
+      .recovery_seed_audit.finite == true and
       .fallback_advanced == false) and
   all(.results[0].acados_ipopt_recovery_summaries[];
       if .recovery_role == "certifying_fallback_candidate"

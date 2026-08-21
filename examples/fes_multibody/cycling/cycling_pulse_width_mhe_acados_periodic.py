@@ -11703,6 +11703,19 @@ def _restore_initial_guess_snapshot(periodic_nmpc, snapshot: dict) -> None:
         nlp.u_init[key].init[:, :] = values
 
 
+def restore_last_certified_recovery_seed(
+    periodic_nmpc, snapshot: dict
+) -> dict[str, object]:
+    """Restore and audit the causal pre-solve primal for one frozen RHO."""
+
+    _restore_initial_guess_snapshot(periodic_nmpc, snapshot)
+    periodic_nmpc._correct_init_guess_to_fit_bounds(corrected_input="states")
+    periodic_nmpc._correct_init_guess_to_fit_bounds(corrected_input="controls")
+    audit = audit_initial_guess(periodic_nmpc)
+    audit.pop("snapshot", None)
+    return audit
+
+
 def apply_failed_rho_alternate_pulse_width_predictor(
     periodic_nmpc,
     checkpoint: dict,
@@ -19395,6 +19408,16 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                 runtime_settings_wall_time_s = perf_counter() - stage_start
                 stage_start = perf_counter()
                 _copy_initial_guesses_and_bounds(self, active_ipopt_recovery_nmpc)
+                # ``self`` now contains the primal returned by the failed
+                # target solve.  Keep its frozen RHO bounds, but restore the
+                # primal that had been prepared *before* that solve from the
+                # last certified physical state.  Otherwise a recovery NLP
+                # merely starts from the failed ACADOS iterate it is meant to
+                # repair, which defeats the causal replay/checkpoint path.
+                recovery_seed_audit = restore_last_certified_recovery_seed(
+                    active_ipopt_recovery_nmpc,
+                    prepared_rho_primal_checkpoint,
+                )
                 primal_and_bounds_wall_time_s = perf_counter() - stage_start
                 stage_start = perf_counter()
                 _copy_objective_targets(self, active_ipopt_recovery_nmpc)
@@ -19402,7 +19425,9 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                 recovery_preparation_total_wall_time_s = (
                     perf_counter() - recovery_preparation_start
                 )
-                recovery_seed_source = "prepared_target_rho_primal"
+                recovery_seed_source = (
+                    "last_certified_prepared_rho_primal_projected_to_current_bounds"
+                )
                 if (
                     forced_recovery
                     and target_solution_was_certified
@@ -19425,6 +19450,10 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                         corrected_input="controls"
                     )
                     recovery_seed_source = "certified_target_solution"
+                    recovery_seed_audit = audit_initial_guess(
+                        active_ipopt_recovery_nmpc
+                    )
+                    recovery_seed_audit.pop("snapshot", None)
                 recovery_solution, recovery_summary = run_periodic_ipopt_recovery(
                     active_ipopt_recovery_nmpc,
                     self,
@@ -19447,6 +19476,7 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                         "target_failed_status": int(solution.status),
                         "target_failed_feasibility": dict(feasibility),
                         "forced_for_ci": forced_recovery,
+                        "recovery_seed_audit": recovery_seed_audit,
                         "preparation_timing": {
                             "runtime_settings_wall_time_s": (
                                 runtime_settings_wall_time_s
@@ -20767,10 +20797,11 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             _nmpc._cocofest_acados_main_window_retry_armed = bool(
                 continue_solving and retry_installed
             )
-        if continue_solving and (
-            args.solver in NLP_SOLVER_NAMES
-            or getattr(args, "acados_failed_rho_phase_one_recovery", False)
-        ):
+        if continue_solving:
+            # Capture the exact primal prepared for the next physical RHO for
+            # every backend.  Failed-solve recovery must be causal: it starts
+            # from this last-certified transfer, never from an uncertified
+            # target iterate.
             prepared_rho_primal_checkpoint = snapshot_initial_guess(_nmpc)
         if (
             continue_solving

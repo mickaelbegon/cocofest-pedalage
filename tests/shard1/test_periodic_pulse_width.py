@@ -988,6 +988,49 @@ def test_acados_ipopt_recovery_requires_identical_full_physical_structure():
         )
 
 
+def test_acados_ipopt_recovery_restores_last_certified_pre_solve_primal():
+    class Program:
+        def __init__(self):
+            self.nlp = [
+                SimpleNamespace(
+                    x_init={"theta": SimpleNamespace(init=np.full((1, 3), 99.0))},
+                    u_init={
+                        "last_pulse_width_Biceps": SimpleNamespace(
+                            init=np.full((1, 2), 99.0)
+                        )
+                    },
+                )
+            ]
+            self.corrected = []
+
+        def _correct_init_guess_to_fit_bounds(self, *, corrected_input):
+            self.corrected.append(corrected_input)
+
+    program = Program()
+    checkpoint = {
+        "states": {"theta": np.array([[-1.0, -2.0, -3.0]])},
+        "controls": {
+            "last_pulse_width_Biceps": np.array([[131.405e-6, 300e-6]])
+        },
+    }
+
+    audit = periodic_example.restore_last_certified_recovery_seed(
+        program, checkpoint
+    )
+
+    np.testing.assert_allclose(
+        program.nlp[0].x_init["theta"].init,
+        checkpoint["states"]["theta"],
+    )
+    np.testing.assert_allclose(
+        program.nlp[0].u_init["last_pulse_width_Biceps"].init,
+        checkpoint["controls"]["last_pulse_width_Biceps"],
+    )
+    assert program.corrected == ["states", "controls"]
+    assert audit["finite"] is True
+    assert "snapshot" not in audit
+
+
 def test_acados_ipopt_recovery_cli_is_opt_in():
     parser = periodic_example.build_argument_parser()
     args = parser.parse_args(
