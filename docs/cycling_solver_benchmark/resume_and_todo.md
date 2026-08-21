@@ -1046,7 +1046,10 @@ ne suffit pas, mais la séquence 19--36 conserve le bassin franchissant le RHO
     `omega=-3.283 rad/s` alors que le RHO 6 certifié finit à
     `-8.830 rad/s`. La relance utilise donc R3 uniquement comme seed de
     faisabilité; R5 reste le seul certifieur IPOPT, et ACADOS doit toujours
-    recertifier avant l'avance.
+    recertifier avant l'avance. Le run `32439741318` donne cependant la même
+    infeasibility `2.224` en R3 et R5 : le degré n'est pas le blocage. Le
+    prochain run repart du dernier cycle certifié répété et décalé en angle,
+    sans réutiliser le rollout/projection invalide du RHO 7 préparé.
 54. [prototype terminé; campagne TODO] `build_terminal_set_profile.py`
     construit une enveloppe sur l'erreur d'angle absolue et `omega`,
     conditionnée par la charge et la capacité musculaire minimale `A/A_scale`.

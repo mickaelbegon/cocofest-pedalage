@@ -1836,6 +1836,24 @@ faisabilité. La prochaine campagne doit l'alimenter avec IPOPT/Radau-5 reduced
 certifié sous plusieurs résistances, puis réaliser une validation hors
 échantillon avant toute activation online.
 
+### Recovery causal du premier échec ACADOS
+
+Le mode `acados_rho7_recovery` reproduit six RHO certifiés, écrit un
+checkpoint avant le RHO 7, puis interdit toute avance issue d'un primal non
+certifié. Les runs `32438910177` et `32439741318` ont écarté le bridge direct
+du primal ACADOS préparé : R5 puis R3/R5 restent tous à `inf_pr=2.224`.
+Ce primal avait déjà subi un rollout, une homotopie incomplète et une
+projection qui plaçait son terminal à `omega=-3.283 rad/s`, contre
+`-8.830 rad/s` pour le dernier état certifié.
+
+Le chemin testé reconstruit donc le warm start depuis le dernier cycle
+certifié : premier nœud égal à son terminal, profil d'états et de PW répété à
+phase égale, et angle `theta` translaté du tour signé réellement mesuré. R3
+n'est qu'un seed de faisabilité; R5 reste le certifieur IPOPT. Même après une
+injection IPOPT acceptable, seule une résolution ACADOS certifiée peut avancer
+le MHE dans cette ablation. Cette séparation empêche de confondre récupération
+numérique et propagation silencieuse d'un terminal invalide.
+
 Les preuves principales sont les runs
 [`32376558196`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/32376558196),
 [`32377237731`](https://github.com/mickaelbegon/cocofest-pedalage/actions/runs/32377237731),

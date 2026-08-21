@@ -5978,3 +5978,27 @@ angulaire globale et l'indice du premier cycle. Le profil utilise
 nœud du fichier aurait effacé la fatigue et le drift antérieurs d'un warmup ou
 d'un checkpoint. Les artefacts legacy sans ces références restent
 diagnostiques, mais ne peuvent pas rendre le profil candidat online.
+
+## 44. Recovery du RHO 7 depuis un préfixe certifié (21 août 2026)
+
+Le workflow dédié reproduit désormais exactement le préfixe ACADOS résistant
+historique : le trust region PW inter-RHO explicite de `10 us` permet de
+certifier six cycles en `1,4,5,5,5,5` itérations, puis le RHO 7 échoue deux
+fois sans avancer. Le checkpoint est écrit après le sixième solve certifié et
+avant toute tentative du septième.
+
+Le run `32438910177` montre que le bridge direct IPOPT/Radau-5 ne constitue
+pas encore une restauration : il est rejeté avec `inf_pr=2.224`. Le run
+`32439741318` obtient la même valeur en Radau-3 et Radau-5. L'ordre de
+collocation n'est donc pas la cause immédiate. Le primal sérialisé après le
+transfert ACADOS termine à `omega=-3.283 rad/s`, après rollout, homotopie
+partielle et projection, alors que le RHO 6 certifié termine à
+`-8.830 rad/s`.
+
+Le recovery reconstruit maintenant un second seed depuis le dernier cycle
+certifié. Il conserve exactement son état terminal comme premier nœud,
+répète causalement les états et PW phase-alignés, et translate `theta` par le
+décalage signé mesuré sur ce cycle. Le checkpoint préparé ACADOS reste dans
+l'artefact pour l'audit, mais aucune valeur du RHO 7 non certifié n'entre dans
+ce seed. R3 reste seed-only, R5 le seul certifieur IPOPT, et ACADOS doit
+toujours recertifier avant l'avance.
