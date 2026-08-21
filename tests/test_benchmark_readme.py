@@ -132,6 +132,25 @@ def test_acados_hybrid_workflow_stays_below_github_expression_limit():
     assert "dropout-summary.json" in dropout_script
 
 
+def test_rho7_recovery_uses_a_pre_failure_checkpoint_and_acados_recertification():
+    repository_root = Path(__file__).resolve().parents[1]
+    workflow = (
+        repository_root / ".github" / "workflows" / "cycling_solver_benchmark_linux.yml"
+    ).read_text(encoding="utf-8")
+    script = (
+        repository_root / ".github" / "scripts" / "run_acados_rho7_recovery.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "inputs.cycles == 'acados_rho7_recovery'" in workflow
+    assert "run_acados_rho7_recovery.sh" in workflow
+    assert "--rho-prepared-checkpoint-windows 6" in script
+    assert "prepared-after-6-for-7.npz" in script
+    assert "--acados-ipopt-recovery-collocation-degree 5" in script
+    assert "--acados-ipopt-fallback-advance" not in script
+    assert ".results[0].validated_cycles >= 1" in script
+    assert ".target_rho == 1 and .advanced == true" in script
+
+
 def test_workflow_dispatch_respects_github_input_limit():
     workflow = (
         Path(__file__).resolve().parents[1]

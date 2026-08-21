@@ -1033,11 +1033,13 @@ ne suffit pas, mais la séquence 19--36 conserve le bassin franchissant le RHO
     terminal set `+/-0.5 rad/s` échouent tous avant le RHO 2 certifié. Ne pas
     lancer 30/100 RHO avec ces variantes. Revenir à un cycle et déclencher le
     recovery IPOPT/Radau-5 sur le même RHO dès le premier échec ACADOS.
-53. [TODO prioritaire] Sur le profil ACADOS un-cycle résistant, mesurer le
+53. [CI dédiée ajoutée; résultat TODO] Sur le profil ACADOS un-cycle résistant, mesurer le
     recovery IPOPT/Radau-5 à partir du checkpoint exact précédant le RHO 7 :
     temps de restauration, recertification ACADOS, coût/fatigue et continuité
-    des quatre muscles. Aucun terminal ACADOS non certifié ne doit avancer le
-    MHE.
+    des quatre muscles. Le mode `acados_rho7_recovery` exporte le checkpoint
+    uniquement après six shifts certifiés, force Radau-5 sur le RHO gelé et
+    exige ensuite une avance certifiée ACADOS sans fallback. Aucun terminal
+    ACADOS non certifié ne peut avancer le MHE.
 54. [prototype terminé; campagne TODO] `build_terminal_set_profile.py`
     construit une enveloppe sur l'erreur d'angle absolue et `omega`,
     conditionnée par la charge et la capacité musculaire minimale. Le profil

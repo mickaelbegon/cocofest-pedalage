@@ -10,7 +10,7 @@ on:
         default: ubuntu-24.04
         type: string
       cycles:
-        description: Number of RHO solves, or "screen", "acados", "acados_guard", "acados_active_set", "acados_pw_stability", "acados_recovery", "acados_lazy_recovery", "acados_homotopy", "acados_reduced_100", "acados_hybrid", "acados_reduced_recovery", "acados_reduced_fallback", "acados_recovery_speed", "acados_dropout", "pw_transfer_ablation", "kkt_predictor", "ipopt_dual", "radau5_100", "radau35_comparison", "fatigue_endurance", "fatigue_endurance_radau5", or "full_horizon"
+        description: Number of RHO solves, or "screen", "acados", "acados_guard", "acados_active_set", "acados_pw_stability", "acados_recovery", "acados_lazy_recovery", "acados_homotopy", "acados_reduced_100", "acados_hybrid", "acados_reduced_recovery", "acados_reduced_fallback", "acados_recovery_speed", "acados_rho7_recovery", "acados_dropout", "pw_transfer_ablation", "kkt_predictor", "ipopt_dual", "radau5_100", "radau35_comparison", "fatigue_endurance", "fatigue_endurance_radau5", or "full_horizon"
         required: true
         default: "100"
         type: string
@@ -451,7 +451,7 @@ jobs:
 
   acados-ipopt-hybrid:
     name: ACADOS full/reduced — staged IPOPT recovery wiring
-    if: ${{ inputs.cycles == 'acados_hybrid' || inputs.cycles == 'acados_reduced_recovery' || inputs.cycles == 'acados_reduced_fallback' || inputs.cycles == 'acados_recovery_speed' || inputs.cycles == 'acados_dropout' }}
+    if: ${{ inputs.cycles == 'acados_hybrid' || inputs.cycles == 'acados_reduced_recovery' || inputs.cycles == 'acados_reduced_fallback' || inputs.cycles == 'acados_recovery_speed' || inputs.cycles == 'acados_rho7_recovery' || inputs.cycles == 'acados_dropout' }}
     needs: [prepare-seed, prepare-acados-stack]
     runs-on: ${{ inputs.runner_label }}
     timeout-minutes: 240
@@ -592,13 +592,8 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}
         run: |
-          # ACADOS is installed in CONDA_PREFIX.  Do not override
-          # ACADOS_SOURCE_DIR with the unbuilt source checkout: doing so makes
-          # acados_template look for source/lib/libacados.so instead.
-          # The pinned Bioptim version does not support SX + IPOPT/IRK. Build
-          # the robust SX seed with Radau-5. ACADOS' own IRK simulator below
-          # replaces it only when the rollout remains inside the explicit
-          # bound-violation guard; otherwise the feasible Radau seed is kept.
+          # Use the installed ACADOS runtime; Radau-5 remains the robust SX
+          # certifier when an IRK rollout leaves the explicit bound guard.
           mkdir -p acados-ipopt-hybrid-results
           sha256sum benchmark-seed/*.npz > acados-ipopt-hybrid-results/seed-sha256.txt
           printf '%s\n' "${{ inputs.acados_seed_source_run_id || github.run_id }}" \
@@ -639,6 +634,14 @@ jobs:
               "${{ inputs.acados_reduced_fast_bound_margin }}" \
               "$ACADOS_DROPOUT_RHOS" \
               "$ACADOS_DROPOUT_FOLLOWUP_RHOS"
+          elif [[ "${{ inputs.cycles }}" == "acados_rho7_recovery" ]]; then
+            bash .github/scripts/run_acados_rho7_recovery.sh \
+              "$common_seed_path" \
+              "${{ inputs.crank_assistance_nm }}" \
+              "${{ inputs.terminal_wheel_q_slack }}" \
+              "${{ inputs.solver_max_iterations }}" \
+              "${{ inputs.acados_reduced_fast_bound_margin }}" \
+              "$BENCHMARK_THREADS"
           elif [[ "${{ inputs.cycles }}" == "acados_recovery_speed" ]]; then
             if [[ "${{ inputs.crank_assistance_nm }}" != "signed:+0.15" ]]; then
               echo "acados_recovery_speed requires the explicit resistive torque signed:+0.15 N.m." >&2
@@ -1171,7 +1174,7 @@ jobs:
 
   acados-smoke:
     name: ACADOS — sequential full/reduced and option screen
-    if: ${{ inputs.cycles != 'screen' && inputs.cycles != 'full_horizon' && inputs.cycles != 'pw_transfer_ablation' && inputs.cycles != 'kkt_predictor' && inputs.cycles != 'ipopt_dual' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles != 'acados_dropout' && (inputs.cycles_per_window == '1' || inputs.cycles == 'acados_active_set') }}
+    if: ${{ inputs.cycles != 'screen' && inputs.cycles != 'full_horizon' && inputs.cycles != 'pw_transfer_ablation' && inputs.cycles != 'kkt_predictor' && inputs.cycles != 'ipopt_dual' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles != 'acados_rho7_recovery' && inputs.cycles != 'acados_dropout' && (inputs.cycles_per_window == '1' || inputs.cycles == 'acados_active_set') }}
     needs: [prepare-seed, prepare-acados-stack]
     runs-on: ${{ inputs.runner_label }}
     timeout-minutes: 240
@@ -2747,7 +2750,7 @@ jobs:
 
   benchmark:
     name: ${{ matrix.solver == 'fatrop' && 'fatrop-collocation' || matrix.solver }} — sequential full/reduced
-    if: ${{ inputs.cycles != 'screen' && inputs.cycles != 'acados' && inputs.cycles != 'acados_guard' && inputs.cycles != 'acados_active_set' && inputs.cycles != 'acados_pw_stability' && inputs.cycles != 'acados_recovery' && inputs.cycles != 'acados_lazy_recovery' && inputs.cycles != 'acados_homotopy' && inputs.cycles != 'acados_reduced_100' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles != 'acados_dropout' && inputs.cycles != 'full_horizon' }}
+    if: ${{ inputs.cycles != 'screen' && inputs.cycles != 'acados' && inputs.cycles != 'acados_guard' && inputs.cycles != 'acados_active_set' && inputs.cycles != 'acados_pw_stability' && inputs.cycles != 'acados_recovery' && inputs.cycles != 'acados_lazy_recovery' && inputs.cycles != 'acados_homotopy' && inputs.cycles != 'acados_reduced_100' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles != 'acados_rho7_recovery' && inputs.cycles != 'acados_dropout' && inputs.cycles != 'full_horizon' }}
     needs: prepare-seed
     runs-on: ${{ inputs.runner_label }}
     timeout-minutes: ${{ matrix.solver == 'ipopt' && 300 || 420 }}
@@ -3820,7 +3823,7 @@ jobs:
 
   report:
     name: Aggregate Kevin benchmark
-    if: ${{ always() && inputs.cycles != 'screen' && inputs.cycles != 'acados' && inputs.cycles != 'acados_guard' && inputs.cycles != 'acados_active_set' && inputs.cycles != 'acados_pw_stability' && inputs.cycles != 'acados_recovery' && inputs.cycles != 'acados_lazy_recovery' && inputs.cycles != 'acados_homotopy' && inputs.cycles != 'acados_reduced_100' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles != 'acados_dropout' && inputs.cycles != 'kkt_predictor' && inputs.cycles != 'ipopt_dual' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles != 'full_horizon' }}
+    if: ${{ always() && inputs.cycles != 'screen' && inputs.cycles != 'acados' && inputs.cycles != 'acados_guard' && inputs.cycles != 'acados_active_set' && inputs.cycles != 'acados_pw_stability' && inputs.cycles != 'acados_recovery' && inputs.cycles != 'acados_lazy_recovery' && inputs.cycles != 'acados_homotopy' && inputs.cycles != 'acados_reduced_100' && inputs.cycles != 'acados_hybrid' && inputs.cycles != 'acados_reduced_recovery' && inputs.cycles != 'acados_reduced_fallback' && inputs.cycles != 'acados_recovery_speed' && inputs.cycles != 'acados_rho7_recovery' && inputs.cycles != 'acados_dropout' && inputs.cycles != 'kkt_predictor' && inputs.cycles != 'ipopt_dual' && inputs.cycles != 'radau5_100' && inputs.cycles != 'radau35_comparison' && inputs.cycles != 'fatigue_endurance' && inputs.cycles != 'fatigue_endurance_radau5' && inputs.cycles != 'full_horizon' }}
     needs: [benchmark, acados-smoke]
     runs-on: ubuntu-24.04
     permissions:
