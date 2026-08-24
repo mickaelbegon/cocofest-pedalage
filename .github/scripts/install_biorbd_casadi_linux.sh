@@ -95,6 +95,21 @@ mv "$CONDA_PREFIX/include/rbdl" "$CONDA_PREFIX/include/rbdl-eigen-unused"
 echo "Building biorbd ${BIORBD_TAG} with ${BUILD_JOBS} workers"
 git clone --quiet --branch "$BIORBD_TAG" --depth 1 \
   "$BIORBD_REPOSITORY" "$build_root/biorbd"
+
+# biorbd Release_1.12.2 uses SIZE_MAX in Path.cpp without including the
+# header that defines it. Older GNU toolchains happened to provide it
+# transitively; GCC 15 does not. Patch the temporary checkout rather than
+# relying on a global compiler flag, so the fix remains local and
+# deterministic for both the CI runners and self-hosted Linux machines.
+biorbd_path_cpp="$build_root/biorbd/src/Utils/Path.cpp"
+if ! grep -Fqx '#include <cstdint>' "$biorbd_path_cpp"; then
+  sed -i '/^#include <unistd.h>$/i#include <cstdint>' "$biorbd_path_cpp"
+fi
+if ! grep -Fqx '#include <cstdint>' "$biorbd_path_cpp"; then
+  echo "Failed to apply the GCC 15 SIZE_MAX compatibility patch to $biorbd_path_cpp" >&2
+  exit 1
+fi
+
 cmake \
   -S "$build_root/biorbd" \
   -B "$build_root/biorbd-build" \

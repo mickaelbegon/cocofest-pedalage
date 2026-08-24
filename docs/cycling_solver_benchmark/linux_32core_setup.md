@@ -141,6 +141,14 @@ test "$(git -C "$COCOFEST_ROOT/.benchmark-deps/libMad" rev-parse HEAD)" = \
 Avant ce clone, les changements locaux doivent être commités et poussés. Une
 nouvelle machine ne peut pas récupérer les fichiers non suivis ou non poussés.
 
+`bioptim` n'est volontairement pas une dépendance Git du dépôt Cocofest : le
+benchmark l'installe depuis ce clone épinglé. Par conséquent, la commande
+`python -m pip install --no-deps -e .benchmark-deps/bioptim` n'est valide
+qu'après cette section. Si elle affiche *not a valid editable requirement*, ne
+pas la relancer : vérifier d'abord que
+`$COCOFEST_ROOT/.benchmark-deps/bioptim/pyproject.toml` existe puis reprendre
+le clone ci-dessus.
+
 ## 7. Environnement IPOPT, FATROP et ACADOS
 
 ### 7.1 Créer l'environnement
@@ -162,6 +170,12 @@ python -m pip install --no-deps "casadi==3.7.2"
 bash .github/scripts/install_biorbd_casadi_linux.sh
 python -m pip install --no-deps -e .benchmark-deps/bioptim
 ```
+
+Le script biorbd applique automatiquement, dans son checkout temporaire, le
+correctif `#include <cstdint>` requis par `biorbd Release_1.12.2` avec GCC 15
+(`SIZE_MAX` n'est plus fourni transitivement). Après avoir mis Cocofest à jour,
+il suffit donc de relancer ce script; ni le compilateur ni les sources biorbd
+installées ne doivent être modifiés manuellement.
 
 Si l'environnement existe déjà, utiliser :
 

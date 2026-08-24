@@ -79,6 +79,20 @@ def test_linux_32core_setup_tracks_workflow_solver_pins():
     assert "CMAKE_BUILD_PARALLEL_LEVEL=32" in setup
 
 
+def test_linux_biorbd_installer_handles_gcc15_size_max_and_setup_explains_bioptim_clone():
+    repository_root = Path(__file__).resolve().parents[1]
+    installer = (
+        repository_root / ".github" / "scripts" / "install_biorbd_casadi_linux.sh"
+    ).read_text(encoding="utf-8")
+    setup = (BENCHMARK_DOCS / "linux_32core_setup.md").read_text(encoding="utf-8")
+
+    assert 'biorbd_path_cpp="$build_root/biorbd/src/Utils/Path.cpp"' in installer
+    assert "#include <cstdint>" in installer
+    assert "GCC 15" in installer
+    assert "not a valid editable requirement" in setup
+    assert ".benchmark-deps/bioptim/pyproject.toml" in setup
+
+
 def test_acados_ipopt_hybrid_reuses_the_shared_seed_physical_parameters():
     """The hybrid consumer must represent the exact OCP certified by its seed."""
 
