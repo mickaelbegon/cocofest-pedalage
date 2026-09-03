@@ -3868,7 +3868,7 @@ def main(
         wheel_qdot_bound_margin=wheel_qdot_bound_margin,
         acados_wheel_qdot_fast_bound_margin=None,
         acados_wheel_qdot_slow_bound_margin=None,
-        terminal_wheel_qdot_bound_margin=None,
+        terminal_wheel_qdot_bound_margin=(terminal_wheel_qdot_bound_margin),
         acados_terminal_wheel_qdot_homotopy_margins=None,
         terminal_qdot_regularization_weight=terminal_qdot_regularization_weight,
         terminal_qdot_regularization_target_source=(

@@ -26,7 +26,7 @@ result="$case_dir/result.json"
 solver_options=()
 initialization_options=(--no-optional-nlp-periodic-ipopt-hot-start)
 trajectory_options=()
-solver_tolerance=1e-6
+solver_tolerance="${BENCHMARK_NLP_TOLERANCE:-1e-6}"
 nlp_transfer_preparation="${NLP_TRANSFER_PREPARATION:-none}"
 nlp_phase_one_screen_threshold="${NLP_PHASE_ONE_SCREEN_THRESHOLD:-0.001}"
 nlp_phase_one_mode="${NLP_PHASE_ONE_MODE:-mechanical}"
@@ -40,6 +40,8 @@ rho_pulse_width_transfer_mode="${RHO_PULSE_WIDTH_TRANSFER_MODE:-repeat}"
 rho_pulse_width_extrapolation_factor="${RHO_PULSE_WIDTH_EXTRAPOLATION_FACTOR:-1.0}"
 parametric_kkt_predictor="${PARAMETRIC_KKT_PREDICTOR:-false}"
 parametric_kkt_dual_mode="${PARAMETRIC_KKT_DUAL_MODE:-reset}"
+terminal_wheel_qdot_bound_margin="${BENCHMARK_TERMINAL_WHEEL_QDOT_BOUND_MARGIN:-}"
+common_initial_solution="${BENCHMARK_COMMON_INITIAL_SOLUTION:-$workspace/benchmark-seed/common-reduced.npz}"
 
 if ! [[ "$collocation_degree" =~ ^[2-9]$ ]]; then
   echo "COLLOCATION_DEGREE must be an integer between 2 and 9, got '$collocation_degree'." >&2
@@ -178,7 +180,9 @@ elif [[ "$solver" == "madnlp" ]]; then
   if [[ "$dual_warm_start" == "auto" ]]; then
     dual_warm_start="off"
   fi
-  solver_tolerance=1e-8
+  if [[ -z "${BENCHMARK_NLP_TOLERANCE:-}" ]]; then
+    solver_tolerance=1e-8
+  fi
   # The common seed is intentionally solver-independent, but the non-convex
   # one-cycle IPOPT validation can select a PW branch that is difficult for
   # MadNLP. Refine that same seed once with the target transcription before
@@ -227,6 +231,12 @@ if [[ "$solver" != "fatrop" && "$ode_solver" == "collocation" ]]; then
 fi
 if [[ "$mechanics" == "reduced" ]]; then
   solver_options+=(--mechanical-formulation reduced)
+  if [[ -n "$terminal_wheel_qdot_bound_margin" ]]; then
+    solver_options+=(
+      --terminal-wheel-qdot-bound-margin
+      "$terminal_wheel_qdot_bound_margin"
+    )
+  fi
 else
   # The exact full contact equality stalls both interior-point solvers on the
   # same 10-20 µm seam residual. This explicit 20 µm band is still only
@@ -294,7 +304,7 @@ python "$workspace/examples/fes_multibody/cycling/cycling_fes_solver_comparison.
   --standard-warmup-seed "$workspace/.github/benchmark-seeds/legacy-resistive-0p22-warmup.npz" \
   --legacy-standard-warmup-seed-signed-torque 0.22 \
   --standard-warmup-seed-continuation \
-  --common-initial-solution "$workspace/benchmark-seed/common-reduced.npz" \
+  --common-initial-solution "$common_initial_solution" \
   "${initialization_options[@]}" \
   --warmup-ipopt-linear-solver mumps \
   --ipopt-linear-solver mumps \
