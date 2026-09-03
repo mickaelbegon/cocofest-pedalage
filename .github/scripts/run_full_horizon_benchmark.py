@@ -1264,6 +1264,7 @@ def _resume_run(
     if not report_path.is_file():
         raise FileNotFoundError(f"Cannot resume without {report_path}.")
     report = json.loads(report_path.read_text(encoding="utf-8"))
+    relocated_artifact_paths = rebase_report_artifact_paths(report, args.output_dir)
     if report.get("schema") != "cocofest-full-horizon-sweep-v2":
         raise ValueError("The existing report has an unsupported schema.")
     if report.get("full_horizon_solver") != args.full_horizon_solver:
@@ -1317,6 +1318,8 @@ def _resume_run(
         {
             "from_cycles": largest_successful_cycles,
             "previous_stop_reason": previous_stop_reason,
+            "output_dir": str(args.output_dir),
+            "relocated_artifact_paths": relocated_artifact_paths,
         }
     )
     _write_report(report_path, report)
@@ -1332,6 +1335,53 @@ def _resume_run(
         current_full_solution=current_full_solution,
         rss_limit_bytes=rss_limit_bytes,
     )
+
+
+def _relocate_report_artifact(raw_path: str, output_dir: Path) -> Path | None:
+    """Locate a moved campaign artifact while preserving its internal layout."""
+
+    original = Path(raw_path)
+    if original.is_file():
+        return original
+    anchors = (
+        "rho-reduced",
+        "homotopy-seeds",
+        "adaptive-attempts",
+        "paired-reduced-controls",
+    )
+    parts = original.parts
+    for index, part in enumerate(parts):
+        if part in anchors or part.startswith(
+            ("full-horizon-", "rho-extension-after-fho-")
+        ):
+            candidate = output_dir.joinpath(*parts[index:])
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def rebase_report_artifact_paths(report: dict, output_dir: Path) -> int:
+    """Rewrite stale absolute artifact paths after a campaign directory move."""
+
+    relocated = 0
+
+    def visit(value) -> None:
+        nonlocal relocated
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key.endswith("_path") and isinstance(child, str) and child:
+                    replacement = _relocate_report_artifact(child, output_dir)
+                    if replacement is not None and replacement != Path(child):
+                        value[key] = str(replacement)
+                        relocated += 1
+                else:
+                    visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(report)
+    return relocated
 
 
 def _run_horizon_attempt(
@@ -1396,10 +1446,15 @@ def _run_extension_rho(
     after_cycles: int,
     rss_limit_bytes: int,
     source_label: str | None = None,
+    run_number: int = 1,
 ) -> dict:
     """Homotope RHO_(N+1) from its RHO reference to the FHO_N terminal state."""
 
+    if run_number < 1:
+        raise ValueError("run_number must be strictly positive.")
     case_dir = args.output_dir / f"rho-extension-after-fho-{after_cycles:04d}"
+    if run_number > 1:
+        case_dir = case_dir / f"retry-{run_number:02d}"
     reference_cycle_path = case_dir / "reference-rho-cycle.npz"
     write_rho_seed_cycle(reference_rho_seed, reference_cycle_path, after_cycles + 1)
 
@@ -1544,6 +1599,7 @@ def _run_extension_rho(
     return {
         "after_full_horizon_cycles": after_cycles,
         "target_cycle": after_cycles + 1,
+        "run_number": run_number,
         "source_label": source_label or f"FHO_{after_cycles}",
         "success": success,
         "failure_kind": failure_kind,
@@ -1582,6 +1638,43 @@ def _certified_fho_objective(report: dict, cycles: int) -> float | None:
         ):
             return _benchmark_window_objective(Path(attempt["result_path"]))
     return None
+
+
+def _next_attempt_number(records: list[dict], cycle_key: str, cycle: int) -> int:
+    """Return a non-destructive ordinal for retrying an existing cycle."""
+
+    return 1 + sum(int(record.get(cycle_key) or 0) == cycle for record in records)
+
+
+def _next_horizon_chance(records: list[dict], cycles: int, output_dir: Path) -> int:
+    """Account for both reported and abruptly interrupted FHO attempts."""
+
+    reported = _next_attempt_number(records, "cycles", cycles)
+    case_dir = output_dir / f"full-horizon-{cycles:04d}"
+    existing = [
+        int(path.name.removeprefix("chance-"))
+        for path in case_dir.glob("chance-*")
+        if path.is_dir() and path.name.removeprefix("chance-").isdigit()
+    ]
+    return max([reported, *(number + 1 for number in existing)])
+
+
+def _next_extension_run_number(
+    records: list[dict], target_cycle: int, output_dir: Path
+) -> int:
+    """Account for both reported and abruptly interrupted RHO extensions."""
+
+    reported = _next_attempt_number(records, "target_cycle", target_cycle)
+    case_dir = output_dir / f"rho-extension-after-fho-{target_cycle - 1:04d}"
+    existing = []
+    if case_dir.is_dir() and any(case_dir.glob("stage-*")):
+        existing.append(1)
+    existing.extend(
+        int(path.name.removeprefix("retry-"))
+        for path in case_dir.glob("retry-*")
+        if path.is_dir() and path.name.removeprefix("retry-").isdigit()
+    )
+    return max([reported, *(number + 1 for number in existing)])
 
 
 def _continue_adaptively(
@@ -1625,6 +1718,11 @@ def _continue_adaptively(
             step_failure: str | None = None
             infrastructure_error = False
             for extension_cycle in range(current_cycles + 1, target_cycles + 1):
+                extension_run_number = _next_extension_run_number(
+                    report["extension_rho_attempts"],
+                    extension_cycle,
+                    attempt_args.output_dir,
+                )
                 extension_attempt = _run_extension_rho(
                     attempt_args,
                     source_full_solution=carrier_solution,
@@ -1636,6 +1734,7 @@ def _continue_adaptively(
                         if extension_cycle == current_cycles + 1
                         else f"RHO_{extension_cycle - 1}"
                     ),
+                    run_number=extension_run_number,
                 )
                 extension_attempt.update(
                     {
@@ -1678,12 +1777,17 @@ def _continue_adaptively(
                 carrier_solution = Path(extension_attempt["solution_path"])
 
             if step_failure is None:
+                chance = _next_horizon_chance(
+                    report["full_horizon_attempts"],
+                    target_cycles,
+                    attempt_args.output_dir,
+                )
                 attempt = _run_horizon_attempt(
                     attempt_args,
                     rho_seed=concatenated_seed,
                     cycles=target_cycles,
                     phase="adaptive_continuation",
-                    chance=1,
+                    chance=chance,
                     rss_limit_bytes=rss_limit_bytes,
                     prefix_solution_path=current_full_solution,
                     heartbeat_seed_label=(
@@ -1708,7 +1812,7 @@ def _continue_adaptively(
                 )
                 attempt.update(
                     {
-                        "chance": 1,
+                        "chance": chance,
                         "adaptive_source_cycles": current_cycles,
                         "adaptive_step_cycles": step_cycles,
                         "objective_gate": gate,

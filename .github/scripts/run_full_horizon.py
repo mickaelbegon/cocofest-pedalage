@@ -26,12 +26,14 @@ Examples
     python .github/scripts/run_full_horizon.py --max-cycles 6
     python .github/scripts/run_full_horizon.py --solver ipopt --max-cycles 4
     python .github/scripts/run_full_horizon.py --resume
+    python .github/scripts/run_full_horizon.py --resume-from /path/to/results --max-cycles 100
     python .github/scripts/run_full_horizon.py --report-only
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -46,6 +48,7 @@ from run_benchmarks import REPO_ROOT, base_environment, conda_env_prefix  # noqa
 
 BENCHMARK = REPO_ROOT / ".github" / "scripts" / "run_full_horizon_benchmark.py"
 REPORT_NAME = "full-horizon-report.md"
+REPORT_JSON_NAME = "full-horizon-report.json"
 SEED_FILES = ("common-reduced.npz", "common-full.npz", "reduced-cycling-fourier12.npz")
 
 # The continuation is long and mostly silent; echo the ladder milestones and any
@@ -61,21 +64,43 @@ def parse_arguments(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--max-cycles", type=int, default=6,
-                        help="largest horizon explored (workflow default: 100)")
-    parser.add_argument("--solver", choices=("madnlp", "ipopt"), default="madnlp",
-                        help="NLP solver for the monolithic FHO problems")
+    parser.add_argument(
+        "--max-cycles",
+        type=int,
+        help=(
+            "largest horizon explored; defaults to 6 for a new run and to the "
+            "stored target when resuming"
+        ),
+    )
+    parser.add_argument(
+        "--solver",
+        choices=("madnlp", "ipopt"),
+        help="FHO solver; inferred from the stored report when resuming",
+    )
     parser.add_argument("--threads", type=int, default=os.cpu_count() or 1)
     parser.add_argument("--numeric-threads", type=int, default=1)
     parser.add_argument("--memory-limit-gib", default="auto",
                         help="process-tree peak RSS cap, or 'auto'")
     parser.add_argument("--max-iterations", type=int, default=2000)
-    parser.add_argument("--continuation-step-cycles", type=int, default=3,
-                        help="RHO cycles appended before the next FHO")
-    parser.add_argument("--jump-objective-relative-tolerance", type=float, default=0.005)
+    parser.add_argument(
+        "--continuation-step-cycles",
+        type=int,
+        help="RHO cycles appended before the next FHO (new-run default: 3)",
+    )
+    parser.add_argument("--jump-objective-relative-tolerance", type=float)
     parser.add_argument("--assistance", default="0.00")
     parser.add_argument("--q-slack", default="0.002")
-    parser.add_argument("--output-dir", default="full-horizon-results")
+    location = parser.add_mutually_exclusive_group()
+    location.add_argument("--output-dir")
+    location.add_argument(
+        "--resume-from",
+        type=Path,
+        metavar="DIR",
+        help=(
+            "resume from a campaign directory (or one of its FHO checkpoint "
+            "subdirectories); implies --resume"
+        ),
+    )
     parser.add_argument("--attempt-timeout-s", type=float, default=None,
                         help="wall-time cap per solver attempt")
     parser.add_argument("--resume", action="store_true",
@@ -86,6 +111,81 @@ def parse_arguments(argv: list[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _display_path(path: Path) -> Path:
+    try:
+        return path.relative_to(REPO_ROOT)
+    except ValueError:
+        return path
+
+
+def find_resume_directory(raw_path: Path) -> Path:
+    """Resolve a report directory from a campaign, report, or checkpoint path."""
+
+    path = raw_path.expanduser().resolve()
+    if path.is_file():
+        if path.name != REPORT_JSON_NAME:
+            raise ValueError(
+                f"--resume-from expects a directory or {REPORT_JSON_NAME}, got {path}."
+            )
+        return path.parent
+    if not path.is_dir():
+        raise FileNotFoundError(f"Resume directory does not exist: {path}")
+
+    for candidate in (path, *path.parents):
+        if (candidate / REPORT_JSON_NAME).is_file():
+            return candidate
+
+    reports = sorted(path.rglob(REPORT_JSON_NAME))
+    if len(reports) == 1:
+        return reports[0].parent
+    if not reports:
+        raise FileNotFoundError(
+            f"No {REPORT_JSON_NAME} was found in or above {path}."
+        )
+    raise ValueError(
+        f"Several full-horizon reports were found below {path}; pass the exact "
+        "campaign directory."
+    )
+
+
+def apply_run_defaults(args: argparse.Namespace, output_dir: Path) -> dict | None:
+    """Apply new-run defaults or preserve the scientific settings of a resume."""
+
+    report = None
+    if args.resume:
+        report_path = output_dir / REPORT_JSON_NAME
+        if not report_path.is_file():
+            raise FileNotFoundError(f"Cannot resume without {report_path}.")
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        if args.max_cycles is None:
+            args.max_cycles = int(report["max_cycles"])
+        if args.solver is None:
+            args.solver = str(report["full_horizon_solver"])
+        if args.continuation_step_cycles is None:
+            args.continuation_step_cycles = int(
+                report.get("continuation_step_cycles") or 1
+            )
+        if args.jump_objective_relative_tolerance is None:
+            stored_tolerance = report.get("jump_objective_relative_tolerance")
+            args.jump_objective_relative_tolerance = float(
+                0.005 if stored_tolerance is None else stored_tolerance
+            )
+    else:
+        args.max_cycles = 6 if args.max_cycles is None else args.max_cycles
+        args.solver = "madnlp" if args.solver is None else args.solver
+        args.continuation_step_cycles = (
+            3
+            if args.continuation_step_cycles is None
+            else args.continuation_step_cycles
+        )
+        args.jump_objective_relative_tolerance = (
+            0.005
+            if args.jump_objective_relative_tolerance is None
+            else args.jump_objective_relative_tolerance
+        )
+    return report
+
+
 def show_report(output_dir: Path) -> bool:
     report = output_dir / REPORT_NAME
     if not report.exists():
@@ -94,11 +194,11 @@ def show_report(output_dir: Path) -> bool:
         if checkpoints:
             print(f"{len(checkpoints)} per-FHO JSON file(s) are present:")
             for path in checkpoints[:10]:
-                print(f"  {path.relative_to(REPO_ROOT)}")
+                print(f"  {_display_path(path)}")
         return False
 
     print(f"\n{'=' * 100}")
-    print(f"  FULL-HORIZON REPORT  --  {report.relative_to(REPO_ROOT)}")
+    print(f"  FULL-HORIZON REPORT  --  {_display_path(report)}")
     print(f"{'=' * 100}")
     print(report.read_text(encoding="utf-8").rstrip())
     print(f"{'=' * 100}\n")
@@ -107,7 +207,17 @@ def show_report(output_dir: Path) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_arguments(argv)
-    output_dir = REPO_ROOT / args.output_dir
+    if args.resume_from is not None:
+        output_dir = find_resume_directory(args.resume_from)
+        args.resume = True
+    else:
+        raw_output_dir = Path(args.output_dir or "full-horizon-results").expanduser()
+        output_dir = (
+            raw_output_dir.resolve()
+            if raw_output_dir.is_absolute()
+            else (REPO_ROOT / raw_output_dir).resolve()
+        )
+    resume_report = apply_run_defaults(args, output_dir)
 
     if args.report_only:
         return 0 if show_report(output_dir) else 1
@@ -161,6 +271,12 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"Repository  : {REPO_ROOT}")
     print(f"Environment : {prefix.name}  (solver: {args.solver})")
+    if resume_report is not None:
+        print(
+            "Resume      : "
+            f"{output_dir} from FHO_"
+            f"{int(resume_report.get('largest_successful_cycles') or 0)}"
+        )
     print(f"Horizon     : up to {args.max_cycles} cycles, step "
           f"{args.continuation_step_cycles}, RSS cap {args.memory_limit_gib}")
     print(f"Threads     : {args.threads} (numerical libraries: {args.numeric_threads})")
@@ -168,7 +284,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{'=' * 78}", flush=True)
 
     started = time.monotonic()
-    with log_path.open("w", encoding="utf-8") as log_file:
+    log_mode = "a" if args.resume else "w"
+    with log_path.open(log_mode, encoding="utf-8") as log_file:
+        if args.resume:
+            log_file.write(
+                f"\n{'=' * 78}\nRESUME to FHO_{args.max_cycles} at "
+                f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n{'=' * 78}\n"
+            )
         process = subprocess.Popen(
             command,
             cwd=REPO_ROOT,

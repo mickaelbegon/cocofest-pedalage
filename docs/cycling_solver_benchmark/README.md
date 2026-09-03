@@ -1150,7 +1150,28 @@ Le pic RSS de tout l'arbre de processus est mesuré et le job s'arrête à
 `12.5 GiB` sur une allocation de 16 GiB ou `97.5 GiB` sur 128 GiB.
 
 Une campagne interrompue peut reprendre depuis son dernier FHO certifié avec
-`--resume`. Par exemple, pour repartir directement de `FHO_79` et construire
+`--resume`. Le pilote local accepte directement le dossier de campagne et
+retrouve le dernier checkpoint certifié, même si le dossier a été déplacé :
+
+```bash
+python .github/scripts/run_full_horizon.py \
+  --resume-from /chemin/vers/full-horizon-results \
+  --max-cycles 100 \
+  --continuation-step-cycles 1 \
+  --attempt-timeout-s 21600
+```
+
+Sans `--max-cycles`, le plafond mémorisé dans le rapport est réutilisé. Le
+solveur, le pas de continuation et la tolérance des sauts sont également repris
+du rapport. Le journal existant est conservé et la nouvelle exécution y est
+ajoutée. Le dossier peut être la racine de la campagne, son fichier
+`full-horizon-report.json` ou un sous-dossier `full-horizon-N/chance-M`.
+Les nouvelles tentatives sont écrites sous `chance-2`, `chance-3`, etc., et les
+extensions RHO reprises sous `retry-02`, `retry-03`, afin de ne pas écraser les
+logs de l'exécution interrompue.
+
+Au niveau bas, la combinaison historique `--resume --output-dir` reste
+disponible. Par exemple, pour repartir directement de `FHO_79` et construire
 `FHO_80` sans recalculer les horizons précédents :
 
 ```bash

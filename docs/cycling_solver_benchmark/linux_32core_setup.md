@@ -744,6 +744,11 @@ matrice RHO : il a son propre pilote et son propre rapport.
 python .github/scripts/run_full_horizon.py --max-cycles 6      # MadNLP, par défaut
 python .github/scripts/run_full_horizon.py --solver ipopt --max-cycles 6
 python .github/scripts/run_full_horizon.py --resume --max-cycles 12
+python .github/scripts/run_full_horizon.py \
+  --resume-from /chemin/vers/resultats \
+  --max-cycles 100 \
+  --continuation-step-cycles 1 \
+  --attempt-timeout-s 21600
 python .github/scripts/run_full_horizon.py --report-only
 ```
 

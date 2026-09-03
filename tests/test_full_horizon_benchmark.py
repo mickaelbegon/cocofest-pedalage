@@ -50,6 +50,44 @@ def test_horizon_sweep_requires_the_two_rho_bootstrap_cycles():
         full_horizon.horizon_sweep_targets(1)
 
 
+def test_resume_rebases_artifact_paths_after_the_campaign_is_moved(tmp_path):
+    campaign = tmp_path / "downloaded-campaign"
+    rho = campaign / "rho-reduced" / "concatenated-solution.npz"
+    fho = campaign / "full-horizon-0042" / "chance-1" / "full-solution.npz"
+    rho.parent.mkdir(parents=True)
+    fho.parent.mkdir(parents=True)
+    rho.touch()
+    fho.touch()
+    report = {
+        "rho": {"seed_path": "/old/runner/results/rho-reduced/concatenated-solution.npz"},
+        "full_horizon_attempts": [
+            {
+                "solution_path": (
+                    "/old/runner/results/full-horizon-0042/chance-1/full-solution.npz"
+                )
+            }
+        ],
+        "external_seed_path": "/unrelated/benchmark-seed/common-reduced.npz",
+    }
+
+    relocated = full_horizon.rebase_report_artifact_paths(report, campaign)
+
+    assert relocated == 2
+    assert Path(report["rho"]["seed_path"]) == rho
+    assert Path(report["full_horizon_attempts"][0]["solution_path"]) == fho
+    assert report["external_seed_path"] == "/unrelated/benchmark-seed/common-reduced.npz"
+
+
+def test_resume_attempt_numbers_include_unreported_checkpoint_directories(tmp_path):
+    fho_attempt = tmp_path / "full-horizon-0050" / "chance-3"
+    rho_attempt = tmp_path / "rho-extension-after-fho-0049" / "retry-04" / "stage-01"
+    fho_attempt.mkdir(parents=True)
+    rho_attempt.mkdir(parents=True)
+
+    assert full_horizon._next_horizon_chance([], 50, tmp_path) == 4
+    assert full_horizon._next_extension_run_number([], 50, tmp_path) == 5
+
+
 def test_adaptive_target_uses_three_cycles_and_clips_the_tail():
     assert full_horizon.adaptive_continuation_target(2, 20, 3) == 5
     assert full_horizon.adaptive_continuation_target(20, 22, 3) == 22
@@ -109,13 +147,19 @@ def test_adaptive_continuation_falls_back_to_one_then_retries_jump(
         max_cycles=5,
     )
     extension_number = 0
+    extension_runs = []
 
     def fake_extension(call_args, **kwargs):
         nonlocal extension_number
         extension_number += 1
+        extension_runs.append(
+            (kwargs["after_cycles"] + 1, kwargs.get("run_number", 1))
+        )
         solution = tmp_path / f"rho-{extension_number}.npz"
         solution.touch()
         return {
+            "target_cycle": kwargs["after_cycles"] + 1,
+            "run_number": kwargs.get("run_number", 1),
             "success": True,
             "infrastructure_error": False,
             "failure_kind": None,
@@ -124,10 +168,12 @@ def test_adaptive_continuation_falls_back_to_one_then_retries_jump(
         }
 
     horizon_targets = []
+    horizon_chances = []
 
     def fake_horizon(call_args, **kwargs):
         cycles = kwargs["cycles"]
         horizon_targets.append(cycles)
+        horizon_chances.append(kwargs["chance"])
         objective = 10.0 if horizon_targets == [5] else float(cycles)
         solution = tmp_path / f"fho-{cycles}-{len(horizon_targets)}.npz"
         solution.touch()
@@ -168,6 +214,8 @@ def test_adaptive_continuation_falls_back_to_one_then_retries_jump(
 
     assert return_code == 0
     assert horizon_targets == [5, 3, 5]
+    assert horizon_chances == [1, 1, 2]
+    assert extension_runs == [(3, 1), (4, 1), (5, 1), (3, 2), (4, 2), (5, 2)]
     assert report["largest_successful_cycles"] == 5
     assert report["adaptive_fallback_events"] == [
         {
