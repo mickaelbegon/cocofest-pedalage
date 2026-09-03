@@ -66,9 +66,37 @@ export COCOFEST_ROOT="$PWD/cocofest"
 cd "$COCOFEST_ROOT"
 ```
 
+Une fois les deux environnements construits, `benchmark_env.sh` remplace les
+blocs `conda activate` + `export PATH` + `export LD_LIBRARY_PATH` répétés
+ci-dessous :
+
+```bash
+source .github/scripts/benchmark_env.sh rho32      # IPOPT et ACADOS
+source .github/scripts/benchmark_env.sh madnlp32   # MadNLP/MUMPS
+```
+
 Les trois fichiers `benchmark-seed/common-reduced.npz`,
 `benchmark-seed/common-full.npz` et
-`benchmark-seed/reduced-cycling-fourier12.npz` doivent exister. Le script
+`benchmark-seed/reduced-cycling-fourier12.npz` doivent exister, et
+`common-reduced.npz` doit avoir été construit **au couple de la campagne**.
+
+C'est le piège principal de ce protocole. La seed de la section 10 de
+[`linux_32core_setup.md`](linux_32core_setup.md) est construite à
+`--crank-assistance 0.00`, alors que le sweep tourne à `signed:+0.10`,
+`+0.15` ou `+0.20`. Le contrôle de métadonnées est strict (`atol=1e-12`) et il
+n'existe aucune option de continuation pour la solution initiale commune,
+contrairement au warm-start standard qui, lui, sait passer de `0.22` au couple
+demandé. Lancer le sweep avec la seed à couple nul échoue immédiatement :
+
+```text
+ValueError: Common initial solution '.../benchmark-seed/common-reduced.npz'
+uses signed crank torque -0.0, expected 0.15.
+```
+
+Il faut donc reconstruire `benchmark-seed/` pour chaque résistance testée, en
+adaptant `--crank-assistance` dans la section 10, et conserver un répertoire de
+seed distinct par couple. Une seule `benchmark-seed/` ne peut pas servir les
+trois résistances du sweep par défaut. Le script
 reconstruit en plus un seed ACADOS natif pour **chaque résistance** afin de ne
 pas attribuer à un solveur une branche initiale provenant d'un autre couple.
 
@@ -77,10 +105,8 @@ pas attribuer à un solveur une branche initiale provenant d'un autre couple.
 Dans l'environnement IPOPT/ACADOS :
 
 ```bash
-source "${HOME}/miniforge3/etc/profile.d/conda.sh"
-conda activate cocofest-rho32
 cd "$COCOFEST_ROOT"
-export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+source .github/scripts/benchmark_env.sh rho32
 
 for repeat in 1 2 3; do
   for threads in 16 30; do
@@ -95,10 +121,8 @@ done
 Dans l'environnement MadNLP :
 
 ```bash
-conda activate cocofest-madnlp32
 cd "$COCOFEST_ROOT"
-export PATH="${HOME}/.juliaup/bin:${HOME}/.julia/bin:$PATH"
-export LD_LIBRARY_PATH="$COCOFEST_ROOT/.cache/madnlp-mumps/lib:$COCOFEST_ROOT/.cache/madnlp-mumps/share/julia/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+source .github/scripts/benchmark_env.sh madnlp32
 
 for repeat in 1 2 3; do
   for threads in 16 30; do
@@ -123,9 +147,8 @@ Choisir le meilleur nombre de threads mesuré, ici noté `T`. Les deux commandes
 IPOPT et ACADOS avec fallback IPOPT :
 
 ```bash
-conda activate cocofest-rho32
 cd "$COCOFEST_ROOT"
-export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+source .github/scripts/benchmark_env.sh rho32
 
 OUTPUT_ROOT="$COCOFEST_ROOT/benchmark-results/ryzen5950x-resistance-sweep" \
 MAX_RHOS=2000 RHO_THREADS=T RESISTANCES_NM="0.10 0.15 0.20" \
@@ -136,10 +159,8 @@ STRATEGIES="ipopt acados-ipopt" \
 MadNLP/MUMPS avec fallback IPOPT :
 
 ```bash
-conda activate cocofest-madnlp32
 cd "$COCOFEST_ROOT"
-export PATH="${HOME}/.juliaup/bin:${HOME}/.julia/bin:$PATH"
-export LD_LIBRARY_PATH="$COCOFEST_ROOT/.cache/madnlp-mumps/lib:$COCOFEST_ROOT/.cache/madnlp-mumps/share/julia/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+source .github/scripts/benchmark_env.sh madnlp32
 
 OUTPUT_ROOT="$COCOFEST_ROOT/benchmark-results/ryzen5950x-resistance-sweep" \
 MAX_RHOS=2000 RHO_THREADS=T RESISTANCES_NM="0.10 0.15 0.20" \

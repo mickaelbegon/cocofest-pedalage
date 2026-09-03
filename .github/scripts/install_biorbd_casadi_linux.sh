@@ -89,8 +89,15 @@ cmake \
 cmake --build "$build_root/rbdl-build" --target install --parallel "$BUILD_JOBS"
 
 # RBDL installs both math backends. Keeping the Eigen headers at
-# $CONDA_PREFIX/include/rbdl makes biorbd find them before rbdl-casadi.
-mv "$CONDA_PREFIX/include/rbdl" "$CONDA_PREFIX/include/rbdl-eigen-unused"
+# $CONDA_PREFIX/include/rbdl makes biorbd find them before rbdl-casadi, so the
+# Eigen tree is moved aside. A plain `mv` is not re-runnable: on a second build
+# the destination already exists and the Eigen headers end up nested inside it
+# instead of replacing it. Drop the previous copy first so repeated installs in
+# the same environment converge on the same layout.
+rm -rf "$CONDA_PREFIX/include/rbdl-eigen-unused"
+if [[ -d "$CONDA_PREFIX/include/rbdl" ]]; then
+  mv "$CONDA_PREFIX/include/rbdl" "$CONDA_PREFIX/include/rbdl-eigen-unused"
+fi
 
 echo "Building biorbd ${BIORBD_TAG} with ${BUILD_JOBS} workers"
 git clone --quiet --branch "$BIORBD_TAG" --depth 1 \

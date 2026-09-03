@@ -1,9 +1,25 @@
 
-.idea/
+# Keep the shared benchmark run configurations, drop the rest of the IDE state.
+# git cannot re-include a path under an excluded directory, hence '.idea/*'.
+.idea/*
+!.idea/runConfigurations/
 
 __pycache__/
 
 .pytest_cache
+
+# Local numerical stacks, runtime caches and benchmark artefacts.
+.benchmark-deps/
+.cache/
+benchmark-seed/
+benchmark-seed-result/
+benchmark-ubuntu26/
+contended-results/
+full-horizon-results/
+local-results/
+local-summary/
+thread-calibration/
+tmp/
 
 external/bioptim
 

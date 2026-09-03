@@ -14,9 +14,24 @@ if [[ -z "$libgcc_path" || "$libgcc_path" == "libgcc_s.so.1" || ! -f "$libgcc_pa
   echo "Unable to resolve libgcc_s.so.1 through cc." >&2
   exit 1
 fi
-if ! strings "$libgcc_path" | grep -qx 'GCC_13.0.0'; then
+
+# Read the ELF version-definition table when binutils exposes it, and fall back
+# to the raw string scan otherwise. The result is materialised in a variable
+# before being matched: piping straight into `grep -q` makes grep exit on the
+# first hit, which kills the producer with SIGPIPE and -- under `pipefail` --
+# turns a successful check into a spurious failure.
+libgcc_symbol_versions="$(
+  {
+    readelf --version-info "$libgcc_path" 2>/dev/null ||
+      strings -a "$libgcc_path" 2>/dev/null ||
+      true
+  } | grep -oE 'GCC_[0-9]+(\.[0-9]+)*' | sort -u
+)"
+
+if ! grep -qxF 'GCC_13.0.0' <<<"$libgcc_symbol_versions"; then
   echo "$libgcc_path does not export GCC_13.0.0, required by the Julia 1.12 runtime." >&2
-  echo "Use ubuntu-24.04 (the workflow default) or an equivalent x86-64 runner." >&2
+  echo "Versions found: $(tr '\n' ' ' <<<"$libgcc_symbol_versions")" >&2
+  echo "Use ubuntu-24.04 (the workflow default) or a newer x86-64 host." >&2
   exit 1
 fi
 
