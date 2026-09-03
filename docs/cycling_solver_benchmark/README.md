@@ -1187,6 +1187,20 @@ Les itérations IPOPT ne sont disponibles qu'après la résolution dans
 `nlp_solver_stats[*].iter_count`; le processus enfant ne les transmet pas au
 runner pendant que sa sortie est bufferisée.
 
+Une fois `FHO_100` certifié, le post-traitement suivant compare directement la
+chaîne des 100 RHO à la solution monolithique, cycle par cycle :
+
+```bash
+python .github/scripts/compare_rho_fho.py \
+  --results-dir full-horizon-results \
+  --cycles 100
+```
+
+Le dossier `full-horizon-results/rho-vs-fho-0100/` contient un résumé JSON et
+Markdown ainsi que les figures de capacité, PW, force, mécanique, coût de
+calcul, profils de stimulation à cinq jalons et une carte de chaleur des écarts
+normalisés pour toutes les variables communes.
+
 Le script `run_full_horizon_jump_comparison.py` compare une continuation de
 trois pas unitaires à `FHO_i + RHO_(i+1) + RHO_(i+2) + RHO_(i+3) → FHO_(i+3)`.
 Il doit utiliser un dossier de sortie séparé et être lancé sans autre benchmark
