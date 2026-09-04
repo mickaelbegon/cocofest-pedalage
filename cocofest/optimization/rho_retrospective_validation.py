@@ -6,6 +6,11 @@ the observed end boundary of RHO cycle ``k + H``.  The module delegates policy
 adaptation and Ding propagation to :mod:`rho_rollout_adapter`; it does not
 reimplement either model and never reads a full-horizon trajectory.
 
+The frozen-policy assumption is audited against every observed RHO control
+policy from ``k + 1`` through ``k + H``.  Scientific criteria use the worst
+cycle on that path, so a transient policy excursion cannot be hidden by a
+return to the anchor policy at the target cycle.
+
 Only anchors whose source-policy gate is complete produce error metrics.
 Unavailable future cycles are represented as censored records.  Failed gates,
 malformed targets, and out-of-domain observed pulse widths remain explicit
@@ -396,42 +401,74 @@ def _forecast_outcome_audit(
 
 def _policy_drift_metrics(
     anchor_observation: dict[str, Any],
-    target_observation: dict[str, Any],
+    observed_policy_path: Sequence[tuple[int, dict[str, Any]]],
     *,
     interval_count: int,
     muscle_names: Sequence[str],
 ) -> dict[str, Any]:
     anchor = np.asarray(anchor_observation["normalized_pulse_width"], dtype=float)
-    target = np.asarray(target_observation["normalized_pulse_width"], dtype=float)
-    if anchor.shape != target.shape or anchor.shape[0] != interval_count:
-        raise ValueError("Anchor and target normalized pulse-width policies must share phase layout.")
-    if not np.all(np.isfinite(anchor)) or not np.all(np.isfinite(target)):
-        raise ValueError("Policy-drift metrics require finite normalized pulse widths.")
-    difference = target - anchor
-    absolute = np.abs(difference)
     anchor_index = np.unravel_index(np.argmax(anchor), anchor.shape)
-    target_index = np.unravel_index(np.argmax(target), target.shape)
-    raw_phase_error = abs(int(anchor_index[0]) - int(target_index[0]))
-    circular_phase_error = min(raw_phase_error, interval_count - raw_phase_error)
+    if not observed_policy_path:
+        raise ValueError("Policy-drift audit requires every observed cycle from k+1 through k+H.")
+    per_cycle = []
+    for cycle_index, observation in observed_policy_path:
+        target = np.asarray(observation["normalized_pulse_width"], dtype=float)
+        if anchor.shape != target.shape or anchor.shape[0] != interval_count:
+            raise ValueError(
+                "Anchor and observed normalized pulse-width policies must share phase layout."
+            )
+        if not np.all(np.isfinite(anchor)) or not np.all(np.isfinite(target)):
+            raise ValueError("Policy-drift metrics require finite normalized pulse widths.")
+        difference = target - anchor
+        absolute = np.abs(difference)
+        target_index = np.unravel_index(np.argmax(target), target.shape)
+        raw_phase_error = abs(int(anchor_index[0]) - int(target_index[0]))
+        circular_phase_error = min(raw_phase_error, interval_count - raw_phase_error)
+        per_cycle.append(
+            {
+                "cycle_index": int(cycle_index),
+                "cycles_after_anchor": len(per_cycle) + 1,
+                "sample_count": int(difference.size),
+                "bias": float(np.mean(difference)),
+                "rmse": float(np.sqrt(np.mean(difference**2))),
+                "p95_absolute": float(np.percentile(absolute, 95.0)),
+                "maximum_absolute": float(np.max(absolute)),
+                "critical_policy_location": {
+                    "interval_index": int(target_index[0]),
+                    "muscle_index": int(target_index[1]),
+                    "muscle": muscle_names[int(target_index[1])],
+                },
+                "critical_muscle_changed": int(anchor_index[1]) != int(target_index[1]),
+                "critical_phase_circular_change_intervals": int(circular_phase_error),
+            }
+        )
+    worst_rmse = max(per_cycle, key=lambda row: row["rmse"])
+    worst_p95 = max(per_cycle, key=lambda row: row["p95_absolute"])
+    worst_maximum = max(per_cycle, key=lambda row: row["maximum_absolute"])
     return {
-        "definition": "(PW-PD0)/(PW_max-PD0); target minus anchor at matched muscle/phase",
-        "sample_count": int(difference.size),
-        "bias": float(np.mean(difference)),
-        "rmse": float(np.sqrt(np.mean(difference**2))),
-        "p95_absolute": float(np.percentile(absolute, 95.0)),
-        "maximum_absolute": float(np.max(absolute)),
+        "definition": "(PW-PD0)/(PW_max-PD0); each observed cycle minus anchor at matched muscle/phase",
+        "path_definition": "every observed RHO policy k+1..k+H compared with anchor k",
+        "aggregation_policy": "worst_case_over_all_intermediate_and_target_cycles",
         "critical_policy_location_anchor": {
             "interval_index": int(anchor_index[0]),
             "muscle_index": int(anchor_index[1]),
             "muscle": muscle_names[int(anchor_index[1])],
         },
-        "critical_policy_location_target": {
-            "interval_index": int(target_index[0]),
-            "muscle_index": int(target_index[1]),
-            "muscle": muscle_names[int(target_index[1])],
+        "per_cycle": per_cycle,
+        "worst_over_horizon": {
+            "rmse": worst_rmse["rmse"],
+            "rmse_cycle_index": worst_rmse["cycle_index"],
+            "p95_absolute": worst_p95["p95_absolute"],
+            "p95_cycle_index": worst_p95["cycle_index"],
+            "maximum_absolute": worst_maximum["maximum_absolute"],
+            "maximum_absolute_cycle_index": worst_maximum["cycle_index"],
+            "any_critical_muscle_change": any(
+                row["critical_muscle_changed"] for row in per_cycle
+            ),
+            "maximum_critical_phase_change_intervals": max(
+                row["critical_phase_circular_change_intervals"] for row in per_cycle
+            ),
         },
-        "critical_muscle_changed": int(anchor_index[1]) != int(target_index[1]),
-        "critical_phase_circular_change_intervals": int(circular_phase_error),
     }
 
 
@@ -443,6 +480,7 @@ def _comparison_metrics(
     model_parameters: Sequence[dict[str, Any]],
     interval_count: int,
     anchor_observation: dict[str, Any],
+    observed_policy_path: Sequence[tuple[int, dict[str, Any]]],
 ) -> dict[str, Any]:
     predicted_states = np.asarray(forecast["final_slow_states"], dtype=float)
     observed_states = np.asarray(observation["final_slow_states"], dtype=float)
@@ -491,7 +529,7 @@ def _comparison_metrics(
         },
         "observed_policy_drift": _policy_drift_metrics(
             anchor_observation,
-            observation,
+            observed_policy_path,
             interval_count=interval_count,
             muscle_names=muscle_names,
         ),
@@ -553,8 +591,13 @@ def _aggregate_by_horizon(
             dtype=float,
         )
         policy_drift_rows = [record["metrics"]["observed_policy_drift"] for record in valid]
-        policy_rmse = np.asarray([row["rmse"] for row in policy_drift_rows], dtype=float)
-        policy_p95 = np.asarray([row["p95_absolute"] for row in policy_drift_rows], dtype=float)
+        policy_rmse = np.asarray(
+            [row["worst_over_horizon"]["rmse"] for row in policy_drift_rows], dtype=float
+        )
+        policy_p95 = np.asarray(
+            [row["worst_over_horizon"]["p95_absolute"] for row in policy_drift_rows],
+            dtype=float,
+        )
         metrics = {
             "valid_anchor_count": len(valid),
             "slow_state_errors": state_metrics,
@@ -571,19 +614,26 @@ def _aggregate_by_horizon(
                 "rmse": float(np.sqrt(np.mean(saturation_errors**2))),
             },
             "observed_policy_drift": {
+                "aggregation_policy": "worst_case_over_cycles_then_worst_case_over_anchors",
                 "normalized_pw_rmse_across_anchors": float(
                     np.sqrt(np.mean(policy_rmse**2))
                 ),
+                "normalized_pw_rmse_worst_anchor_horizon": float(np.max(policy_rmse)),
                 "normalized_pw_p95_worst_anchor": float(np.max(policy_p95)),
                 "critical_muscle_change_fraction": float(
-                    np.mean([row["critical_muscle_changed"] for row in policy_drift_rows])
-                ),
-                "critical_phase_mean_absolute_change_intervals": float(
                     np.mean(
                         [
-                            row["critical_phase_circular_change_intervals"]
+                            row["worst_over_horizon"]["any_critical_muscle_change"]
                             for row in policy_drift_rows
                         ]
+                    )
+                ),
+                "critical_phase_maximum_change_intervals": int(
+                    max(
+                        row["worst_over_horizon"][
+                            "maximum_critical_phase_change_intervals"
+                        ]
+                        for row in policy_drift_rows
                     )
                 ),
             },
@@ -635,14 +685,14 @@ def _aggregate_by_horizon(
             {
                 "criterion": "maximum_policy_drift_normalized_pw_rmse",
                 "observed": metrics["observed_policy_drift"][
-                    "normalized_pw_rmse_across_anchors"
+                    "normalized_pw_rmse_worst_anchor_horizon"
                 ],
                 "operator": "<=",
                 "threshold": scientific_criteria[
                     "maximum_policy_drift_normalized_pw_rmse"
                 ],
                 "passed": metrics["observed_policy_drift"][
-                    "normalized_pw_rmse_across_anchors"
+                    "normalized_pw_rmse_worst_anchor_horizon"
                 ]
                 <= scientific_criteria["maximum_policy_drift_normalized_pw_rmse"],
             },
@@ -877,31 +927,52 @@ def build_rho_retrospective_validation_report(
                     }
                 )
             continue
+        observed_cycle_cache: dict[int, tuple[Any, dict[str, Any]]] = {
+            anchor: (anchor_cycle, anchor_observation)
+        }
         for horizon in available:
             target_index = anchor + horizon
             try:
-                target_cycle, _ = select_certified_rho_cycle(
-                    source, cycle_index=target_index, cycle_period=first_cycle.period
-                )
-                observation = _actual_cycle_observation(
-                    target_cycle,
-                    muscle_names=muscle_names,
-                    model_parameters=model_parameters,
-                    saturation_threshold=saturation_threshold,
-                    pulse_width_tolerance_s=observed_pulse_width_tolerance_s,
-                )
-                if not observation["valid"]:
+                observed_policy_path: list[tuple[int, dict[str, Any]]] = []
+                invalid_path_entry = None
+                for observed_cycle_index in range(anchor + 1, target_index + 1):
+                    if observed_cycle_index not in observed_cycle_cache:
+                        observed_cycle, _ = select_certified_rho_cycle(
+                            source,
+                            cycle_index=observed_cycle_index,
+                            cycle_period=first_cycle.period,
+                        )
+                        observed = _actual_cycle_observation(
+                            observed_cycle,
+                            muscle_names=muscle_names,
+                            model_parameters=model_parameters,
+                            saturation_threshold=saturation_threshold,
+                            pulse_width_tolerance_s=observed_pulse_width_tolerance_s,
+                        )
+                        observed_cycle_cache[observed_cycle_index] = (
+                            observed_cycle,
+                            observed,
+                        )
+                    observed_cycle, observed = observed_cycle_cache[observed_cycle_index]
+                    if not observed["valid"]:
+                        invalid_path_entry = (observed_cycle_index, observed)
+                        break
+                    observed_policy_path.append((observed_cycle_index, observed))
+                if invalid_path_entry is not None:
+                    invalid_cycle_index, invalid_observation = invalid_path_entry
                     records.append(
                         {
                             "anchor_cycle_index": anchor,
                             "horizon_cycles": horizon,
                             "target_cycle_index": target_index,
-                            "status": "invalid_target_observation",
-                            "target_audit": observation,
+                            "status": "invalid_observed_policy_path",
+                            "invalid_observed_cycle_index": invalid_cycle_index,
+                            "observed_cycle_audit": invalid_observation,
                             "metrics": None,
                         }
                     )
                     continue
+                target_cycle, observation = observed_cycle_cache[target_index]
                 forecast = forecasts[horizon]
                 forecast_audit = _forecast_outcome_audit(
                     forecast,
@@ -929,6 +1000,7 @@ def build_rho_retrospective_validation_report(
                     model_parameters=model_parameters,
                     interval_count=target_cycle.stimulations_per_cycle,
                     anchor_observation=anchor_observation,
+                    observed_policy_path=observed_policy_path,
                 )
             except Exception as error:
                 records.append(
@@ -952,7 +1024,13 @@ def build_rho_retrospective_validation_report(
                     "forecast_feasible": bool(forecast["feasible"]),
                     "observed_pulse_width_audits": {
                         "anchor": anchor_observation["pulse_width_audit"],
-                        "target": observation["pulse_width_audit"],
+                        "path": [
+                            {
+                                "cycle_index": cycle_index,
+                                **observed["pulse_width_audit"],
+                            }
+                            for cycle_index, observed in observed_policy_path
+                        ],
                     },
                     "metrics": metrics,
                 }
@@ -1055,7 +1133,9 @@ CSV_FIELDS = (
     "critical_muscle_match",
     "critical_phase_circular_error_intervals",
     "policy_drift_normalized_pw_rmse",
+    "policy_drift_normalized_pw_rmse_cycle_index",
     "policy_drift_normalized_pw_p95_absolute",
+    "policy_drift_normalized_pw_p95_cycle_index",
     "policy_drift_critical_muscle_changed",
     "policy_drift_critical_phase_change_intervals",
 )
@@ -1083,11 +1163,16 @@ def _csv_row(record: dict[str, Any]) -> dict[str, Any]:
         "critical_phase_circular_error_intervals"
     ]
     drift = metrics["observed_policy_drift"]
-    row["policy_drift_normalized_pw_rmse"] = drift["rmse"]
-    row["policy_drift_normalized_pw_p95_absolute"] = drift["p95_absolute"]
-    row["policy_drift_critical_muscle_changed"] = drift["critical_muscle_changed"]
+    worst = drift["worst_over_horizon"]
+    row["policy_drift_normalized_pw_rmse"] = worst["rmse"]
+    row["policy_drift_normalized_pw_rmse_cycle_index"] = worst["rmse_cycle_index"]
+    row["policy_drift_normalized_pw_p95_absolute"] = worst["p95_absolute"]
+    row["policy_drift_normalized_pw_p95_cycle_index"] = worst["p95_cycle_index"]
+    row["policy_drift_critical_muscle_changed"] = worst["any_critical_muscle_change"]
     row["policy_drift_critical_phase_change_intervals"] = drift[
-        "critical_phase_circular_change_intervals"
+        "worst_over_horizon"
+    ][
+        "maximum_critical_phase_change_intervals"
     ]
     return row
 

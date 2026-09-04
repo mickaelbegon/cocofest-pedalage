@@ -459,15 +459,21 @@ RMSE et 95e percentile absolu de dérive PW normalisée au plus `0.10` et `0.20`
 accord du muscle critique dans au moins `75 %` des ancres. Le succès du
 traitement ne signifie donc jamais à lui seul que le prédicteur est validé.
 
-La dérive de politique observée entre `k` et `k+H` est rapportée sur
-`(PW-PD0)/(PW_max-PD0)` : biais, RMSE, 95e percentile absolu, maximum, et
-changement de muscle/phase critique. Elle distingue ainsi une erreur du rollout
-d'un changement réel de la politique RHO que l'hypothèse de profil gelé ne peut
-pas prédire. Une utilisation prédite non finie, une couverture incomplète ou un
-état/recrutement prédit non physiologique invalide l'enregistrement et interdit
-la production de métriques. Les PW observées ne bénéficient que d'une tolérance
-de bruit numérique configurable, bornée à `1e-8 s` (`1e-10 s` par défaut) ; les
-excursions tolérées sont listées et les valeurs ne sont jamais clippées.
+La dérive de politique observée est auditée pour **chaque** cycle intermédiaire
+`k+1, ..., k+H` par rapport à l'ancre `k`, et pas seulement entre les deux
+extrémités. Elle est rapportée sur `(PW-PD0)/(PW_max-PD0)` : biais, RMSE,
+95e percentile absolu, maximum, et changement de muscle/phase critique. Le JSON
+conserve les métriques de chaque cycle. L'agrégation pré-enregistrée utilisée
+par les critères scientifiques est le pire cas sur les cycles de l'horizon,
+puis le pire cas sur les ancres ; une excursion transitoire suivie d'un retour
+exact à la politique initiale ne peut donc pas être masquée. Cette mesure
+distingue une erreur du rollout d'un changement réel de la politique RHO que
+l'hypothèse de profil gelé ne peut pas prédire. Une utilisation prédite non
+finie, une couverture incomplète ou un état/recrutement prédit non physiologique
+invalide l'enregistrement et interdit la production de métriques. Les PW
+observées ne bénéficient que d'une tolérance de bruit numérique configurable,
+bornée à `1e-8 s` (`1e-10 s` par défaut) ; les excursions tolérées sont listées
+et les valeurs ne sont jamais clippées.
 
 ### Étape C — Intégration Bioptim désactivée par défaut
 

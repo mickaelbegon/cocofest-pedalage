@@ -202,8 +202,13 @@ def test_rho_only_retrospective_builds_auditable_state_and_recruitment_errors(tm
         assert np.isfinite(metrics["capacity_ratio"]["minimum_error"])
         assert np.isfinite(metrics["recruitment"]["maximum_utilization_error"])
         assert isinstance(metrics["recruitment"]["critical_muscle_match"], bool)
-        assert metrics["observed_policy_drift"]["rmse"] == pytest.approx(0.0)
-        assert metrics["observed_policy_drift"]["p95_absolute"] == pytest.approx(0.0)
+        assert metrics["observed_policy_drift"]["worst_over_horizon"]["rmse"] == pytest.approx(
+            0.0
+        )
+        assert metrics["observed_policy_drift"]["worst_over_horizon"][
+            "p95_absolute"
+        ] == pytest.approx(0.0)
+        assert len(metrics["observed_policy_drift"]["per_cycle"]) == record["horizon_cycles"]
     horizon_two = report["records"][0]
     assert horizon_two["target_cycle_index"] == 3
     assert horizon_two["metrics"]["slow_state_errors"]["A"]["per_muscle"][0][
@@ -281,9 +286,10 @@ def test_invalid_target_pulse_width_is_not_clipped_or_scored(tmp_path):
     report = _build(source, reduced, anchors=(1,), horizons=(2,))
 
     record = report["records"][0]
-    assert record["status"] == "invalid_target_observation"
-    assert record["target_audit"]["reason"] == "observed_pulse_width_out_of_domain"
-    assert record["target_audit"]["domain_violations"][0]["pulse_width_s"] == 0.0007
+    assert record["status"] == "invalid_observed_policy_path"
+    assert record["invalid_observed_cycle_index"] == 3
+    assert record["observed_cycle_audit"]["reason"] == "observed_pulse_width_out_of_domain"
+    assert record["observed_cycle_audit"]["domain_violations"][0]["pulse_width_s"] == 0.0007
     assert record["metrics"] is None
 
 
@@ -302,11 +308,50 @@ def test_policy_drift_and_tolerated_observed_bound_noise_are_auditable(tmp_path)
     record = report["records"][0]
     assert record["status"] == "valid"
     expected = 1e-5 / (0.0006 - 0.000131405)
-    assert record["metrics"]["observed_policy_drift"]["rmse"] == pytest.approx(expected)
-    assert record["metrics"]["observed_policy_drift"]["p95_absolute"] == pytest.approx(
+    drift = record["metrics"]["observed_policy_drift"]
+    assert drift["worst_over_horizon"]["rmse"] == pytest.approx(expected)
+    assert drift["worst_over_horizon"]["p95_absolute"] == pytest.approx(
         expected
     )
-    assert record["observed_pulse_width_audits"]["target"]["clipping_applied"] is False
+    assert len(drift["per_cycle"]) == 2
+    assert record["observed_pulse_width_audits"]["path"][-1]["clipping_applied"] is False
+
+
+def test_intermediate_policy_excursion_is_not_hidden_by_exact_final_return(tmp_path):
+    source = tmp_path / "rho.npz"
+    reduced = tmp_path / "reduced.npz"
+    _write_archive(
+        source,
+        shifted_policy_cycle=2,
+        shifted_policy_delta=1e-5,
+    )
+    reduced.write_bytes(b"reduced-test-profile")
+    threshold = 0.5 * 1e-5 / (0.0006 - 0.000131405)
+
+    report = _build(
+        source,
+        reduced,
+        anchors=(1,),
+        horizons=(2,),
+        scientific_criteria={
+            "minimum_valid_anchors_per_horizon": 1,
+            "maximum_A_rest_normalized_rmse": 10.0,
+            "maximum_Tau1_rest_normalized_rmse": 10.0,
+            "maximum_Km_rest_normalized_rmse": 10.0,
+            "maximum_utilization_rmse": 10.0,
+            "maximum_policy_drift_normalized_pw_rmse": threshold,
+            "maximum_policy_drift_normalized_pw_p95": 10.0,
+            "minimum_critical_muscle_match_fraction": 0.0,
+        },
+    )
+
+    drift = report["records"][0]["metrics"]["observed_policy_drift"]
+    assert drift["per_cycle"][0]["rmse"] > 0.0
+    assert drift["per_cycle"][1]["rmse"] == pytest.approx(0.0)
+    assert drift["worst_over_horizon"]["rmse_cycle_index"] == 2
+    assert drift["worst_over_horizon"]["rmse"] > threshold
+    assert report["processing_status"] == "complete"
+    assert report["scientific_validation_status"] == "failed"
 
 
 def test_solver_scale_observed_pw_bound_excursion_is_accepted_but_never_clipped(tmp_path):
@@ -329,7 +374,7 @@ def test_solver_scale_observed_pw_bound_excursion_is_accepted_but_never_clipped(
 
     record = report["records"][0]
     assert record["status"] == "valid"
-    audit = record["observed_pulse_width_audits"]["target"]
+    audit = record["observed_pulse_width_audits"]["path"][-1]
     assert audit["tolerated_bound_excursion_count"] == 1
     assert audit["tolerated_bound_excursions"][0]["signed_bound_excursion_s"] == pytest.approx(
         5e-11
@@ -343,7 +388,7 @@ def test_solver_scale_observed_pw_bound_excursion_is_accepted_but_never_clipped(
         horizons=(2,),
         observed_pulse_width_tolerance_s=1e-12,
     )
-    assert rejected["records"][0]["status"] == "invalid_target_observation"
+    assert rejected["records"][0]["status"] == "invalid_observed_policy_path"
     assert rejected["records"][0]["metrics"] is None
 
 

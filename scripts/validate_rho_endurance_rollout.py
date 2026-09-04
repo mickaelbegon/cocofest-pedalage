@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Validate frozen-policy endurance rollouts against later RHO cycles only."""
+"""Validate frozen-policy endurance rollouts against later RHO cycles only.
+
+Policy drift is retained for every observed cycle from k+1 through k+H; the
+scientific gate uses the worst RMSE/P95 over that complete path.
+"""
 
 from __future__ import annotations
 
