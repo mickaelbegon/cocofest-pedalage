@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from run_benchmarks import default_worker_threads
+
 ROOT = Path(__file__).resolve().parents[2]
 
 # ---- Edit this block for each PyCharm run configuration -------------------
@@ -21,7 +23,7 @@ CONFIG = {
     "cycles": 100,
     "mechanics": "reduced",         # "reduced" or "full"
     "collocation_degree": 5,
-    "threads": os.cpu_count() or 1,
+    "threads": default_worker_threads(),
     "assistance": "0.00",
     "terminal_q_slack": "0.002",
     "output_root": "pycharm-results",
@@ -47,7 +49,8 @@ def env_for(suite: str) -> dict[str, str]:
         "BENCHMARK_THREADS": str(CONFIG["threads"]), "BENCHMARK_CYCLES_PER_WINDOW": "1",
         "BENCHMARK_ASSISTANCE": str(CONFIG["assistance"]),
         "BENCHMARK_Q_SLACK": str(CONFIG["terminal_q_slack"]), "BENCHMARK_MAX_ITER": "2000",
-        "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
+        "OMP_NUM_THREADS": "1", "OMP_THREAD_LIMIT": "1", "OMP_DYNAMIC": "FALSE",
+        "OPENBLAS_NUM_THREADS": "1", "BLIS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
         "NUMEXPR_NUM_THREADS": "1", "JULIA_NUM_THREADS": "1", "MPLBACKEND": "Agg",
     })
     if suite == "madnlp32":

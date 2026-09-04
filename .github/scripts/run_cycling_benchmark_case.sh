@@ -76,10 +76,12 @@ fi
 # cores, while sparse/BLAS kernels stay single-threaded.  NUMERIC_THREADS and
 # BENCHMARK_THREADS remain the two explicit scaling controls.
 if [[ -z "${BENCHMARK_THREADS:-}" ]]; then
-  BENCHMARK_THREADS="$(lscpu -p=CORE,SOCKET 2>/dev/null | awk -F, '
-    !/^#/ {seen[$1 FS $2]=1}
-    END {print length(seen)}
-  ')"
+  BENCHMARK_THREADS="$("$python_executable" -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from run_benchmarks import default_worker_threads
+print(default_worker_threads())
+' "$workspace/.github/scripts" 2>/dev/null || true)"
   if ! [[ "$BENCHMARK_THREADS" =~ ^[1-9][0-9]*$ ]]; then
     BENCHMARK_THREADS="$(nproc)"
   fi

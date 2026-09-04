@@ -16,10 +16,23 @@ cd "$workspace"
 
 export GITHUB_WORKSPACE="$workspace"
 export PYTHONPATH="$workspace${PYTHONPATH:+:$PYTHONPATH}"
-export BENCHMARK_THREADS="${BENCHMARK_THREADS:-$(nproc)}"
+if [[ -z "${BENCHMARK_THREADS:-}" ]]; then
+  BENCHMARK_THREADS="$(python -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from run_benchmarks import default_worker_threads
+print(default_worker_threads())
+' "$workspace/.github/scripts" 2>/dev/null || true)"
+  if ! [[ "$BENCHMARK_THREADS" =~ ^[1-9][0-9]*$ ]]; then
+    BENCHMARK_THREADS="$(nproc)"
+  fi
+fi
+export BENCHMARK_THREADS
 export OMP_NUM_THREADS=1
 export OMP_THREAD_LIMIT=1
+export OMP_DYNAMIC=FALSE
 export OPENBLAS_NUM_THREADS=1
+export BLIS_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export NUMEXPR_NUM_THREADS=1
 

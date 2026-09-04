@@ -23,6 +23,8 @@ def test_ryzen_endurance_script_keeps_the_scientific_contract():
     assert "--acados-ipopt-recovery-collocation-degree 5" in script
     assert "--terminal-wheel-qdot-bound-margin 0.3" in script
     assert 'export OMP_NUM_THREADS="${NUMERIC_THREADS:-1}"' in script
+    assert 'export OMP_DYNAMIC="${OMP_DYNAMIC:-FALSE}"' in script
+    assert 'export BLIS_NUM_THREADS="${NUMERIC_THREADS:-1}"' in script
     assert "endurance-summary.csv" in script
 
 
@@ -35,3 +37,29 @@ def test_ryzen_protocol_does_not_claim_that_smt_is_free_speedup():
     assert 'STRATEGIES="ipopt acados-ipopt"' in protocol
     assert 'STRATEGIES="madnlp"' in protocol
     assert "unconfirmed_endurance_stop" in protocol
+
+
+def test_common_runner_defaults_to_one_numerical_thread():
+    runner = (ROOT / ".github/scripts/run_cycling_benchmark_case.sh").read_text()
+
+    assert 'numeric_threads="${NUMERIC_THREADS:-1}"' in runner
+    assert 'export OMP_NUM_THREADS="$numeric_threads"' in runner
+    assert 'export OMP_THREAD_LIMIT="$numeric_threads"' in runner
+    assert 'export OMP_DYNAMIC="${OMP_DYNAMIC:-FALSE}"' in runner
+    assert 'export OPENBLAS_NUM_THREADS="$numeric_threads"' in runner
+    assert 'export BLIS_NUM_THREADS="$numeric_threads"' in runner
+    assert 'export MKL_NUM_THREADS="$numeric_threads"' in runner
+    assert 'export NUMEXPR_NUM_THREADS="$numeric_threads"' in runner
+
+
+def test_shell_entry_points_share_the_affinity_aware_core_detector():
+    scripts = (
+        ROOT / ".github/scripts/benchmark_env.sh",
+        ROOT / ".github/scripts/build_benchmark_seed_linux.sh",
+        ROOT / ".github/scripts/run_cycling_benchmark_case.sh",
+        ROOT / ".github/scripts/run_ryzen5950x_endurance_sweep.sh",
+    )
+
+    for path in scripts:
+        source = path.read_text()
+        assert "from run_benchmarks import default_worker_threads" in source

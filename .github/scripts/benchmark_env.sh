@@ -9,7 +9,7 @@
 # Optional overrides, exported before sourcing:
 #   COCOFEST_ROOT       repository checkout (default: this script's repository)
 #   MINIFORGE_PREFIX    Conda installation (default: $HOME/miniforge3)
-#   BENCHMARK_THREADS   --n-threads used by the benchmark (default: nproc)
+#   BENCHMARK_THREADS   --n-threads used by the benchmark (default: physical cores)
 #   NUMERIC_THREADS     BLAS/OpenMP/Julia threads (default: 1)
 #
 # Replaces the repeated export blocks of sections 7, 8, 10 and 11 of
@@ -64,12 +64,24 @@ _cocofest_env_setup() {
 
   # Reproducible thread policy: stage/map parallelism on the benchmark side,
   # one thread inside every numerical library (section 9.1).
-  export BENCHMARK_THREADS="${BENCHMARK_THREADS:-$(nproc)}"
+  local physical_cores
+  physical_cores="$(python -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from run_benchmarks import default_worker_threads
+print(default_worker_threads())
+' "$script_dir" 2>/dev/null || true)"
+  if ! [[ "$physical_cores" =~ ^[1-9][0-9]*$ ]]; then
+    physical_cores="$(nproc)"
+  fi
+  export BENCHMARK_THREADS="${BENCHMARK_THREADS:-$physical_cores}"
   export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-$(nproc)}"
   local numeric="${NUMERIC_THREADS:-1}"
   export OMP_NUM_THREADS="$numeric"
   export OMP_THREAD_LIMIT="$numeric"
+  export OMP_DYNAMIC="${OMP_DYNAMIC:-FALSE}"
   export OPENBLAS_NUM_THREADS="$numeric"
+  export BLIS_NUM_THREADS="$numeric"
   export MKL_NUM_THREADS="$numeric"
   export NUMEXPR_NUM_THREADS="$numeric"
   export JULIA_NUM_THREADS="$numeric"

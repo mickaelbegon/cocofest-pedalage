@@ -32,7 +32,9 @@ export HIGH_ACCURACY_TRACE_CYCLE_MILESTONES="${HIGH_ACCURACY_TRACE_CYCLE_MILESTO
 # physical cores and invalidate comparisons, especially at RHO recoveries.
 export OMP_NUM_THREADS="${NUMERIC_THREADS:-1}"
 export OMP_THREAD_LIMIT="${NUMERIC_THREADS:-1}"
+export OMP_DYNAMIC="${OMP_DYNAMIC:-FALSE}"
 export OPENBLAS_NUM_THREADS="${NUMERIC_THREADS:-1}"
+export BLIS_NUM_THREADS="${NUMERIC_THREADS:-1}"
 export MKL_NUM_THREADS="${NUMERIC_THREADS:-1}"
 export NUMEXPR_NUM_THREADS="${NUMERIC_THREADS:-1}"
 export JULIA_NUM_THREADS="${JULIA_NUM_THREADS:-1}"
@@ -57,7 +59,12 @@ fi
 mkdir -p "$output_root"
 configuration_tag="$(printf '%s' "$strategies" | tr ' /' '--')"
 
-physical_cores="$(lscpu -p=CORE 2>/dev/null | awk -F, '!/^#/ {seen[$1]=1} END {print length(seen)}')"
+physical_cores="$(python -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from run_benchmarks import default_worker_threads
+print(default_worker_threads())
+' "$workspace/.github/scripts" 2>/dev/null || true)"
 logical_cpus="$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
 if [[ -n "$physical_cores" && "$rho_threads" -gt "$physical_cores" ]]; then
   echo "WARNING: RHO_THREADS=$rho_threads exceeds $physical_cores physical cores ($logical_cpus logical CPUs)."

@@ -31,6 +31,12 @@ def test_isokinetic_cli_defaults_follow_the_documented_crank_convention():
     assert args.load_torque_max == pytest.approx(3.0)
 
 
+def test_default_worker_threads_respects_the_process_affinity():
+    available = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+
+    assert 1 <= driver.default_worker_threads() <= available
+
+
 @pytest.mark.parametrize(
     "arguments",
     (
