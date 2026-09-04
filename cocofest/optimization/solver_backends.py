@@ -12,6 +12,7 @@ from typing import Any
 NLP_SOLVER_NAMES = ("ipopt", "fatrop", "madnlp", "alpaqa")
 MADNLP_LINEAR_SOLVER_NAMES = (
     "mumps",
+    "ma57",
     "umfpack",
     "lapack_cpu",
     "pardiso_mkl",
@@ -25,6 +26,7 @@ MADNLP_LINEAR_SOLVER_RUNTIME_NAMES = {
     # literally (``mumps`` is rejected and silently falls back to the MadNLP
     # default after emitting an "unknown type" warning).
     "mumps": "MumpsSolver",
+    "ma57": "Ma57Solver",
     "pardiso_mkl": "PardisoMKLSolver",
 }
 # MadNLP 0.9.2 defines LogLevels as TRACE=1 through ERROR=6.  The libMad
@@ -186,7 +188,10 @@ def configure_nlp_solver(
         solver.set_linear_solver(ipopt_linear_solver)
         solver.set_print_level(print_level)
         if ipopt_hsl_library is not None:
-            solver.set_option_unsafe(ipopt_hsl_library, "hsllib")
+            # The comparison front-end resolves invocation paths to ``Path``
+            # objects. CasADi accepts only scalar option values, so pass the
+            # HSL shared-library location as a string.
+            solver.set_option_unsafe(str(ipopt_hsl_library), "hsllib")
         for name, value in (ipopt_options or {}).items():
             solver.set_option_unsafe(value, name)
         solver.set_c_compile(ipopt_c_compile)

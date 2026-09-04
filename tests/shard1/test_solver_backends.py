@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -135,6 +136,18 @@ def test_configure_madnlp_maps_mumps_to_native_libmad_type():
     assert ("set_option_unsafe", "MumpsSolver", "linear_solver") in solver.calls
 
 
+def test_configure_madnlp_maps_ma57_to_native_libmad_type():
+    solver = configure_nlp_solver(
+        "madnlp",
+        max_iterations=321,
+        madnlp_linear_solver="ma57",
+        solver_namespace=_solver_namespace("MADNLP"),
+        check_availability=False,
+    )
+
+    assert ("set_option_unsafe", "Ma57Solver", "linear_solver") in solver.calls
+
+
 def test_configure_fatrop_uses_time_structured_native_options():
     namespace = _solver_namespace("FATROP")
 
@@ -228,6 +241,22 @@ def test_configure_ipopt_retains_robust_cocofest_settings():
     assert ("set_option_unsafe", "none", "linear_system_scaling") in solver.calls
     assert ("set_option_unsafe", "yes", "ma57_automatic_scaling") in solver.calls
     assert ("set_c_compile", True) in solver.calls
+
+
+def test_configure_ipopt_serializes_an_hsl_path_for_casadi():
+    solver = configure_nlp_solver(
+        "ipopt",
+        max_iterations=10,
+        ipopt_hsl_library=Path("/opt/coinhsl/libhsl.so"),
+        solver_namespace=_solver_namespace("IPOPT"),
+        check_availability=False,
+    )
+
+    assert (
+        "set_option_unsafe",
+        "/opt/coinhsl/libhsl.so",
+        "hsllib",
+    ) in solver.calls
 
 
 @pytest.mark.parametrize(
