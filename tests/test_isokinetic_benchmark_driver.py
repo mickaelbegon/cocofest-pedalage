@@ -90,6 +90,9 @@ def test_isokinetic_environment_and_all_backend_commands_share_the_same_options(
     assert environment["IPOPT_LINEAR_SOLVER"] == "ma57"
     assert environment["WARMUP_IPOPT_LINEAR_SOLVER"] == "ma57"
     assert environment["IPOPT_HSL_LIBRARY"] == str(tmp_path / "libhsl.so")
+    assert environment["BENCHMARK_CONFIGURATION_SLUG"] == (
+        "isokinetic-torque-0.25-omega--5.5-load--0.8-to-0.9"
+    )
     madnlp_environment = driver.build_case_environment(
         madnlp, tmp_path / "madnlp32", args
     )
@@ -212,10 +215,10 @@ def test_shell_runner_reads_isokinetic_options_from_environment_and_suffixes_res
         "BENCHMARK_Q_SLACK": "0.002",
         "BENCHMARK_MAX_ITER": "10",
         "BENCHMARK_FORMULATION": "isokinetic",
-        "BENCHMARK_ENERGY_EQUIVALENT_TORQUE": "0.25",
-        "BENCHMARK_ISOKINETIC_OMEGA": "-5.5",
-        "BENCHMARK_LOAD_TORQUE_MIN": "-0.8",
-        "BENCHMARK_LOAD_TORQUE_MAX": "0.9",
+        "BENCHMARK_ENERGY_EQUIVALENT_TORQUE": "0.20000000000000001",
+        "BENCHMARK_ISOKINETIC_OMEGA": "-6.283185307179586",
+        "BENCHMARK_LOAD_TORQUE_MIN": "-3.0",
+        "BENCHMARK_LOAD_TORQUE_MAX": "3.0",
         "ISOKINETIC_CAPTURE": str(capture),
         "PATH": f"{shim_dir}{os.pathsep}{os.environ['PATH']}",
     }
@@ -235,17 +238,49 @@ def test_shell_runner_reads_isokinetic_options_from_environment_and_suffixes_res
     command = capture.read_text(encoding="utf-8").splitlines()
     for flag, value in (
         ("--formulation", "isokinetic"),
-        ("--energy-equivalent-torque", "0.25"),
-        ("--isokinetic-omega", "-5.5"),
-        ("--load-torque-min", "-0.8"),
-        ("--load-torque-max", "0.9"),
+        ("--energy-equivalent-torque", "0.20000000000000001"),
+        ("--isokinetic-omega", "-6.283185307179586"),
+        ("--load-torque-min", "-3.0"),
+        ("--load-torque-max", "3.0"),
     ):
         index = command.index(flag)
         assert command[index + 1] == value
     output_index = command.index("--output-json")
     assert command[output_index + 1].endswith(
-        "ipopt-reduced-isokinetic-torque-0.25-omega--5.5-load--0.8-to-0.9/result.json"
+        "ipopt-reduced-isokinetic-torque-0.2-omega--6.28318530718-load--3-to-3/result.json"
     )
+
+
+def test_case_result_path_uses_the_same_canonical_float_formatting():
+    args = driver.parse_arguments(
+        [
+            "--formulation", "isokinetic",
+            "--energy-equivalent-torque", "0.20000000000000001",
+            "--isokinetic-omega", "-6.283185307179586",
+            "--load-torque-min", "-3.0",
+            "--load-torque-max", "3.0",
+        ]
+    )
+    ipopt = next(case for case in driver.CASES if case.key == "ipopt")
+
+    assert driver.case_result_dir_name(ipopt, args) == (
+        "ipopt-reduced-isokinetic-torque-0.2-omega--6.28318530718-load--3-to-3"
+    )
+
+
+def test_existing_result_path_falls_back_to_precanonical_campaign(tmp_path):
+    args = driver.parse_arguments(["--formulation", "isokinetic"])
+    ipopt_radau5 = next(case for case in driver.CASES if case.key == "ipopt-radau5")
+    legacy = (
+        tmp_path
+        / "ipopt-radau5-reduced-isokinetic-torque-0.2"
+        "-omega--6.283185307179586-load--3.0-to-3.0"
+        / "result.json"
+    )
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text('{"results": [{"success": true}]}', encoding="utf-8")
+
+    assert driver.existing_case_result_path(tmp_path, ipopt_radau5, args) == legacy
 
 
 def test_shell_runner_rejects_a_nonnegative_isokinetic_speed(tmp_path):

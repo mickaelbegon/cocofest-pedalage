@@ -99,7 +99,18 @@ export JULIA_NUM_THREADS="$numeric_threads"
 
 formulation_directory_suffix=""
 if [[ "$benchmark_formulation" == "isokinetic" ]]; then
-  formulation_directory_suffix="-isokinetic-torque-${energy_equivalent_torque}-omega-${isokinetic_omega}-load-${load_torque_min}-to-${load_torque_max}"
+  benchmark_configuration_slug="${BENCHMARK_CONFIGURATION_SLUG:-}"
+  if [[ -z "$benchmark_configuration_slug" ]]; then
+    # Direct shell launches do not receive the slug from run_benchmarks.py, so
+    # import its canonical formatter instead of duplicating it in Bash.
+    benchmark_configuration_slug="$("$python_executable" -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from run_benchmarks import isokinetic_configuration_name_from_values
+print(isokinetic_configuration_name_from_values("isokinetic", *sys.argv[2:]))
+' "$workspace/.github/scripts" "$energy_equivalent_torque" "$isokinetic_omega" "$load_torque_min" "$load_torque_max")"
+  fi
+  formulation_directory_suffix="-${benchmark_configuration_slug}"
 fi
 if [[ "$case_root" == /* ]]; then
   case_dir="${case_root}/${case_slug}-${mechanics}${formulation_directory_suffix}"

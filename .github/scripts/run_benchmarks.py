@@ -95,18 +95,41 @@ def negative_finite_float(value: str) -> float:
     return parsed
 
 
-def isokinetic_configuration_name(args: argparse.Namespace) -> str:
-    """Return a collision-resistant name for one isokinetic configuration."""
+def isokinetic_configuration_name_from_values(
+    formulation: str,
+    energy_equivalent_torque: float | str,
+    isokinetic_omega: float | str,
+    load_torque_min: float | str,
+    load_torque_max: float | str,
+) -> str:
+    """Return the canonical directory name for one benchmark configuration.
 
-    if args.formulation == "dynamic":
+    The shell runner imports this function when launched directly. Keeping the
+    numeric formatting here prevents ``-3.0`` and parsed ``-3`` from producing
+    different result directories.
+    """
+
+    if formulation == "dynamic":
         return ""
-    torque = format(args.energy_equivalent_torque, ".12g")
-    omega = format(args.isokinetic_omega, ".12g")
-    torque_min = format(args.load_torque_min, ".12g")
-    torque_max = format(args.load_torque_max, ".12g")
+    torque = format(float(energy_equivalent_torque), ".12g")
+    omega = format(float(isokinetic_omega), ".12g")
+    torque_min = format(float(load_torque_min), ".12g")
+    torque_max = format(float(load_torque_max), ".12g")
     return (
         f"isokinetic-torque-{torque}-omega-{omega}"
         f"-load-{torque_min}-to-{torque_max}"
+    )
+
+
+def isokinetic_configuration_name(args: argparse.Namespace) -> str:
+    """Return the canonical directory name from parsed benchmark arguments."""
+
+    return isokinetic_configuration_name_from_values(
+        args.formulation,
+        args.energy_equivalent_torque,
+        args.isokinetic_omega,
+        args.load_torque_min,
+        args.load_torque_max,
     )
 
 
@@ -121,6 +144,31 @@ def case_result_dir_name(case: "Case", args: argparse.Namespace) -> str:
     """Return the case directory, isolated for an isokinetic campaign."""
 
     return f"{case.result_dir_name}{isokinetic_directory_suffix(args)}"
+
+
+def legacy_case_result_dir_name(case: "Case", args: argparse.Namespace) -> str:
+    """Return the pre-canonicalization directory name for result migration."""
+
+    if args.formulation == "dynamic":
+        return case.result_dir_name
+    suffix = (
+        f"-isokinetic-torque-{args.energy_equivalent_torque}"
+        f"-omega-{args.isokinetic_omega}"
+        f"-load-{args.load_torque_min}-to-{args.load_torque_max}"
+    )
+    return f"{case.result_dir_name}{suffix}"
+
+
+def existing_case_result_path(
+    output_root: Path, case: "Case", args: argparse.Namespace
+) -> Path:
+    """Prefer the canonical result path, falling back to legacy campaigns."""
+
+    canonical = output_root / case_result_dir_name(case, args) / "result.json"
+    if canonical.is_file():
+        return canonical
+    legacy = output_root / legacy_case_result_dir_name(case, args) / "result.json"
+    return legacy if legacy.is_file() else canonical
 
 
 def default_worker_threads() -> int:
@@ -402,6 +450,8 @@ def build_case_environment(case: Case, prefix: Path, args: argparse.Namespace) -
     env["BENCHMARK_ISOKINETIC_OMEGA"] = str(args.isokinetic_omega)
     env["BENCHMARK_LOAD_TORQUE_MIN"] = str(args.load_torque_min)
     env["BENCHMARK_LOAD_TORQUE_MAX"] = str(args.load_torque_max)
+    # The shell producer and Python report reader now consume the same slug.
+    env["BENCHMARK_CONFIGURATION_SLUG"] = isokinetic_configuration_name(args)
     if args.formulation == "isokinetic":
         # The isokinetic reference is IPOPT/MA57.  A deployment may have MA57
         # linked directly into IPOPT; otherwise use an explicitly supplied
@@ -618,7 +668,7 @@ def report(selected: list[Case], args: argparse.Namespace) -> int:
     output_root = REPO_ROOT / args.output_root
     rows = []
     for case in selected:
-        record = read_result(output_root / case_result_dir_name(case, args) / "result.json")
+        record = read_result(existing_case_result_path(output_root, case, args))
         rows.append((case, record))
 
     print(f"\n{'=' * 100}")
@@ -685,7 +735,7 @@ def report(selected: list[Case], args: argparse.Namespace) -> int:
     if args.formulation == "isokinetic":
         summary_dir /= isokinetic_configuration_name(args)
     result_files = sorted(
-        str(output_root / case_result_dir_name(case, args) / "result.json")
+        str(existing_case_result_path(output_root, case, args))
         for case, record in rows
         if record is not None
     )
