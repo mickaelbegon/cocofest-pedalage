@@ -9,7 +9,6 @@ ambiguous. Every case starts from the same solver-neutral primal seed.
 from __future__ import annotations
 
 import argparse
-import ctypes
 import csv
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -21,9 +20,12 @@ from pathlib import Path
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Iterable
 import zipfile
+
+import numpy as np
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -37,6 +39,7 @@ DEFAULT_METRIC_TOLERANCES = {
 }
 CAMPAIGN_SOURCE_PATHS = (
     Path(__file__).resolve(),
+    Path(__file__).resolve().with_name("probe_ipopt_ma57.py"),
     REPOSITORY_ROOT
     / "cocofest"
     / "optimization"
@@ -131,29 +134,168 @@ def source_stamp(path: Path) -> dict[str, str | int]:
 
 
 def hsl_preflight(path: Path) -> dict:
-    """Fail early unless the selected library loads and exports MA57."""
+    """Inspect MA57 symbols without loading untrusted native code in the runner."""
 
     result = {
         "file": source_stamp(path),
-        "loadable": False,
+        "loadable": None,
+        "static_inspection_success": False,
         "ma57_symbol": None,
         "error": None,
         "abi_scope": (
-            "dlopen and symbol availability only; a short IPOPT/MA57 solve is "
-            "still required to validate integer, BLAS and Fortran ABI compatibility"
+            "static dynamic-symbol inspection only; loading and solving happen "
+            "exclusively in the disposable runtime-probe subprocess"
         ),
     }
     try:
-        library = ctypes.CDLL(str(path))
-    except OSError as error:
+        completed = subprocess.run(
+            ["nm", "-D", "--defined-only", str(path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=10.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
         result["error"] = f"{type(error).__name__}: {error}"
         return result
-    result["loadable"] = True
+    if completed.returncode != 0:
+        result["error"] = completed.stdout[-2000:]
+        return result
+    result["static_inspection_success"] = True
     for symbol in ("ma57id_", "ma57id", "MA57ID"):
-        if hasattr(library, symbol):
+        if any(line.split()[-1] == symbol for line in completed.stdout.splitlines() if line.split()):
             result["ma57_symbol"] = symbol
             break
     return result
+
+
+_CRITICAL_NATIVE_OUTPUT_MARKERS = (
+    "input error:",
+    "symbol lookup error",
+    "undefined symbol",
+    "segmentation fault",
+    "fatal error",
+)
+
+
+def _finalize_runtime_probe(report: dict, process_output: str) -> dict:
+    """Attach volatile diagnostics and derive strict production readiness."""
+
+    report["process_output"] = process_output[-4000:]
+    lowered = process_output.lower()
+    native_errors = [
+        marker for marker in _CRITICAL_NATIVE_OUTPUT_MARKERS if marker in lowered
+    ]
+    report["native_runtime_error_markers"] = native_errors
+    reasons = list(report.get("production_readiness_reasons") or [])
+    if native_errors:
+        reasons.append("critical_native_runtime_output")
+    report["production_readiness_reasons"] = sorted(set(reasons))
+    report["production_ready"] = bool(
+        report.get("functional_success") is True
+        and not report["production_readiness_reasons"]
+    )
+    if isinstance(report.get("abi_audit"), dict):
+        report["abi_audit"]["status"] = (
+            "clean"
+            if report["production_ready"]
+            else "warning"
+            if report.get("functional_success") is True
+            else "incompatible"
+        )
+    return report
+
+
+def stable_runtime_probe_identity(report: dict) -> dict:
+    """Return reproducible ABI identity, excluding stdout and solve noise."""
+
+    return {
+        "schema": report.get("schema"),
+        "success": report.get("success"),
+        "production_ready": report.get("production_ready"),
+        "production_readiness_reasons": report.get("production_readiness_reasons"),
+        "native_runtime_error_markers": report.get("native_runtime_error_markers"),
+        "hsl_library": report.get("hsl_library"),
+        "process_runtime": report.get("process_runtime"),
+        "casadi": report.get("casadi"),
+        "submitted_options": report.get("submitted_options"),
+        "abi_audit": report.get("abi_audit"),
+    }
+
+
+def run_ma57_runtime_probe(
+    python: Path,
+    hsl_library: Path,
+    *,
+    timeout: float,
+    environment: dict[str, str] | None = None,
+) -> dict:
+    """Prove IPOPT can solve through MA57 in an isolated interpreter."""
+
+    probe_script = Path(__file__).resolve().with_name("probe_ipopt_ma57.py")
+    with tempfile.TemporaryDirectory(prefix="cocofest-ma57-probe-") as directory:
+        output = Path(directory) / "probe.json"
+        command = [
+            str(python),
+            str(probe_script),
+            "--hsl-library",
+            str(hsl_library),
+            "--output",
+            str(output),
+        ]
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=REPOSITORY_ROOT,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as error:
+            return {
+                "schema": "cocofest-ipopt-ma57-runtime-probe-v2",
+                "functional_success": False,
+                "success": False,
+                "production_ready": False,
+                "process_return_code": None,
+                "failure": "timeout",
+                "error": f"Probe exceeded {timeout:g} seconds.",
+                "process_output": (error.stdout or "")[-4000:],
+            }
+        except OSError as error:
+            return {
+                "schema": "cocofest-ipopt-ma57-runtime-probe-v2",
+                "functional_success": False,
+                "success": False,
+                "production_ready": False,
+                "process_return_code": None,
+                "failure": "process_start_failed",
+                "error": f"{type(error).__name__}: {error}",
+                "process_output": "",
+            }
+        try:
+            report = json.loads(output.read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            return {
+                "schema": "cocofest-ipopt-ma57-runtime-probe-v2",
+                "functional_success": False,
+                "success": False,
+                "production_ready": False,
+                "process_return_code": completed.returncode,
+                "failure": "no_valid_report",
+                "error": f"{type(error).__name__}: {error}",
+                "process_output": completed.stdout[-4000:],
+            }
+        report["process_return_code"] = completed.returncode
+        if completed.returncode != 0:
+            report["functional_success"] = False
+            report["success"] = False
+            report["failure"] = "probe_process_failed"
+        return _finalize_runtime_probe(report, completed.stdout)
 
 
 def metric_tolerances(args: argparse.Namespace) -> dict[str, float]:
@@ -169,6 +311,7 @@ def campaign_contract(
     weights: tuple[float, ...],
     temperatures: tuple[float, ...],
     preflight: dict,
+    runtime_probe: dict,
 ) -> dict:
     """Build the immutable identity shared by every case in the screen."""
 
@@ -176,11 +319,15 @@ def campaign_contract(
         "seed": source_stamp(args.seed),
         "hsl_library": source_stamp(args.hsl_library),
         "hsl_preflight": preflight,
+        "ma57_runtime_probe": stable_runtime_probe_identity(runtime_probe),
         "python": source_stamp(args.python),
         "sources": [source_stamp(path) for path in CAMPAIGN_SOURCE_PATHS],
         "configuration": {
             "n_windows": int(args.n_windows),
+            "cycles_per_window": 1,
+            "stimulations_per_cycle": int(args.stimulations_per_cycle),
             "signed_crank_torque_nm": float(args.signed_crank_torque),
+            "isokinetic_omega_rad_s": float(args.isokinetic_omega),
             "ipopt_max_iter": int(args.ipopt_max_iter),
             "linear_solver": "ma57",
             "dual_warm_start_mode": "off",
@@ -193,6 +340,9 @@ def campaign_contract(
             "linear_system_scaling": "none",
             "ma57_pivot_order": 2,
             "sequential_execution": True,
+            "allow_experimental_ma57_runtime": bool(
+                args.allow_experimental_ma57_runtime
+            ),
             "weights": list(weights),
             "temperatures": list(temperatures),
             "baseline_temperature": float(args.baseline_temperature),
@@ -219,14 +369,18 @@ def expected_case_contract(
             "solver": "ipopt",
             "objective": "fatigue",
             "n_windows": configuration["n_windows"],
+            "cycles_per_window": configuration["cycles_per_window"],
+            "stimulations_per_cycle": configuration["stimulations_per_cycle"],
             "mechanical_formulation": configuration["mechanical_formulation"],
             "benchmark_profile": configuration["ipopt_profile"],
             "profile_integrity": True,
             "state_scaling": configuration["state_scaling"],
             "n_threads": configuration["n_threads"],
             "constant_crank_torque": configuration["signed_crank_torque_nm"],
+            "isokinetic_omega": configuration["isokinetic_omega_rad_s"],
             "max_ipopt_iterations": configuration["ipopt_max_iter"],
             "ipopt_linear_solver": configuration["linear_solver"],
+            "warmup_ipopt_linear_solver": configuration["linear_solver"],
             "ipopt_dual_warm_start_mode": configuration["dual_warm_start_mode"],
             "ipopt_c_compile": configuration["ipopt_c_compile"],
             "ipopt_ma57_automatic_scaling": configuration[
@@ -266,14 +420,27 @@ def valid_rho_solution(path: Path) -> bool:
         if not path.is_file() or path.stat().st_size == 0:
             return False
         with zipfile.ZipFile(path) as archive:
-            names = archive.namelist()
-            return bool(
-                archive.testzip() is None
-                and "metadata__json.npy" in names
-                and any(name.startswith("states__") for name in names)
-                and any(name.startswith("controls__") for name in names)
-            )
-    except (OSError, zipfile.BadZipFile):
+            if archive.testzip() is not None:
+                return False
+        with np.load(path, allow_pickle=False) as payload:
+            state_keys = [key for key in payload.files if key.startswith("states__")]
+            control_keys = [key for key in payload.files if key.startswith("controls__")]
+            if "metadata__json" not in payload.files or not state_keys or not control_keys:
+                return False
+            metadata_value = np.asarray(payload["metadata__json"])
+            if metadata_value.size != 1:
+                return False
+            metadata = json.loads(str(metadata_value.reshape(-1)[0]))
+            if not isinstance(metadata, dict):
+                return False
+            for key in (*state_keys, *control_keys):
+                values = np.asarray(payload[key])
+                if values.size == 0 or not np.issubdtype(values.dtype, np.number):
+                    return False
+                if not np.all(np.isfinite(values)):
+                    return False
+            return True
+    except (OSError, ValueError, TypeError, json.JSONDecodeError, zipfile.BadZipFile):
         return False
 
 
@@ -291,10 +458,16 @@ def build_case_command(args: argparse.Namespace, case: SweepCase) -> list[str]:
         "fatigue",
         "--n-windows",
         str(args.n_windows),
+        "--cycles-per-window",
+        "1",
+        "--stimulations-per-cycle",
+        str(args.stimulations_per_cycle),
         "--mechanical-formulation",
         "reduced",
         "--signed-crank-torque",
         str(args.signed_crank_torque),
+        "--isokinetic-omega",
+        str(args.isokinetic_omega),
         "--ipopt-profile",
         "scientific-radau5",
         "--state-scaling",
@@ -468,16 +641,24 @@ def extract_case_metrics(
                 path, case, n_windows, expected=expected
             ),
             "covered_cycles": result.get("covered_cycles", 0),
-            "minimum_capacity_ratio": reserve.get("minimum_ratio"),
-            "fatigue_auc_cycles": result.get("fatigue_auc_cycles"),
-            "maximum_pw_upper_fraction": max(upper_fractions) if upper_fractions else None,
-            "solver_time_per_cycle_s": result.get("solver_time_per_cycle_s"),
+            "minimum_capacity_ratio": _finite_metric(reserve.get("minimum_ratio")),
+            "fatigue_auc_cycles": _finite_metric(result.get("fatigue_auc_cycles")),
+            "maximum_pw_upper_fraction": _finite_metric(
+                max(upper_fractions) if upper_fractions else None
+            ),
+            "solver_time_per_cycle_s": _finite_metric(result.get("solver_time_per_cycle_s")),
             "compiled_library_build_count": reuse.get("compiled_library_build_count"),
             "compiled_library_reused": reuse.get("compiled_library_reused"),
             "graph_rebuild_detected": reuse.get("graph_rebuild_detected"),
         }
     )
     return row
+
+
+def _finite_metric(value):
+    if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        return None
+    return float(value)
 
 
 def classify_screen(
@@ -528,7 +709,7 @@ def classify_screen(
                 for key, delta in oriented_deltas.items()
             )
             row["screen_status"] = (
-                "pareto_nondominated"
+                "improves_without_baseline_regression"
                 if not worse and improved
                 else "dominated_or_equivalent"
             )
@@ -570,13 +751,22 @@ def write_screen_summary(
             "rows": rows,
         },
     )
-    fieldnames = sorted({key for row in rows for key in row if key != "delta_vs_baseline"})
+    csv_rows = []
+    for row in rows:
+        flat = {key: value for key, value in row.items() if key != "delta_vs_baseline"}
+        flat.update(
+            {
+                f"delta_vs_baseline__{key}": value
+                for key, value in (row.get("delta_vs_baseline") or {}).items()
+            }
+        )
+        csv_rows.append(flat)
+    fieldnames = sorted({key for row in csv_rows for key in row})
     with (output_root / "summary.csv").open("w", newline="") as stream:
         writer = csv.DictWriter(stream, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(
-            {key: value for key, value in row.items() if key in fieldnames}
-            for row in rows
+            row for row in csv_rows
         )
     return rows
 
@@ -584,7 +774,9 @@ def write_screen_summary(
 def write_manifest(path: Path, payload: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    temporary.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    )
     temporary.replace(path)
 
 
@@ -663,8 +855,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--temperatures", default=",".join(map(str, DEFAULT_TEMPERATURES)))
     parser.add_argument("--baseline-temperature", type=float, default=DEFAULT_BASELINE_TEMPERATURE)
     parser.add_argument("--n-windows", type=int, default=20)
+    parser.add_argument("--stimulations-per-cycle", type=int, default=30)
     parser.add_argument("--signed-crank-torque", type=float, default=0.2)
+    parser.add_argument("--isokinetic-omega", type=float, default=-2.0 * math.pi)
     parser.add_argument("--ipopt-max-iter", type=int, default=5000)
+    parser.add_argument(
+        "--ma57-probe-timeout",
+        type=float,
+        default=60.0,
+        help="Timeout for the mandatory disposable IPOPT/MA57 ABI probe.",
+    )
     parser.add_argument(
         "--timeout",
         type=float,
@@ -688,6 +888,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="Actually run the long campaign; without this flag only commands are printed.",
+    )
+    parser.add_argument(
+        "--allow-experimental-ma57-runtime",
+        action="store_true",
+        help="Allow a functionally successful but ABI-warning MA57 stack (never clinical).",
+    )
     return parser
 
 
@@ -714,14 +924,22 @@ def main(cli_args: list[str] | None = None) -> int:
         raise SystemExit("--output-root must be a directory.")
     if args.n_windows < 2:
         raise SystemExit("--n-windows must be at least 2 to audit compiled NLP reuse.")
+    if args.stimulations_per_cycle < 1:
+        raise SystemExit("--stimulations-per-cycle must be positive.")
     if args.ipopt_max_iter < 1:
         raise SystemExit("--ipopt-max-iter must be a positive integer.")
-    if not math.isfinite(args.signed_crank_torque):
-        raise SystemExit("--signed-crank-torque must be finite.")
+    if not math.isfinite(args.signed_crank_torque) or not math.isfinite(args.isokinetic_omega):
+        raise SystemExit("--signed-crank-torque and --isokinetic-omega must be finite.")
+    if args.isokinetic_omega >= 0.0:
+        raise SystemExit("--isokinetic-omega must be strictly negative.")
+    if args.execute and args.dry_run:
+        raise SystemExit("--execute and --dry-run are mutually exclusive.")
     if args.timeout is not None and (
         not math.isfinite(args.timeout) or args.timeout <= 0.0
     ):
         raise SystemExit("--timeout must be finite and strictly positive.")
+    if not math.isfinite(args.ma57_probe_timeout) or args.ma57_probe_timeout <= 0.0:
+        raise SystemExit("--ma57-probe-timeout must be finite and strictly positive.")
     if not math.isfinite(args.baseline_temperature) or args.baseline_temperature <= 0.0:
         raise SystemExit("--baseline-temperature must be finite and strictly positive.")
     tolerances = metric_tolerances(args)
@@ -743,9 +961,9 @@ def main(cli_args: list[str] | None = None) -> int:
             "The numerical grid contains values that collide after slug encoding."
         )
     preflight = hsl_preflight(args.hsl_library)
-    if not preflight["loadable"]:
+    if not preflight["static_inspection_success"]:
         raise SystemExit(
-            "CoinHSL failed the parent-process load preflight: "
+            "CoinHSL failed static symbol inspection: "
             f"{preflight['error']}"
         )
     if preflight["ma57_symbol"] is None:
@@ -753,11 +971,53 @@ def main(cli_args: list[str] | None = None) -> int:
             "The selected HSL library loads but exports no recognized MA57 symbol."
         )
 
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PYTHONPATH": str(REPOSITORY_ROOT),
+            "MPLBACKEND": "Agg",
+            "MPLCONFIGDIR": "/tmp/cocofest-ma57-probe-mpl",
+            "OMP_NUM_THREADS": "1",
+            "OMP_THREAD_LIMIT": "1",
+            "OMP_DYNAMIC": "FALSE",
+            "OPENBLAS_NUM_THREADS": "1",
+            "BLIS_NUM_THREADS": "1",
+            "MKL_NUM_THREADS": "1",
+            "NUMEXPR_NUM_THREADS": "1",
+        }
+    )
+    runtime_probe = run_ma57_runtime_probe(
+        args.python,
+        args.hsl_library,
+        timeout=args.ma57_probe_timeout,
+        environment=environment,
+    )
+    if runtime_probe.get("functional_success") is not True:
+        raise SystemExit(
+            "The mandatory IPOPT/MA57 solve probe failed before the campaign: "
+            f"{runtime_probe.get('error') or runtime_probe.get('failure')}."
+        )
+    if (
+        runtime_probe.get("production_ready") is not True
+        and not args.allow_experimental_ma57_runtime
+    ):
+        raise SystemExit(
+            "The IPOPT/MA57 solve works but the native stack is not production-ready: "
+            f"{runtime_probe.get('production_readiness_reasons')}. Rebuild CoinHSL "
+            "or use --allow-experimental-ma57-runtime for non-clinical diagnostics."
+        )
+
     manifest_path = args.output_root / "manifest.json"
-    contract = campaign_contract(args, weights, temperatures, preflight)
+    contract = campaign_contract(
+        args, weights, temperatures, preflight, runtime_probe
+    )
     manifest = initialize_immutable_manifest(
         manifest_path, contract, resume=args.resume
     )
+    probe_path = args.output_root / "ma57-runtime-probe.json"
+    if not probe_path.exists():
+        write_manifest(probe_path, runtime_probe)
+    write_manifest(args.output_root / "ma57-runtime-probe.latest.json", runtime_probe)
     progress_path = args.output_root / "progress.json"
     progress = {
         "schema": "cocofest-terminal-reserve-sweep-progress-v1",
@@ -768,21 +1028,6 @@ def main(cli_args: list[str] | None = None) -> int:
     expected_by_slug = {
         case.slug: expected_case_contract(contract, case) for case in cases
     }
-
-    environment = os.environ.copy()
-    environment.update(
-        {
-            "PYTHONPATH": str(REPOSITORY_ROOT),
-            "MPLBACKEND": "Agg",
-            "OMP_NUM_THREADS": "1",
-            "OMP_THREAD_LIMIT": "1",
-            "OMP_DYNAMIC": "FALSE",
-            "OPENBLAS_NUM_THREADS": "1",
-            "BLIS_NUM_THREADS": "1",
-            "MKL_NUM_THREADS": "1",
-            "NUMEXPR_NUM_THREADS": "1",
-        }
-    )
 
     exit_code = 0
     for case in cases:
@@ -802,7 +1047,7 @@ def main(cli_args: list[str] | None = None) -> int:
         ):
             record["status"] = "reused"
             continue
-        if args.dry_run:
+        if not args.execute:
             record["status"] = "dry_run"
             print(shlex.join(command))
             continue

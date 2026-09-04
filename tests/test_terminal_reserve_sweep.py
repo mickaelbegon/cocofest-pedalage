@@ -5,8 +5,8 @@ import json
 from pathlib import Path
 import sys
 from types import SimpleNamespace
-import zipfile
 
+import numpy as np
 import pytest
 
 
@@ -20,10 +20,12 @@ SPEC.loader.exec_module(sweep)
 
 
 def _write_valid_rho_npz(path: Path) -> None:
-    with zipfile.ZipFile(path, "w") as archive:
-        archive.writestr("metadata__json.npy", b"metadata")
-        archive.writestr("states__A_Biceps.npy", b"states")
-        archive.writestr("controls__last_pulse_width_Biceps.npy", b"controls")
+    np.savez_compressed(
+        path,
+        metadata__json=np.asarray(json.dumps({"cycle_count": 20})),
+        states__A_Biceps=np.asarray([[1.0, 0.9]]),
+        controls__last_pulse_width_Biceps=np.asarray([[0.0002]]),
+    )
 
 
 def _complete_payload(case: sweep.SweepCase, n_windows: int = 20) -> dict:
@@ -33,14 +35,18 @@ def _complete_payload(case: sweep.SweepCase, n_windows: int = 20) -> dict:
                 "solver": "ipopt",
                 "objective": "fatigue",
                 "n_windows": n_windows,
+                "cycles_per_window": 1,
+                "stimulations_per_cycle": 30,
                 "mechanical_formulation": "reduced",
                 "benchmark_profile": "scientific-radau5",
                 "profile_integrity": True,
                 "state_scaling": "full",
                 "n_threads": 1,
                 "constant_crank_torque": 0.2,
+                "isokinetic_omega": -2.0 * np.pi,
                 "max_ipopt_iterations": 5000,
                 "ipopt_linear_solver": "ma57",
+                "warmup_ipopt_linear_solver": "ma57",
                 "ipopt_dual_warm_start_mode": "off",
                 "ipopt_c_compile": True,
                 "ipopt_ma57_automatic_scaling": True,
@@ -111,7 +117,9 @@ def test_case_command_freezes_the_paired_ma57_protocol(tmp_path):
         python=Path("/env/bin/python"),
         output_root=tmp_path,
         n_windows=20,
+        stimulations_per_cycle=30,
         signed_crank_torque=0.2,
+        isokinetic_omega=-2.0 * np.pi,
         ipopt_max_iter=5000,
         hsl_library=Path("/opt/libhsl.so"),
         seed=Path("/data/common.npz"),
@@ -193,6 +201,19 @@ def test_invalid_or_empty_rho_npz_is_not_complete(tmp_path):
     assert not sweep.result_is_complete(path, case, 20)
 
 
+def test_rho_npz_validation_checks_every_state_and_control_payload(tmp_path):
+    path = tmp_path / "rho_solution.npz"
+    np.savez_compressed(
+        path,
+        metadata__json=np.asarray(json.dumps({"cycle_count": 1})),
+        states__A_Biceps=np.asarray([[1.0]]),
+        states__corrupt=np.asarray([object()], dtype=object),
+        controls__last_pulse_width_Biceps=np.asarray([[0.0002]]),
+    )
+
+    assert sweep.valid_rho_solution(path) is False
+
+
 def test_manifest_is_immutable_and_rejects_changed_resume_contract(tmp_path):
     path = tmp_path / "manifest.json"
     contract = {"seed": {"sha256": "abc"}, "configuration": {"n_windows": 20}}
@@ -241,10 +262,22 @@ def test_failed_subprocess_cannot_reuse_stale_success_artifacts(
         "hsl_preflight",
         lambda path: {
             "file": sweep.source_stamp(path),
-            "loadable": True,
+            "static_inspection_success": True,
             "ma57_symbol": "ma57id_",
             "error": None,
             "abi_scope": "test",
+        },
+    )
+    monkeypatch.setattr(
+        sweep,
+        "run_ma57_runtime_probe",
+        lambda *args, **kwargs: {
+            "schema": "cocofest-ipopt-ma57-runtime-probe-v2",
+            "functional_success": True,
+            "success": True,
+            "production_ready": True,
+            "production_readiness_reasons": [],
+            "process_return_code": 0,
         },
     )
     monkeypatch.setattr(
@@ -265,6 +298,7 @@ def test_failed_subprocess_cannot_reuse_stale_success_artifacts(
             "0,0.01",
             "--temperatures",
             "0.005",
+            "--execute",
         ]
     )
 
@@ -303,16 +337,111 @@ def test_main_rejects_invalid_campaign_inputs(tmp_path, extra_args, message):
         )
 
 
-def test_hsl_preflight_requires_loadability_and_ma57_symbol(tmp_path, monkeypatch):
+def test_hsl_preflight_uses_static_symbol_inspection(tmp_path, monkeypatch):
     hsl = tmp_path / "libhsl.so"
     hsl.write_bytes(b"hsl")
-    library = SimpleNamespace(ma57id_=object())
-    monkeypatch.setattr(sweep.ctypes, "CDLL", lambda path: library)
+    monkeypatch.setattr(
+        sweep.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="000 T ma57id_\n"),
+    )
 
     result = sweep.hsl_preflight(hsl)
 
-    assert result["loadable"] is True
+    assert result["loadable"] is None
+    assert result["static_inspection_success"] is True
     assert result["ma57_symbol"] == "ma57id_"
+
+
+def test_runtime_probe_requires_a_successful_subprocess_report(tmp_path, monkeypatch):
+    python = tmp_path / "python"
+    hsl = tmp_path / "libhsl.so"
+    python.write_bytes(b"python")
+    hsl.write_bytes(b"hsl")
+
+    def completed(command, **kwargs):
+        output = Path(command[command.index("--output") + 1])
+        output.write_text(
+            json.dumps(
+                {
+                    "schema": "cocofest-ipopt-ma57-runtime-probe-v2",
+                    "functional_success": True,
+                    "success": True,
+                    "production_ready": True,
+                    "production_readiness_reasons": [],
+                    "return_status": "Solve_Succeeded",
+                }
+            )
+        )
+        return SimpleNamespace(returncode=0, stdout="probe output")
+
+    monkeypatch.setattr(sweep.subprocess, "run", completed)
+
+    result = sweep.run_ma57_runtime_probe(python, hsl, timeout=1.0)
+
+    assert result["success"] is True
+    assert result["process_return_code"] == 0
+    assert result["process_output"] == "probe output"
+
+
+def test_runtime_probe_rejects_a_native_process_crash(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        sweep.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=-11, stdout="segfault"),
+    )
+
+    result = sweep.run_ma57_runtime_probe(
+        tmp_path / "python", tmp_path / "libhsl.so", timeout=1.0
+    )
+
+    assert result["success"] is False
+    assert result["failure"] == "no_valid_report"
+    assert result["process_return_code"] == -11
+
+
+def test_failed_runtime_probe_blocks_campaign_before_manifest(tmp_path, monkeypatch):
+    seed = tmp_path / "seed.npz"
+    hsl = tmp_path / "libhsl.so"
+    seed.write_bytes(b"seed")
+    hsl.write_bytes(b"hsl")
+    output = tmp_path / "screen"
+    monkeypatch.setattr(
+        sweep,
+        "hsl_preflight",
+        lambda path: {
+            "file": sweep.source_stamp(path),
+            "static_inspection_success": True,
+            "ma57_symbol": "ma57id_",
+            "error": None,
+        },
+    )
+    monkeypatch.setattr(
+        sweep,
+        "run_ma57_runtime_probe",
+        lambda *args, **kwargs: {
+            "functional_success": False,
+            "success": False,
+            "failure": "probe_process_failed",
+            "error": "Invalid option or ABI",
+        },
+    )
+
+    with pytest.raises(SystemExit, match="mandatory IPOPT/MA57 solve probe failed"):
+        sweep.main(
+            [
+                "--seed",
+                str(seed),
+                "--hsl-library",
+                str(hsl),
+                "--output-root",
+                str(output),
+                "--python",
+                sys.executable,
+            ]
+        )
+
+    assert not (output / "manifest.json").exists()
 
 
 def test_metric_specific_tolerances_ignore_numerical_noise():
@@ -376,5 +505,5 @@ def test_screen_accepts_only_a_non_dominated_improvement():
 
     assert (
         sweep.classify_screen([baseline, candidate])[1]["screen_status"]
-        == "pareto_nondominated"
+        == "improves_without_baseline_regression"
     )

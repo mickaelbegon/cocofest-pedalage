@@ -11,6 +11,7 @@ from cocofest.optimization.solver_backends import (
     file_provenance,
     ipopt_hsl_diagnostics,
     nlp_solver_availability,
+    solve_ipopt_ma57_probe,
 )
 
 
@@ -276,6 +277,69 @@ def test_file_provenance_records_resolved_path_size_and_sha256(tmp_path):
         "sha256": "a0a48e306bc09bc7c29df91c7c8fd97fe06a06b1ac520a57bcba84e9d209e6d8",
         "size_bytes": 25,
     }
+
+
+def test_actual_ma57_probe_submits_hsl_and_validates_the_solution(tmp_path, monkeypatch):
+    library = tmp_path / "libhsl.so"
+    library.write_bytes(b"not needed by fake CasADi")
+    submitted = {}
+
+    class Expression:
+        def __getitem__(self, key):
+            return self
+
+        def __add__(self, other):
+            return self
+
+        def __radd__(self, other):
+            return self
+
+        def __sub__(self, other):
+            return self
+
+        def __pow__(self, other):
+            return self
+
+    class Dense:
+        def reshape(self, *args):
+            return [1.0, 2.0]
+
+    class ProbeSolver:
+        def __call__(self, **kwargs):
+            return {"x": SimpleNamespace(full=lambda: Dense())}
+
+        def stats(self):
+            return {
+                "success": True,
+                "return_status": "Solve_Succeeded",
+                "iter_count": 1,
+            }
+
+    def nlpsol(name, plugin, nlp, options):
+        submitted.update(options)
+        assert plugin == "ipopt"
+        return ProbeSolver()
+
+    fake_casadi = SimpleNamespace(
+        __version__="test",
+        __file__=None,
+        MX=SimpleNamespace(sym=lambda *args: Expression()),
+        nlpsol=nlpsol,
+    )
+    monkeypatch.setattr(
+        "cocofest.optimization.solver_backends.loaded_solver_runtime_provenance",
+        lambda: [file_provenance(library)],
+    )
+
+    report = solve_ipopt_ma57_probe(library, casadi_module=fake_casadi)
+
+    assert report["success"] is True
+    assert report["functional_success"] is True
+    assert report["selected_hsl_mapped"] is True
+    assert report["constraint_residual"] == 0.0
+    assert report["solution_error_inf"] == 0.0
+    assert submitted["ipopt.linear_solver"] == "ma57"
+    assert submitted["ipopt.hsllib"] == str(library)
 
 
 def test_hsl_diagnostics_report_missing_explicit_library(tmp_path):

@@ -11,7 +11,10 @@ import ctypes
 import ctypes.util
 import hashlib
 import os
+import platform
 from pathlib import Path
+import struct
+import sys
 from typing import Any
 
 NLP_SOLVER_NAMES = ("ipopt", "fatrop", "madnlp", "alpaqa")
@@ -46,6 +49,258 @@ class SolverBackendUnavailable(RuntimeError):
 
 _IPOPT_HSL_LINEAR_SOLVERS = frozenset({"ma27", "ma57", "ma77", "ma86", "ma97"})
 _MA57_SYMBOL_NAMES = ("ma57id_", "ma57id", "MA57ID")
+
+
+def _elf_identity(path: str | os.PathLike[str]) -> dict[str, Any]:
+    """Read the ABI-relevant fields of an ELF header without executing it."""
+
+    resolved = Path(path).expanduser().resolve()
+    identity: dict[str, Any] = {
+        "format": None,
+        "class_bits": None,
+        "endianness": None,
+        "machine": None,
+    }
+    try:
+        header = resolved.read_bytes()[:20]
+    except OSError as error:
+        identity["error"] = f"{type(error).__name__}: {error}"
+        return identity
+    if len(header) < 20 or header[:4] != b"\x7fELF":
+        identity["format"] = "not_elf"
+        return identity
+    identity["format"] = "ELF"
+    identity["class_bits"] = {1: 32, 2: 64}.get(header[4])
+    identity["endianness"] = {1: "little", 2: "big"}.get(header[5])
+    byte_order = "<" if header[5] == 1 else ">" if header[5] == 2 else None
+    if byte_order is not None:
+        identity["machine"] = struct.unpack(f"{byte_order}H", header[18:20])[0]
+    return identity
+
+
+def process_runtime_provenance() -> dict[str, Any]:
+    """Describe the Python process ABI used to load CasADi, IPOPT and HSL."""
+
+    return {
+        "python_version": platform.python_version(),
+        "python_implementation": platform.python_implementation(),
+        "python_executable": file_provenance(sys.executable),
+        "platform": platform.platform(),
+        "machine": platform.machine(),
+        "pointer_bits": struct.calcsize("P") * 8,
+        "byteorder": sys.byteorder,
+        "ld_library_path": os.environ.get("LD_LIBRARY_PATH"),
+    }
+
+
+def loaded_solver_runtime_provenance() -> list[dict[str, Any]]:
+    """Fingerprint solver-relevant shared objects mapped in this process.
+
+    ``/proc/self/maps`` is Linux-specific.  Other platforms return an empty
+    list rather than pretending that the loaded Fortran/BLAS ABI was audited.
+    """
+
+    maps = Path("/proc/self/maps")
+    if not maps.is_file():
+        return []
+    relevant = (
+        "hsl",
+        "ipopt",
+        "gfortran",
+        "quadmath",
+        "blas",
+        "lapack",
+        "openblas",
+        "mkl",
+        "metis",
+    )
+    paths: set[Path] = set()
+    try:
+        for line in maps.read_text().splitlines():
+            candidate = line.rsplit(maxsplit=1)[-1]
+            if not candidate.startswith("/"):
+                continue
+            path = Path(candidate)
+            if any(token in path.name.lower() for token in relevant) and path.is_file():
+                paths.add(path.resolve())
+    except OSError:
+        return []
+    return [
+        {**(file_provenance(path) or {}), "elf": _elf_identity(path)}
+        for path in sorted(paths, key=str)
+    ]
+
+
+def _runtime_abi_audit(report: dict[str, Any]) -> dict[str, Any]:
+    libraries = report.get("loaded_solver_libraries") or []
+    fortran_names = sorted(
+        {
+            Path(record.get("resolved_path", "")).name
+            for record in libraries
+            if "gfortran" in Path(record.get("resolved_path", "")).name.lower()
+        }
+    )
+    fortran_majors = sorted(
+        {
+            name.rsplit(".so.", 1)[1].split(".", 1)[0]
+            for name in fortran_names
+            if ".so." in name
+        }
+    )
+    hsl_elf = (report.get("hsl_library") or {}).get("elf") or {}
+    process = report.get("process_runtime") or {}
+    class_matches = hsl_elf.get("class_bits") == process.get("pointer_bits")
+    endian_matches = hsl_elf.get("endianness") == process.get("byteorder")
+    warnings: list[str] = []
+    if len(fortran_majors) > 1:
+        warnings.append(
+            "Multiple libgfortran ABI majors are mapped in the successful probe; "
+            "rebuilding CoinHSL against the active environment remains recommended."
+        )
+    if not class_matches or not endian_matches:
+        warnings.append("The HSL ELF class or endianness differs from the Python process ABI.")
+    return {
+        "hsl_process_class_matches": class_matches,
+        "hsl_process_endianness_matches": endian_matches,
+        "loaded_fortran_runtime_names": fortran_names,
+        "loaded_fortran_abi_majors": fortran_majors,
+        "multiple_fortran_abi_majors": len(fortran_majors) > 1,
+        "warnings": warnings,
+    }
+
+
+def _ma57_probe_production_readiness(report: dict[str, Any]) -> tuple[bool, list[str]]:
+    """Separate a successful toy solve from a production-clean native stack."""
+
+    reasons: list[str] = []
+    if report.get("functional_success") is not True:
+        reasons.append("probe_solve_failed")
+    abi_audit = report.get("abi_audit") or {}
+    if abi_audit.get("hsl_process_class_matches") is not True:
+        reasons.append("hsl_process_class_mismatch")
+    if abi_audit.get("hsl_process_endianness_matches") is not True:
+        reasons.append("hsl_process_endianness_mismatch")
+    if abi_audit.get("multiple_fortran_abi_majors") is True:
+        reasons.append("multiple_libgfortran_abi_majors")
+    return not reasons, reasons
+
+
+def solve_ipopt_ma57_probe(
+    hsl_library: str | os.PathLike[str],
+    *,
+    casadi_module=None,
+) -> dict[str, Any]:
+    """Run a tiny constrained NLP that must factorize through IPOPT/MA57.
+
+    This is deliberately separate from :func:`ipopt_hsl_diagnostics`: a
+    successful ``dlopen`` cannot detect integer-width, Fortran-runtime or BLAS
+    ABI incompatibilities.  Production runners should execute this function
+    in a disposable subprocess because an incompatible native library may
+    terminate the interpreter before Python can raise an exception.
+    """
+
+    if casadi_module is None:
+        import casadi as casadi_module
+
+    library = Path(hsl_library).expanduser().resolve()
+    report: dict[str, Any] = {
+        "schema": "cocofest-ipopt-ma57-runtime-probe-v2",
+        "functional_success": False,
+        "success": False,
+        "hsl_library": {
+            **(file_provenance(library) or {}),
+            "elf": _elf_identity(library),
+        },
+        "process_runtime": process_runtime_provenance(),
+        "casadi": {
+            "version": getattr(casadi_module, "__version__", None),
+            "module": file_provenance(getattr(casadi_module, "__file__", None)),
+        },
+        "submitted_options": {
+            "linear_solver": "ma57",
+            "hsllib": str(library),
+            "max_iter": 20,
+            "tol": 1e-10,
+        },
+        "return_status": None,
+        "iteration_count": None,
+        "constraint_residual": None,
+        "solution_error_inf": None,
+        "loaded_solver_libraries": [],
+        "production_ready": False,
+        "production_readiness_reasons": [],
+        "error": None,
+    }
+    try:
+        x = casadi_module.MX.sym("x", 2)
+        nlp = {
+            "x": x,
+            "f": (x[0] - 1.0) ** 2 + (x[1] - 2.0) ** 2,
+            "g": x[0] + x[1],
+        }
+        solver = casadi_module.nlpsol(
+            "cocofest_ma57_runtime_probe",
+            "ipopt",
+            nlp,
+            {
+                "ipopt.linear_solver": "ma57",
+                "ipopt.hsllib": str(library),
+                "ipopt.max_iter": 20,
+                "ipopt.tol": 1e-10,
+                "ipopt.print_level": 0,
+                "print_time": False,
+            },
+        )
+        solution = solver(x0=[0.0, 0.0], lbg=3.0, ubg=3.0)
+        values = [float(value) for value in solution["x"].full().reshape(-1)]
+        constraint_residual = abs(sum(values) - 3.0)
+        solution_error = max(abs(values[0] - 1.0), abs(values[1] - 2.0))
+        stats = solver.stats()
+        report.update(
+            {
+                "return_status": stats.get("return_status"),
+                "iteration_count": stats.get("iter_count"),
+                "constraint_residual": constraint_residual,
+                "solution_error_inf": solution_error,
+                "loaded_solver_libraries": loaded_solver_runtime_provenance(),
+            }
+        )
+        hsl_path = str(library)
+        hsl_sha256 = (report.get("hsl_library") or {}).get("sha256")
+        loaded_hsl = next(
+            (
+                item
+                for item in report["loaded_solver_libraries"]
+                if item.get("resolved_path") == hsl_path
+                and item.get("sha256") == hsl_sha256
+            ),
+            None,
+        )
+        report["selected_hsl_mapped"] = loaded_hsl is not None
+        report["functional_success"] = bool(
+            stats.get("success")
+            and stats.get("return_status") in {"Solve_Succeeded", "Solved_To_Acceptable_Level"}
+            and constraint_residual <= 1e-8
+            and solution_error <= 1e-6
+            and report["selected_hsl_mapped"]
+        )
+        report["success"] = report["functional_success"]
+    except Exception as error:  # native/plugin failures vary by CasADi build
+        report["error"] = f"{type(error).__name__}: {error}"
+        report["loaded_solver_libraries"] = loaded_solver_runtime_provenance()
+    report["abi_audit"] = _runtime_abi_audit(report)
+    (
+        report["production_ready"],
+        report["production_readiness_reasons"],
+    ) = _ma57_probe_production_readiness(report)
+    report["abi_audit"]["status"] = (
+        "clean"
+        if report["production_ready"]
+        else "warning"
+        if report["functional_success"]
+        else "incompatible"
+    )
+    return report
 
 
 def file_provenance(path: str | os.PathLike[str] | None) -> dict[str, Any] | None:
