@@ -203,7 +203,7 @@ Le premier écran numérique est automatisé par
 `.github/scripts/run_terminal_reserve_sweep.py`. Il teste par défaut
 \(\lambda_R\in\{0,0.01,0.03,0.1,1\}\), ne calcule le baseline qu’une fois et
 exécute les cas séquentiellement avec MA57 pour préserver les mesures de temps
-et de mémoire. Un cas n’est classé `pareto_nondominated` que s’il ne dégrade ni
+et de mémoire. Un cas n’est classé `improves_without_baseline_regression` que s’il ne dégrade ni
 la capacité minimale, ni l’AUC de fatigue, ni la saturation PW, et améliore au
 moins une de ces métriques au-delà de tolérances propres à chaque indicateur.
 Ce classement est un filtre de Pareto numérique, jamais une preuve de gain
@@ -214,9 +214,15 @@ seed, de HSL, de Python et des sources critiques. Une reprise n’est acceptée
 que si ce contrat complet est identique. Avant une vraie relance, les anciens
 artefacts du cas sont déplacés dans `previous-attempts`; un code retour nul, un
 NPZ structuré, tous les cycles physiques, les métriques finies, les diagnostics
-KKT et la compilation unique sont ensuite requis. Un préflight `dlopen` et
-symbole MA57 arrête la campagne avant le premier NLP si HSL n’est pas
-chargeable.
+KKT, le chargement réel de tous les tableaux NPZ et la compilation unique sont
+ensuite requis. Le préflight statique ne charge aucune bibliothèque dans le
+processus parent. Un petit NLP IPOPT/MA57 est résolu dans un processus isolé et
+vérifie que la HSL demandée est effectivement mappée. Il distingue un succès
+fonctionnel de `production_ready` : la coexistence locale de `libgfortran` 4/5
+et le diagnostic natif METIS bloquent par défaut toute campagne clinique.
+L’override `--allow-experimental-ma57-runtime` est réservé aux diagnostics et
+reste inscrit dans le contrat. Enfin, les runners n’exécutent aucune campagne
+longue sans le drapeau explicite `--execute`.
 
 Chaque paire doit recevoir exactement le même fichier
 `--common-initial-solution`; sa signature numérique et sa provenance sont
@@ -233,6 +239,14 @@ MA57 ci-dessus remplace le premier essai exploratoire avec MUMPS qui avait
 atteint `maxiter=2000`. Elle n’autorise pas encore de conclusion causale sur
 l’endurance, mais fournit désormais un protocole numérique apparié pour le
 balayage prospectif.
+
+Le runner `.github/scripts/run_prospective_rho_matrix.py` pré-déclare en plus
+les bras historique, réserve terminale et rollout H=5/10/20. Les deux premiers
+sont exécutables avec exactement le même seed, la même charge, la même cadence,
+Radau-5 et MA57. Les trois bras rollout restent censurés comme
+`formulation_unavailable` tant que leur gate de fidélité et leur raccordement
+Bioptim ne sont pas validés ; aucune option fictive et aucune donnée FHO ne sont
+introduites.
 
 ### Niveau 2 — Dommage musculaire marginal
 
@@ -342,21 +356,36 @@ analytique.
 Le CLI `scripts/analyze_rho_endurance_rollout.py` sélectionne explicitement le
 dernier cycle certifié, reconstruit les temps Radau déclarés, aligne `F`, `Cn`,
 `theta`, `omega` et les gains musculaires aux mêmes phases, puis produit les
-horizons 5, 10 et 20. Il vérifie d’abord que l’interpolant peut reproduire la
-dynamique du cycle RHO source avec ses propres états `A`, `Tau1` et `Km`. Un
-échec de ce gate donne `reference_policy_not_reproducible` et un code retour
-non nul ; les projections sont conservées comme diagnostic, mais ne doivent
-pas être interprétées comme une endurance prédite.
+horizons 5, 10 et 20. Trois objets sont volontairement séparés dans le schéma
+de rapport v2 :
 
-Sur l’export certifié IPOPT/MA57 de 150 RHO à `+0.10 N.m`, le fit positif passe
-les audits d’entrée (`RMSE` relative maximale `0.0350`, erreur relative maximale
-`0.1901`). Les projections donnent respectivement, pour H=5/10/20, une pire
-utilisation de `1.20879/1.21562/1.22894` et un minimum final `A/A_rest` de
-`0.809515/0.805371/0.797420`. Elles restent toutefois **non interprétables pour
-l’endurance** : sur les 120 couples muscle–phase du cycle source, 72 inversions
-sont valides, 46 demandent un recrutement négatif et 2 dépassent la capacité.
-Le prochain travail scientifique porte donc sur une reconstruction de `F_dot`
-cohérente avec la collocation/dynamique, pas sur l’augmentation de l’horizon.
+- le gate exact de transcription évalue le défaut de l’ODE de force à chacun
+  des stages Radau où le NLP impose réellement la dynamique (`1e-4 N/s` par
+  défaut) ;
+- le diagnostic local interpole le polynôme de collocation aux midpoints, qui
+  ne sont pas des points contraints ;
+- le gate `adapted_policy_fidelity` évalue la politique Fourier effectivement
+  fournie au rollout : résidu de l’ODE (`10 N/s`), écart entre PW inférée et
+  exportée sur les inversions finies (`10 us`) et couverture minimale de ces
+  inversions (`90 %`).
+
+Tous les échecs d’inversion midpoint restent comptés et localisés, sans clipping,
+mais exiger 120 inversions faisables sur 120 ne serait pas un test valide de la
+transcription Radau. Les quatre seuils sont configurables dans le CLI. Un défaut
+Radau excessif donne `rejected`; une approximation midpoint hors tolérance donne
+`midpoint_approximation_out_of_tolerance`.
+
+Sur l’export certifié IPOPT/MA57 Radau-5 de 150 RHO à `+0.10 N.m`, le fit positif
+passe les audits d’entrée (`RMSE` relative maximale `0.0350`, erreur relative
+maximale `0.1901`). Le défaut exact aux 600 stages vaut au plus
+`7.57e-7 N/s`. Le diagnostic midpoint local passe : 111 inversions sur 120,
+soit `94.2 %`, un résidu maximal de `5.45 N/s` et un écart PW maximal de
+`6.70 us`. Cela explique correctement pourquoi les 9 inversions locales
+ambiguës ne réfutent pas la transcription. En revanche, la politique Fourier
+réellement roulée ne passe pas : couverture `60 %`, résidu maximal
+`324.96 N/s` et écart PW maximal `32.75 us`. Son statut reste donc
+`midpoint_approximation_out_of_tolerance`; les horizons calculés ne sont pas
+validés scientifiquement tant que cette fidélité n’est pas améliorée.
 
 ### Niveaux 5 et 6 — Méthodes avancées
 
@@ -389,14 +418,17 @@ plus simple à différencier et à compiler.
 - [x] interpolation périodique de `F` avec dérivée analytique et audit ;
 - [x] inversion recrutement–PW avec statuts de domaine explicites ;
 - [x] diagnostic composite répété sur 5–20 cycles depuis un export RHO ;
-- [x] gate séparé de reproductibilité dynamique du cycle RHO source ;
-- [ ] reconstruction `F/F_dot` franchissant ce gate sur un export réel.
+- [x] gate exact séparé aux stages Radau du cycle RHO source ;
+- [x] reconstruction locale `F/F_dot` et gate d’approximation midpoint franchis
+  sur un export IPOPT/MA57 réel ;
+- [ ] politique périodique réellement roulée franchissant le gate de fidélité.
 
 Gate du sous-niveau réserve : borne analytique, domaines NumPy/CasADi,
 compilation C et gradients CasADi vérifiés. Gate du rollout : égalité avec des
 solutions analytiques et une intégration DOP853 sur 1 et 100 cycles, extrema
 continus non négatifs, absence de `NaN` et gradients CasADi vérifiés. Ce gate
-numérique est franchi ; le gate de reproduction du cycle RHO réel ne l’est pas.
+numérique est franchi ; les gates Radau et midpoint local du cycle RHO réel le
+sont également, mais le gate de fidélité de la politique Fourier reste ouvert.
 
 ### Étape B — Diagnostic hors ligne sur RHO uniquement
 
@@ -407,6 +439,35 @@ directe du modèle de Ding, pas à un FHO.
 
 Gate : erreur relative d’état inférieure à `1e-8` sur un cycle et `1e-6` sur
 100 cycles ; tendances physiques monotones ; résultats déterministes.
+
+La validation rétrospective est implémentée par
+`scripts/validate_rho_endurance_rollout.py`. Pour une ancre zéro-indexée `k`,
+elle répète la politique du cycle `k` depuis sa frontière finale et compare la
+prédiction `H` cycles plus tard à la frontière finale observée du cycle RHO
+`k+H`. Elle ne charge aucune trajectoire FHO. Les sorties JSON/CSV séparent
+explicitement `processing_status` (calcul exécutable, invalide ou censuré) de
+`scientific_validation_status` (`passed`, `failed`, `incomplete` ou
+`not_evaluable`). Les critères sont fixés dans la configuration avant le calcul
+et restent modifiables par options CLI : nombre minimal d'ancres, RMSE des trois
+états normalisée par leur valeur de repos, RMSE d'utilisation, stabilité de la
+politique PW et accord du muscle critique.
+
+Les seuils par défaut, à enregistrer avant toute campagne, sont : au moins trois
+ancres valides par horizon ; RMSE normalisée par le repos au plus `0.05` pour
+chacun de `A`, `Tau1` et `Km` ; RMSE de l'utilisation maximale au plus `0.10` ;
+RMSE et 95e percentile absolu de dérive PW normalisée au plus `0.10` et `0.20` ;
+accord du muscle critique dans au moins `75 %` des ancres. Le succès du
+traitement ne signifie donc jamais à lui seul que le prédicteur est validé.
+
+La dérive de politique observée entre `k` et `k+H` est rapportée sur
+`(PW-PD0)/(PW_max-PD0)` : biais, RMSE, 95e percentile absolu, maximum, et
+changement de muscle/phase critique. Elle distingue ainsi une erreur du rollout
+d'un changement réel de la politique RHO que l'hypothèse de profil gelé ne peut
+pas prédire. Une utilisation prédite non finie, une couverture incomplète ou un
+état/recrutement prédit non physiologique invalide l'enregistrement et interdit
+la production de métriques. Les PW observées ne bénéficient que d'une tolérance
+de bruit numérique configurable, bornée à `1e-8 s` (`1e-10 s` par défaut) ; les
+excursions tolérées sont listées et les valeurs ne sont jamais clippées.
 
 ### Étape C — Intégration Bioptim désactivée par défaut
 
