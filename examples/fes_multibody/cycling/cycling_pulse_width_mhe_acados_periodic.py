@@ -19,6 +19,19 @@ import traceback
 from types import MethodType, SimpleNamespace
 import warnings
 
+# Avoid nested numerical-library teams on direct CLI/IDE launches.  Explicit
+# caller-provided values still win, which keeps scaling experiments possible.
+for _single_thread_variable in (
+    "OMP_NUM_THREADS",
+    "OMP_THREAD_LIMIT",
+    "OPENBLAS_NUM_THREADS",
+    "BLIS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+):
+    os.environ.setdefault(_single_thread_variable, "1")
+os.environ.setdefault("OMP_DYNAMIC", "FALSE")
+
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -51,6 +64,22 @@ from cocofest.optimization.receding_horizon_initial_guess import (
 from cocofest.optimization.solver_backends import (
     NLP_SOLVER_NAMES,
     configure_nlp_solver,
+)
+from cocofest.optimization.isokinetic_cycling import (
+    ANGLE_TOLERANCE_RAD,
+    ENERGY_TOLERANCE_J,
+    EQUILIBRIUM_TOLERANCE,
+    ROLLOUT_ENERGY_TOLERANCE_J,
+    SPEED_TOLERANCE_RAD_S,
+    TORQUE_BOUND_TOLERANCE_NM,
+    IsokineticCyclingConfig,
+    audit_isokinetic_trajectory,
+    inverse_load_torque,
+)
+from cocofest.optimization.muscle_reserve import (
+    DEFAULT_SMOOTH_MIN_TEMPERATURE,
+    capacity_reserve_metrics,
+    physiological_capacity_ratios,
 )
 from cocofest.dynamics.reduced_cycling import (
     ReducedCyclingDynamics,
@@ -662,6 +691,35 @@ def parse_objectives(raw_objective: str) -> set[str]:
     return values or {"fatigue"}
 
 
+def validate_terminal_reserve_options(weight: float, temperature: float) -> None:
+    """Validate the optional dimensionless terminal reserve penalty."""
+
+    if not np.isfinite(weight) or weight < 0.0:
+        raise ValueError("--terminal-reserve-weight must be finite and non-negative.")
+    if not np.isfinite(temperature) or temperature <= 0.0:
+        raise ValueError(
+            "--terminal-reserve-temperature must be finite and strictly positive."
+        )
+
+
+def should_run_standard_ipopt_warmup(
+    args: argparse.Namespace,
+    *,
+    periodic_cn_sum_approximation: bool,
+) -> bool:
+    """Return whether a generic warmup is needed before the target NLP.
+
+    A certified common initial solution is applied as the target NLP's primal
+    seed. Building and validating a generic warmup first is both redundant and
+    can confound paired objective ablations.
+    """
+    return bool(
+        periodic_cn_sum_approximation
+        and not getattr(args, "disable_standard_ipopt_warmup", False)
+        and getattr(args, "common_initial_solution", None) is None
+    )
+
+
 def parse_crank_assistance(raw_assistance: str) -> float:
     """Convert assistance, or ``signed:<N.m>``, to the cycling torque convention."""
 
@@ -908,6 +966,29 @@ def build_cost_fun_weight(objectives: set[str]) -> list[int]:
     return weights
 
 
+def default_worker_threads() -> int:
+    """Return the physical cores available to this process when detectable."""
+
+    logical_count = os.cpu_count() or 1
+    try:
+        allowed_cpus = os.sched_getaffinity(0)
+    except AttributeError:
+        allowed_cpus = range(logical_count)
+    topology = set()
+    for cpu in allowed_cpus:
+        topology_root = Path(f"/sys/devices/system/cpu/cpu{cpu}/topology")
+        try:
+            topology.add(
+                (
+                    (topology_root / "physical_package_id").read_text().strip(),
+                    (topology_root / "core_id").read_text().strip(),
+                )
+            )
+        except OSError:
+            return len(allowed_cpus)
+    return len(topology) or len(allowed_cpus)
+
+
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -922,10 +1003,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--n-threads",
         type=int,
-        default=os.cpu_count() or 1,
+        default=default_worker_threads(),
         help=(
             "Number of Bioptim/CasADi workers used to evaluate the OCP. "
-            "Defaults to the logical CPU count."
+            "Defaults to the available physical-core count."
         ),
     )
     parser.add_argument(
@@ -968,6 +1049,18 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "reduced formulation currently targets IPOPT and MadNLP validation."
         ),
     )
+    parser.add_argument(
+        "--formulation",
+        choices=("dynamic", "isokinetic"),
+        default="dynamic",
+        help="Use forward dynamics or reduced isokinetic inverse dynamics.",
+    )
+    parser.add_argument("--energy-equivalent-torque", type=float, default=0.2)
+    parser.add_argument(
+        "--isokinetic-omega", type=float, default=-float(2 * np.pi)
+    )
+    parser.add_argument("--load-torque-min", type=float, default=-3.0)
+    parser.add_argument("--load-torque-max", type=float, default=3.0)
     parser.add_argument(
         "--reduced-cycling-profile",
         type=Path,
@@ -1045,6 +1138,22 @@ def build_argument_parser() -> argparse.ArgumentParser:
         choices=("quadratic", "linear"),
         default="quadratic",
         help="Shape of the objective terms passed to bioptim.",
+    )
+    parser.add_argument(
+        "--terminal-reserve-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Optional dimensionless multiplier on a smooth approximation of the "
+            "minimum terminal A/A_scale; its effective Mayer weight is 10000 times "
+            "this value. Zero omits the term entirely."
+        ),
+    )
+    parser.add_argument(
+        "--terminal-reserve-temperature",
+        type=float,
+        default=DEFAULT_SMOOTH_MIN_TEMPERATURE,
+        help="Dimensionless smooth-min temperature for the terminal reserve proxy.",
     )
     parser.add_argument(
         "--control-regularization-weight",
@@ -2241,10 +2350,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--ipopt-hsl-library",
-        default=None,
+        default=os.environ.get("IPOPT_HSL_LIBRARY"),
         help=(
-            "Absolute CoinHSL library passed to IPOPT's hsllib option when "
-            "using MA57. This avoids copying the library into the environment."
+            "CoinHSL library passed to IPOPT's hsllib option when using MA57; "
+            "defaults to IPOPT_HSL_LIBRARY."
         ),
     )
     parser.add_argument(
@@ -2390,6 +2499,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=None,
         choices=(
             "mumps",
+            "ma57",
             "umfpack",
             "lapack_cpu",
             "pardiso_mkl",
@@ -2398,9 +2508,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "cucholesky",
         ),
         help=(
-            "MadNLP C-runtime linear solver. The default is mumps; pardiso_mkl "
-            "requires the x86-64 libMad MKL runtime, and GPU choices require a "
-            "compatible runtime and runner."
+            "MadNLP C-runtime linear solver. The default is mumps; ma57 "
+            "requires a separately built HSL-enabled libMad runtime, "
+            "pardiso_mkl requires the x86-64 MKL runtime, and GPU choices "
+            "require a compatible runtime and runner."
         ),
     )
     parser.add_argument(
@@ -2534,10 +2645,30 @@ def build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--nlp-ipopt-recovery",
+        action="store_true",
+        help=(
+            "After an uncertified reduced IPOPT/MadNLP/Fatrop RHO, restore the "
+            "same frozen RHO with IPOPT and require a final certification by "
+            "the requested target solver before advancing."
+        ),
+    )
+    parser.add_argument("--nlp-ipopt-recovery-max-iterations", type=int, default=2000)
+    parser.add_argument("--nlp-ipopt-recovery-collocation-degree", type=int, default=5)
+    parser.add_argument(
+        "--nlp-ipopt-recovery-linear-solver",
+        type=str,
+        default=None,
+        help=(
+            "Linear solver used by the IPOPT recovery NLP. It defaults to "
+            "--ipopt-linear-solver; an IPOPT target must select a different one."
+        ),
+    )
+    parser.add_argument(
         "--nlp-ipopt-fallback-advance",
         action="store_true",
         help=(
-            "Hybrid reduced-RHO mode for MadNLP/Fatrop: after the final "
+            "Hybrid reduced-RHO mode for IPOPT/MadNLP/Fatrop: after the final "
             "authorized backend failure, let a converged and independently "
             "feasible IPOPT/Radau recovery certify and advance the identical "
             "frozen RHO. The native failure remains in attempt accounting."
@@ -2886,6 +3017,49 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "a failed solve. This prevents a failed primal from being shifted "
             "into the next RHO; use with max-consecutive-failing=2 for a "
             "two-attempt endurance endpoint."
+        ),
+    )
+    parser.add_argument(
+        "--ipopt-madnlp-recovery",
+        action="store_true",
+        help=(
+            "After an uncertified reduced IPOPT RHO, solve the identical "
+            "frozen Radau NLP with MadNLP and require an IPOPT retry before "
+            "advancing."
+        ),
+    )
+    parser.add_argument(
+        "--ipopt-madnlp-recovery-max-iterations", type=int, default=2000
+    )
+    parser.add_argument(
+        "--ipopt-madnlp-recovery-collocation-degree", type=int, default=5
+    )
+    parser.add_argument(
+        "--ipopt-madnlp-recovery-linear-solver",
+        choices=(
+            "mumps",
+            "ma57",
+            "umfpack",
+            "lapack_cpu",
+            "pardiso_mkl",
+            "cudss",
+            "lapack_gpu",
+            "cucholesky",
+        ),
+        default="mumps",
+    )
+    parser.add_argument(
+        "--ipopt-madnlp-recovery-max-wall-time", type=float, default=None
+    )
+    parser.add_argument(
+        "--ipopt-madnlp-recovery-c-compile", action="store_true"
+    )
+    parser.add_argument(
+        "--ipopt-madnlp-fallback-advance",
+        action="store_true",
+        help=(
+            "Allow the final converged and feasible MadNLP/Radau recovery to "
+            "certify a reduced IPOPT RHO and resume IPOPT on the next one."
         ),
     )
     parser.add_argument(
@@ -3324,6 +3498,20 @@ def _cache_root() -> Path:
     return path
 
 
+def _scientific_ocp_source_stamps(repository_root: Path) -> list[dict]:
+    """Stamp shared objective and mechanics sources used by cached OCPs."""
+
+    relative_paths = (
+        "cocofest/custom_objectives.py",
+        "cocofest/optimization/muscle_reserve.py",
+        "cocofest/optimization/isokinetic_cycling.py",
+        "cocofest/models/reduced_cycling_model.py",
+        "cocofest/dynamics/reduced_cycling.py",
+        "examples/fes_multibody/cycling/cycling_pulse_width_mhe.py",
+    )
+    return [_source_stamp(repository_root / path) for path in relative_paths]
+
+
 def _warmup_ipopt_linear_solver(args: argparse.Namespace) -> str:
     """Resolve the solver used to build a target-independent physical seed."""
 
@@ -3390,6 +3578,7 @@ def _warmup_cache_signature(
     simulation_conditions: dict,
     cycling_info: dict,
 ) -> str:
+    repository_root = Path(__file__).resolve().parents[3]
     payload = {
         "kind": "warmup",
         "nmpc_builder_version": 4,
@@ -3398,6 +3587,8 @@ def _warmup_cache_signature(
         "stimulations_per_cycle": args.stimulations_per_cycle,
         "objective": args.objective,
         "objective_shape": args.objective_shape,
+        "terminal_reserve_weight": args.terminal_reserve_weight,
+        "terminal_reserve_temperature": args.terminal_reserve_temperature,
         "terminal_wheel_regularization_weight": (
             _terminal_wheel_objective_weight(args)
         ),
@@ -3419,23 +3610,8 @@ def _warmup_cache_signature(
         ),
         "cycling_info_keys": sorted(cycling_info.keys()),
         "sources": [
+            *_scientific_ocp_source_stamps(repository_root),
             _source_stamp(model_path),
-            _source_stamp(
-                (
-                    Path(__file__).resolve().parents[3]
-                    / "cocofest"
-                    / "custom_objectives.py"
-                ).resolve()
-            ),
-            _source_stamp(
-                (
-                    Path(__file__).resolve().parents[3]
-                    / "examples"
-                    / "fes_multibody"
-                    / "cycling"
-                    / "cycling_pulse_width_mhe.py"
-                ).resolve()
-            ),
             _source_stamp(
                 (
                     Path(__file__).resolve().parents[3]
@@ -3470,6 +3646,8 @@ def _standard_warmup_metadata(args: argparse.Namespace) -> dict:
         "stimulations_per_cycle": int(args.stimulations_per_cycle),
         "objective": str(args.objective),
         "objective_shape": str(args.objective_shape),
+        "terminal_reserve_weight": float(args.terminal_reserve_weight),
+        "terminal_reserve_temperature": float(args.terminal_reserve_temperature),
         "signed_crank_torque_nm": float(args.constant_crank_torque),
         "crank_torque_role": torque["role"],
         "torque_application": str(args.torque_application),
@@ -3511,12 +3689,18 @@ def _validate_standard_warmup_seed(
         "stimulations_per_cycle": int(args.stimulations_per_cycle),
         "objective": str(args.objective),
         "objective_shape": str(args.objective_shape),
+        "terminal_reserve_weight": float(args.terminal_reserve_weight),
+        "terminal_reserve_temperature": float(args.terminal_reserve_temperature),
         "torque_application": str(args.torque_application),
     }
+    legacy_defaults = {
+        "terminal_reserve_weight": 0.0,
+        "terminal_reserve_temperature": DEFAULT_SMOOTH_MIN_TEMPERATURE,
+    }
     mismatches = {
-        key: (metadata.get(key), target)
+        key: (metadata.get(key, legacy_defaults.get(key)), target)
         for key, target in exact_fields.items()
-        if metadata.get(key) != target
+        if metadata.get(key, legacy_defaults.get(key)) != target
     }
     if mismatches:
         raise ValueError(
@@ -3585,11 +3769,16 @@ def _validate_standard_warmup_seed(
         or np.asarray(values).shape[1] != expected_control_nodes
     }
     pulse_width_keys = [key for key in controls if key.startswith("last_pulse_width_")]
+    has_full_mechanics = "q" in states and "qdot" in states
+    has_reduced_mechanics = "theta" in states and "omega" in states
+    mechanics_compatible = has_full_mechanics or (
+        getattr(args, "mechanical_formulation", "full") == "reduced"
+        and has_reduced_mechanics
+    )
     if (
         invalid_trajectories
         or invalid_control_nodes
-        or "q" not in states
-        or "qdot" not in states
+        or not mechanics_compatible
         or not pulse_width_keys
     ):
         raise ValueError(
@@ -3688,7 +3877,7 @@ def _warmup_cache_path(
 def _periodic_ipopt_refinement_cache_path(
     args: argparse.Namespace,
     model_path: Path,
-    cache_version: int = 6,
+    cache_version: int = 8,
 ) -> Path:
     repository_root = Path(__file__).resolve().parents[3]
     payload = {
@@ -3700,10 +3889,19 @@ def _periodic_ipopt_refinement_cache_path(
         ),
         "ding_sum_stim_truncation": getattr(args, "ding_sum_stim_truncation", 6),
         "mechanical_formulation": args.mechanical_formulation,
+        "formulation": getattr(args, "formulation", "dynamic"),
+        "isokinetic_omega": getattr(args, "isokinetic_omega", None),
+        "energy_equivalent_torque": getattr(
+            args, "energy_equivalent_torque", None
+        ),
+        "load_torque_min": getattr(args, "load_torque_min", None),
+        "load_torque_max": getattr(args, "load_torque_max", None),
         "cycles_per_window": args.cycles_per_window,
         "stimulations_per_cycle": args.stimulations_per_cycle,
         "objective": args.objective,
         "objective_shape": args.objective_shape,
+        "terminal_reserve_weight": args.terminal_reserve_weight,
+        "terminal_reserve_temperature": args.terminal_reserve_temperature,
         "terminal_wheel_regularization_weight": (
             _terminal_wheel_objective_weight(args)
         ),
@@ -3746,12 +3944,6 @@ def _periodic_ipopt_refinement_cache_path(
             _source_stamp(
                 repository_root / "cocofest" / "models" / "dynamical_model.py"
             ),
-            _source_stamp(
-                repository_root / "cocofest" / "dynamics" / "reduced_cycling.py"
-            ),
-            _source_stamp(
-                repository_root / "cocofest" / "models" / "reduced_cycling_model.py"
-            ),
         ],
     }
     if cache_version >= 3:
@@ -3769,6 +3961,16 @@ def _periodic_ipopt_refinement_cache_path(
                 "kinematic_order": 12,
                 "dynamics_order": 12,
             }
+        )
+    if cache_version >= 8:
+        # A cached refinement is a concrete IPOPT solution, hence it must not
+        # be reused across sparse-factorization implementations.  The HSL
+        # binary stamp also avoids treating two locally built MA57 libraries as
+        # interchangeable merely because they share the same filename.
+        hsl_library = getattr(args, "ipopt_hsl_library", None)
+        payload["ipopt_linear_solver"] = getattr(args, "ipopt_linear_solver", None)
+        payload["ipopt_hsl_library"] = (
+            _source_stamp(Path(hsl_library)) if hsl_library is not None else None
         )
     return _cache_root() / f"periodic_ipopt_{_short_hash(payload)}.npz"
 
@@ -3791,12 +3993,22 @@ def _acados_seed_cache_path(args: argparse.Namespace, model_path: Path) -> Path 
     )
     payload = {
         "kind": "acados_seed",
-        "cache_version": 3,
+        "cache_version": 4,
         "model_formulation": args.model_formulation,
+        "mechanical_formulation": args.mechanical_formulation,
+        "formulation": getattr(args, "formulation", "dynamic"),
+        "isokinetic_omega": getattr(args, "isokinetic_omega", None),
+        "energy_equivalent_torque": getattr(
+            args, "energy_equivalent_torque", None
+        ),
+        "load_torque_min": getattr(args, "load_torque_min", None),
+        "load_torque_max": getattr(args, "load_torque_max", None),
         "cycles_per_window": args.cycles_per_window,
         "stimulations_per_cycle": args.stimulations_per_cycle,
         "objective": args.objective,
         "objective_shape": args.objective_shape,
+        "terminal_reserve_weight": args.terminal_reserve_weight,
+        "terminal_reserve_temperature": args.terminal_reserve_temperature,
         "terminal_wheel_regularization_weight": (
             _terminal_wheel_objective_weight(args)
         ),
@@ -3809,14 +4021,17 @@ def _acados_seed_cache_path(args: argparse.Namespace, model_path: Path) -> Path 
         "sim_stages": args.acados_sim_stages,
         "sim_steps": args.acados_sim_steps,
         "newton_iter": args.acados_newton_iter,
-        "model_source": _source_stamp(
-            Path(__file__).resolve().parents[3]
+        "sources": [
+            *_scientific_ocp_source_stamps(Path(__file__).resolve().parents[3]),
+            _source_stamp(
+                Path(__file__).resolve().parents[3]
             / "cocofest"
             / "models"
             / "ding2007"
             / "ding2007_with_fatigue_periodic_node.py"
-        ),
-        "model_path": _source_stamp(model_path),
+            ),
+            _source_stamp(model_path),
+        ],
     }
     return _cache_root() / f"acados_seed_{safe_tag}_{_short_hash(payload)}.npz"
 
@@ -3876,6 +4091,14 @@ def _terminal_wheel_q_target_slack(args: argparse.Namespace) -> float:
 def _common_initial_solution_metadata(args: argparse.Namespace) -> dict:
     """Describe the physical OCP represented by a shared target seed."""
 
+    terminal_reserve_weight = float(getattr(args, "terminal_reserve_weight", 0.0))
+    terminal_reserve_temperature = float(
+        getattr(
+            args,
+            "terminal_reserve_temperature",
+            DEFAULT_SMOOTH_MIN_TEMPERATURE,
+        )
+    )
     terminal_homotopy_slacks = getattr(
         args, "acados_terminal_wheel_q_homotopy_slacks", None
     )
@@ -3892,13 +4115,25 @@ def _common_initial_solution_metadata(args: argparse.Namespace) -> dict:
         ),
     )
     return {
-        "schema": "cocofest-common-periodic-initial-solution-v2",
+        "schema": "cocofest-common-periodic-initial-solution-v3",
         "model_formulation": args.model_formulation,
         "mechanical_formulation": args.mechanical_formulation,
+        "formulation": getattr(args, "formulation", "dynamic"),
+        "isokinetic_omega": getattr(args, "isokinetic_omega", None),
+        "energy_equivalent_torque": getattr(
+            args, "energy_equivalent_torque", None
+        ),
+        "load_torque_min": getattr(args, "load_torque_min", None),
+        "load_torque_max": getattr(args, "load_torque_max", None),
         "cycles_per_window": int(args.cycles_per_window),
         "stimulations_per_cycle": int(args.stimulations_per_cycle),
         "objective": sorted(parse_objectives(args.objective)),
         "objective_shape": args.objective_shape,
+        "terminal_reserve_weight": terminal_reserve_weight,
+        "terminal_reserve_temperature": terminal_reserve_temperature,
+        "terminal_reserve_effective_weight": float(
+            10000.0 * terminal_reserve_weight
+        ),
         "constant_crank_torque": float(args.constant_crank_torque),
         # ``constant_crank_torque`` is already signed, but preserve its
         # interpretation explicitly. An offline terminal-set dataset must not
@@ -4013,6 +4248,75 @@ def _receding_horizon_solution_metadata(
         }
     )
     return metadata
+
+
+def attach_terminal_capacity_reserve_diagnostics(
+    summary: dict,
+    capacity_scales: dict[str, float],
+    *,
+    temperature: float,
+) -> None:
+    """Report the hard terminal reserve beside its smooth optimization proxy."""
+
+    state_traces = summary.get("state_traces") or {}
+    expected_keys = sorted(capacity_scales)
+    missing_keys = [key for key in expected_keys if key not in state_traces]
+    if missing_keys:
+        summary["terminal_capacity_reserve"] = {
+            "available": False,
+            "reason": "missing_capacity_state_traces",
+            "missing_state_keys": missing_keys,
+        }
+        return
+    keys = expected_keys
+    if not keys:
+        summary["terminal_capacity_reserve"] = {
+            "available": False,
+            "reason": "no_capacity_scales",
+        }
+        return
+    physiological_tolerance = 1e-6
+    try:
+        capacities = np.asarray(
+            [np.asarray(state_traces[key], dtype=float).reshape(-1)[-1] for key in keys]
+        )
+        scales = np.asarray([capacity_scales[key] for key in keys], dtype=float)
+        metrics = capacity_reserve_metrics(
+            capacities,
+            scales,
+            temperature=temperature,
+        )
+    except (IndexError, TypeError, ValueError) as error:
+        summary["terminal_capacity_reserve"] = {
+            "available": False,
+            "reason": "invalid_capacity_state_trace",
+            "error": f"{type(error).__name__}: {error}",
+        }
+        return
+    try:
+        physiological_capacity_ratios(
+            capacities,
+            scales,
+            tolerance=physiological_tolerance,
+        )
+        physiological_domain_valid = True
+        physiological_domain_error = None
+    except ValueError as error:
+        physiological_domain_valid = False
+        physiological_domain_error = str(error)
+    summary["terminal_capacity_reserve"] = {
+        "available": True,
+        "state_keys": keys,
+        "temperature": float(temperature),
+        "minimum_ratio": metrics.minimum_ratio,
+        "smooth_minimum_ratio": metrics.smooth_minimum_ratio,
+        "optimism_gap": metrics.optimism_gap,
+        "maximum_optimism_gap": metrics.maximum_optimism_gap,
+        "penalty": metrics.penalty,
+        "physiological_domain_valid": physiological_domain_valid,
+        "physiological_domain_tolerance": physiological_tolerance,
+        "physiological_domain_error": physiological_domain_error,
+    }
 
 
 def _save_receding_horizon_solution(
@@ -4167,6 +4471,11 @@ def _validate_common_initial_solution_metadata(
         "schema",
         "model_formulation",
         "mechanical_formulation",
+        "formulation",
+        "isokinetic_omega",
+        "energy_equivalent_torque",
+        "load_torque_min",
+        "load_torque_max",
         "cycles_per_window",
         "stimulations_per_cycle",
         "objective",
@@ -4400,8 +4709,16 @@ def _continuation_cache_signature(args: argparse.Namespace) -> str:
         "cache_version": 3,
         "nmpc_builder_version": 2,
         "model_formulation": args.model_formulation,
+        "mechanical_formulation": args.mechanical_formulation,
+        "formulation": getattr(args, "formulation", "dynamic"),
+        "isokinetic_omega": getattr(args, "isokinetic_omega", None),
+        "energy_equivalent_torque": getattr(args, "energy_equivalent_torque", None),
+        "load_torque_min": getattr(args, "load_torque_min", None),
+        "load_torque_max": getattr(args, "load_torque_max", None),
         "objective": args.objective,
         "objective_shape": args.objective_shape,
+        "terminal_reserve_weight": args.terminal_reserve_weight,
+        "terminal_reserve_temperature": args.terminal_reserve_temperature,
         "terminal_wheel_regularization_weight": (
             _terminal_wheel_objective_weight(args)
         ),
@@ -4456,6 +4773,7 @@ def _continuation_cache_signature(args: argparse.Namespace) -> str:
         "pulse_width_trust_radius": args.acados_pulse_width_trust_radius,
         "fes_state_trust_radius": args.acados_fes_state_trust_radius,
         "sources": [
+            *_scientific_ocp_source_stamps(repository_root),
             _source_stamp(
                 repository_root
                 / "cocofest"
@@ -4495,6 +4813,12 @@ def _horizon_seed_cache_signature(args: argparse.Namespace) -> str:
         "cache_version": 5,
         "nmpc_builder_version": 2,
         "model_formulation": args.model_formulation,
+        "mechanical_formulation": args.mechanical_formulation,
+        "formulation": getattr(args, "formulation", "dynamic"),
+        "isokinetic_omega": getattr(args, "isokinetic_omega", None),
+        "energy_equivalent_torque": getattr(args, "energy_equivalent_torque", None),
+        "load_torque_min": getattr(args, "load_torque_min", None),
+        "load_torque_max": getattr(args, "load_torque_max", None),
         "activate_passive_force_relationship": getattr(
             args, "activate_passive_force_relationship", True
         ),
@@ -4503,6 +4827,8 @@ def _horizon_seed_cache_signature(args: argparse.Namespace) -> str:
         "stimulations_per_cycle": args.stimulations_per_cycle,
         "objective": args.objective,
         "objective_shape": args.objective_shape,
+        "terminal_reserve_weight": args.terminal_reserve_weight,
+        "terminal_reserve_temperature": args.terminal_reserve_temperature,
         "terminal_wheel_regularization_weight": (
             _terminal_wheel_objective_weight(args)
         ),
@@ -4545,6 +4871,7 @@ def _horizon_seed_cache_signature(args: argparse.Namespace) -> str:
         "wheel_q_path_margin": args.acados_wheel_q_path_margin,
         "project_qdot_from_q": args.acados_project_qdot_from_q,
         "sources": [
+            *_scientific_ocp_source_stamps(repository_root),
             _source_stamp(
                 repository_root
                 / "cocofest"
@@ -4584,6 +4911,12 @@ def _codegen_signature(args: argparse.Namespace) -> str:
         "solver": args.solver,
         "transcription_profile": getattr(args, "transcription_profile", None),
         "model_formulation": args.model_formulation,
+        "mechanical_formulation": args.mechanical_formulation,
+        "formulation": getattr(args, "formulation", "dynamic"),
+        "isokinetic_omega": getattr(args, "isokinetic_omega", None),
+        "energy_equivalent_torque": getattr(args, "energy_equivalent_torque", None),
+        "load_torque_min": getattr(args, "load_torque_min", None),
+        "load_torque_max": getattr(args, "load_torque_max", None),
         "activate_passive_force_relationship": getattr(
             args, "activate_passive_force_relationship", True
         ),
@@ -4597,6 +4930,8 @@ def _codegen_signature(args: argparse.Namespace) -> str:
         "collocation_method": args.collocation_method,
         "objective": args.objective,
         "objective_shape": args.objective_shape,
+        "terminal_reserve_weight": args.terminal_reserve_weight,
+        "terminal_reserve_temperature": args.terminal_reserve_temperature,
         "constant_crank_torque": args.constant_crank_torque,
         "use_sx": args.use_sx,
         "enforce_start_constraints": args.enforce_start_constraints,
@@ -4690,6 +5025,7 @@ def _codegen_signature(args: argparse.Namespace) -> str:
         "acados_store_iterates": args.acados_store_iterates,
         "acados_print_level": args.acados_print_level,
         "sources": [
+            *_scientific_ocp_source_stamps(repository_root),
             _source_stamp(
                 (
                     Path(__file__).resolve().parents[3]
@@ -5132,7 +5468,11 @@ def certified_physical_receding_solution(
                 or getattr(solution, "_cocofest_fallback_solution", None) is not None
             ),
             "certifier": (
-                "ipopt_radau"
+                getattr(
+                    getattr(solution, "_cocofest_fallback_solution", None),
+                    "_cocofest_hybrid_certifier",
+                    "recovery_nlp",
+                )
                 if getattr(solution, "_cocofest_fallback_solution", None) is not None
                 else "target_solver"
             ),
@@ -8327,7 +8667,7 @@ def _native_solver_status(nmpc) -> str | None:
 
 
 def snapshot_nlp_solver_stats(nmpc) -> dict:
-    """Keep CasADi oracle timings needed to interpret linear-solver screens."""
+    """Keep compact CasADi timing and convergence diagnostics."""
 
     interface = getattr(nmpc, "ocp_solver", None)
     casadi_solver = getattr(interface, "shaked_ocp_solver", None)
@@ -8336,7 +8676,7 @@ def snapshot_nlp_solver_stats(nmpc) -> dict:
     stats = casadi_solver.stats()
     if not isinstance(stats, dict):
         return {}
-    return {
+    snapshot = {
         key: value
         for key, value in stats.items()
         if key.startswith(("t_wall_", "t_proc_", "n_call_"))
@@ -8350,6 +8690,37 @@ def snapshot_nlp_solver_stats(nmpc) -> dict:
             "madnlp",
         }
     }
+    iteration_diagnostics = {}
+    iterations = stats.get("iterations")
+    if isinstance(iterations, dict):
+        for key in (
+            "inf_pr",
+            "inf_du",
+            "mu",
+            "d_norm",
+            "regularization_size",
+            "alpha_pr",
+            "alpha_du",
+            "ls_trials",
+            "obj",
+        ):
+            try:
+                values = np.asarray(iterations.get(key), dtype=float).reshape(-1)
+            except (TypeError, ValueError):
+                continue
+            if values.size == 0:
+                continue
+            finite = values[np.isfinite(values)]
+            iteration_diagnostics[key] = {
+                "count": int(values.size),
+                "initial": float(values[0]) if np.isfinite(values[0]) else None,
+                "final": float(values[-1]) if np.isfinite(values[-1]) else None,
+                "minimum": float(np.min(finite)) if finite.size else None,
+                "maximum": float(np.max(finite)) if finite.size else None,
+            }
+    if iteration_diagnostics:
+        snapshot["iteration_diagnostics"] = iteration_diagnostics
+    return snapshot
 
 
 def enable_exact_initial_nlp_audit(nmpc, solver) -> None:
@@ -9233,6 +9604,285 @@ def build_single_shot_summary(
         "diagnostics": diagnostics,
         "success": bool(solver_success and physical_success),
     }
+
+
+def _strictly_increasing_solution_samples(time_s, traces):
+    """Collapse duplicate integrator endpoints while retaining right limits."""
+
+    time = np.asarray(time_s, dtype=float).reshape(-1)
+    arrays = [np.atleast_2d(np.asarray(trace, dtype=float)) for trace in traces]
+    if any(trace.shape[1] != time.size for trace in arrays):
+        raise ValueError("Every dense state trace must share the solution time grid.")
+    retained = []
+    for index, value in enumerate(time):
+        if not retained:
+            retained.append(index)
+            continue
+        previous_value = time[retained[-1]]
+        tolerance = 1e-12 * max(1.0, abs(value), abs(previous_value))
+        if value < previous_value - tolerance:
+            raise ValueError("The dense solution time grid is not non-decreasing.")
+        if abs(value - previous_value) <= tolerance:
+            retained[-1] = index
+        else:
+            retained.append(index)
+    retained = np.asarray(retained, dtype=int)
+    return time[retained], [trace[:, retained] for trace in arrays]
+
+
+def _collocation_energy_quadrature(
+    states, config, reduced_dynamics, *, interval_count, degree, method
+):
+    """Recalculate work with the transcription's collocation weights."""
+
+    from casadi import collocation_coeff, collocation_points
+
+    expected_columns = interval_count * (degree + 1) + 1
+    if np.atleast_2d(states["theta"]).shape[1] != expected_columns:
+        raise ValueError(
+            "The decision-state layout does not expose every Radau stage "
+            f"({np.atleast_2d(states['theta']).shape[1]} columns, expected "
+            f"{expected_columns})."
+        )
+    method = str(method).lower()
+    roots = [0.0] + collocation_points(degree, method)
+    _, _, weights = collocation_coeff(roots)
+    weights = np.asarray(weights, dtype=float).reshape(-1)[1:]
+    dt = config.duration_s / interval_count
+    work = 0.0
+    for interval in range(interval_count):
+        columns = interval * (degree + 1) + np.arange(1, degree + 1)
+        for weight, column in zip(weights, columns, strict=True):
+            theta = float(np.atleast_2d(states["theta"])[0, column])
+            forces = np.asarray(
+                [
+                    np.atleast_2d(states[f"F_{name}"])[0, column]
+                    for name in reduced_dynamics.muscle_names
+                ],
+                dtype=float,
+            )
+            load = inverse_load_torque(
+                reduced_dynamics,
+                theta,
+                config.omega_target_rad_s,
+                forces,
+            )
+            b_ext = reduced_dynamics.coefficient_values(theta)[
+                "external_torque_effectiveness"
+            ]
+            work += (
+                float(weight)
+                * dt
+                * -load
+                * b_ext
+                * config.omega_target_rad_s
+            )
+    return float(work)
+
+
+def audit_isokinetic_solution(sol, config, reduced_dynamics):
+    """Audit one solved OCP window and reconstruct its eliminated load."""
+
+    nlp = sol.ocp.nlp[0]
+    is_collocation = bool(
+        nlp.dynamics_type.ode_solver.is_direct_collocation
+    )
+    if is_collocation:
+        states = sol.decision_states(to_merge=SolutionMerge.NODES)
+        time = sol.decision_time(to_merge=SolutionMerge.NODES).T[0]
+        sample_source = "decision_radau_stages"
+    else:
+        try:
+            states = sol.stepwise_states(to_merge=SolutionMerge.NODES)
+            time = sol.stepwise_time(to_merge=SolutionMerge.NODES).T[0]
+            sample_source = "dense_stepwise"
+        except Exception:
+            states = sol.decision_states(to_merge=SolutionMerge.NODES)
+            time = sol.decision_time(to_merge=SolutionMerge.NODES).T[0]
+            sample_source = "shooting_nodes_fallback"
+
+    required_keys = ["theta", "omega", "E_prod"] + [
+        f"F_{name}" for name in reduced_dynamics.muscle_names
+    ]
+    missing = [key for key in required_keys if key not in states]
+    if missing:
+        raise ValueError(f"Missing isokinetic state traces: {missing}.")
+    ordered_traces = [states[key] for key in required_keys]
+    time, ordered_traces = _strictly_increasing_solution_samples(
+        time, ordered_traces
+    )
+    state = dict(zip(required_keys, ordered_traces, strict=True))
+    theta = state["theta"][0]
+    omega = state["omega"][0]
+    energy = state["E_prod"][0]
+    forces = np.vstack(
+        [state[f"F_{name}"][0] for name in reduced_dynamics.muscle_names]
+    )
+    load = np.asarray(
+        [
+            inverse_load_torque(
+                reduced_dynamics,
+                theta[node],
+                config.omega_target_rad_s,
+                forces[:, node],
+            )
+            for node in range(time.size)
+        ],
+        dtype=float,
+    )
+    audit = audit_isokinetic_trajectory(
+        config,
+        reduced_dynamics,
+        time,
+        theta,
+        omega,
+        forces,
+        load,
+        energy,
+    )
+    if is_collocation:
+        degree = int(nlp.dynamics_type.ode_solver.polynomial_degree)
+        interval_count = int(nlp.ns)
+        collocation_method = str(nlp.dynamics_type.ode_solver.method).lower()
+        collocation_energy = _collocation_energy_quadrature(
+            states,
+            config,
+            reduced_dynamics,
+            interval_count=interval_count,
+            degree=degree,
+            method=collocation_method,
+        )
+        audit["collocation_method"] = collocation_method
+        audit["collocation_quadrature_energy_j"] = collocation_energy
+        audit["collocation_quadrature_energy_target_error_j"] = float(
+            abs(collocation_energy - config.energy_target_j)
+        )
+    audit.update(
+        {
+            "sample_source": sample_source,
+            "sample_count": int(time.size),
+            "minimum_load_torque_nm": float(np.min(load)),
+            "maximum_load_torque_nm": float(np.max(load)),
+            "resistive_sample_fraction": float(np.mean(load > 0.0)),
+            "assistive_sample_fraction": float(np.mean(load < 0.0)),
+        }
+    )
+    return audit, {
+        "time_s": time,
+        "theta_rad": theta,
+        "omega_rad_s": omega,
+        "energy_prod_j": energy,
+        "load_torque_nm": load,
+    }
+
+
+def attach_isokinetic_audits(
+    summary, config, reduced_dynamics, nmpc, capacity_scales
+):
+    """Attach per-window scientific certificates and make them success gates."""
+
+    audits = []
+    load_traces = []
+    for window_index, solution in enumerate(summary.get("window_solutions") or []):
+        try:
+            audit, load_trace = audit_isokinetic_solution(
+                solution, config, reduced_dynamics
+            )
+            state_traces = {
+                key: np.asarray(values)
+                for key, values in solution.decision_states(
+                    to_merge=SolutionMerge.NODES
+                ).items()
+            }
+            control_traces = {
+                key: np.asarray(values)
+                for key, values in solution.decision_controls(
+                    to_merge=SolutionMerge.NODES
+                ).items()
+            }
+            high_accuracy = high_accuracy_trace_rollout_diagnostics(
+                nmpc,
+                state_traces,
+                control_traces,
+                cycle_count=config.number_of_turns,
+                capacity_scales=capacity_scales,
+            )
+            reference_energy = float(
+                high_accuracy["final_reference_state"]["E_prod"][0]
+            )
+            high_accuracy_energy_error = abs(
+                reference_energy - config.energy_target_j
+            )
+            audit["high_accuracy_rollout"] = high_accuracy
+            audit["high_accuracy_energy_j"] = reference_energy
+            audit["high_accuracy_energy_target_error_j"] = float(
+                high_accuracy_energy_error
+            )
+            # The trapezoidal value retained above is a diagnostic only: its
+            # accuracy depends on plotting density. Certification uses the
+            # adaptive DOP853 rollout of the exact ODE and PW sequence.
+            audit["quadrature_is_certification_gate"] = False
+            if "collocation_quadrature_energy_target_error_j" in audit:
+                certification_energy_error = audit[
+                    "collocation_quadrature_energy_target_error_j"
+                ]
+                certification_energy_method = "collocation_quadrature_and_DOP853"
+            else:
+                certification_energy_error = audit[
+                    "terminal_energy_target_error_j"
+                ]
+                certification_energy_method = "terminal_state_and_DOP853"
+            audit["certification_energy_method"] = certification_energy_method
+            audit["certification_energy_target_error_j"] = float(
+                certification_energy_error
+            )
+            dense_load_audit = high_accuracy.get(
+                "dense_isokinetic_load_audit"
+            )
+            dense_load_is_bounded = bool(
+                dense_load_audit is not None
+                and dense_load_audit[
+                    "maximum_load_torque_bound_violation_nm"
+                ]
+                <= TORQUE_BOUND_TOLERANCE_NM
+            )
+            audit["passes_tolerance"] = bool(
+                audit["finite"]
+                and audit["sample_source"] != "shooting_nodes_fallback"
+                and audit["maximum_speed_error_rad_s"] <= SPEED_TOLERANCE_RAD_S
+                and audit["terminal_angle_error_rad"] <= ANGLE_TOLERANCE_RAD
+                and audit["maximum_equilibrium_residual"]
+                <= EQUILIBRIUM_TOLERANCE
+                and audit["terminal_energy_target_error_j"]
+                <= ENERGY_TOLERANCE_J
+                and audit["maximum_load_torque_bound_violation_nm"]
+                <= TORQUE_BOUND_TOLERANCE_NM
+                and certification_energy_error <= ENERGY_TOLERANCE_J
+                and high_accuracy_energy_error
+                <= ROLLOUT_ENERGY_TOLERANCE_J
+                and dense_load_is_bounded
+            )
+        except Exception as exc:
+            audit = {
+                "finite": False,
+                "passes_tolerance": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            load_trace = {}
+        audit["window"] = int(window_index)
+        audits.append(audit)
+        load_traces.append(load_trace)
+    requested = 1 if summary.get("mode") == "single_shot" else int(
+        summary.get("requested_windows") or 0
+    )
+    certified = len(audits) >= requested and all(
+        audit.get("passes_tolerance", False) for audit in audits[:requested]
+    )
+    summary["isokinetic_audits"] = audits
+    summary["isokinetic_load_torque_traces"] = load_traces
+    summary["isokinetic_scientific_success"] = bool(certified)
+    summary["physical_success"] = bool(summary.get("physical_success") and certified)
+    summary["success"] = bool(summary.get("solver_success") and summary["physical_success"])
 
 
 def audit_mechanical_trajectory(
@@ -10438,6 +11088,16 @@ def high_accuracy_trace_rollout_diagnostics(
     maximum_endpoint_error_interval = None
     maximum_absolute_by_state = {key: 0.0 for key in nlp.states.keys()}
     reference_evaluations = 0
+    dense_load_minimum = float("inf")
+    dense_load_maximum = -float("inf")
+    dense_load_sample_count = 0
+    model_container = getattr(nlp, "model", None)
+    isokinetic_model = getattr(model_container, "bio_model", model_container)
+    audit_dense_load = bool(
+        getattr(isokinetic_model, "isokinetic", False)
+        and hasattr(isokinetic_model, "reduced_dynamics")
+        and "theta" in nlp.states
+    )
     state_scales = np.maximum(
         np.maximum(np.ptp(states, axis=1), np.max(np.abs(states), axis=1)), 1.0
     )
@@ -10492,6 +11152,7 @@ def high_accuracy_trace_rollout_diagnostics(
             method="DOP853",
             rtol=1e-11,
             atol=1e-13,
+            dense_output=audit_dense_load,
         )
         if not reference.success:
             raise RuntimeError(
@@ -10500,6 +11161,30 @@ def high_accuracy_trace_rollout_diagnostics(
             )
         augmented = reference.y[:, -1]
         reference_evaluations += int(reference.nfev)
+        if audit_dense_load:
+            dense_times = np.linspace(
+                interval_start, interval_start + dt, 65
+            )
+            dense_states = reference.sol(dense_times)[:n_states]
+            theta_index = int(
+                np.asarray(nlp.states["theta"].index).reshape(-1)[0]
+            )
+            force_indexes = [
+                int(
+                    np.asarray(nlp.states[f"F_{name}"].index).reshape(-1)[0]
+                )
+                for name in isokinetic_model.reduced_dynamics.muscle_names
+            ]
+            for sample in range(dense_states.shape[1]):
+                dense_load = inverse_load_torque(
+                    isokinetic_model.reduced_dynamics,
+                    dense_states[theta_index, sample],
+                    isokinetic_model.isokinetic_omega,
+                    dense_states[force_indexes, sample],
+                )
+                dense_load_minimum = min(dense_load_minimum, dense_load)
+                dense_load_maximum = max(dense_load_maximum, dense_load)
+                dense_load_sample_count += 1
         endpoint_error = augmented[:n_states] - states[:, interval + 1]
         interval_maximum_absolute_error = float(np.max(np.abs(endpoint_error)))
         if (
@@ -10554,6 +11239,23 @@ def high_accuracy_trace_rollout_diagnostics(
             }
         )
 
+    dense_load_summary = None
+    isokinetic_config = getattr(nmpc, "isokinetic_config", None)
+    if audit_dense_load and isokinetic_config is not None:
+        dense_load_summary = {
+            "samples_per_interval": 65,
+            "sample_count": int(dense_load_sample_count),
+            "minimum_load_torque_nm": float(dense_load_minimum),
+            "maximum_load_torque_nm": float(dense_load_maximum),
+            "maximum_load_torque_bound_violation_nm": float(
+                max(
+                    isokinetic_config.load_torque_min_nm - dense_load_minimum,
+                    dense_load_maximum - isokinetic_config.load_torque_max_nm,
+                    0.0,
+                )
+            ),
+        }
+
     return {
         "available": True,
         "method": "DOP853_continuous_RHO_trace",
@@ -10567,6 +11269,14 @@ def high_accuracy_trace_rollout_diagnostics(
         "maximum_scaled_endpoint_error": maximum_scaled_endpoint_error,
         "maximum_endpoint_error_interval": maximum_endpoint_error_interval,
         "maximum_absolute_endpoint_error_by_state": maximum_absolute_by_state,
+        "dense_isokinetic_load_audit": dense_load_summary,
+        "final_reference_state": {
+            key: np.asarray(
+                augmented[np.asarray(nlp.states[key].index).reshape(-1)],
+                dtype=float,
+            ).tolist()
+            for key in nlp.states.keys()
+        },
         "executed_fatigue_objective": float(
             objective_weight * np.sum(objective_values)
         ),
@@ -14058,18 +14768,20 @@ class _WarmupSolutionAdapter:
         return self._controls
 
 
-def certified_ipopt_fallback_adapter(
+def certified_recovery_fallback_adapter(
     periodic_nmpc,
     solution,
     feasibility: dict[str, object],
+    *,
+    certifier: str,
 ) -> _WarmupSolutionAdapter:
-    """Represent a certified Radau solution on the ACADOS shooting grid.
+    """Represent a certified recovery solution on the target shooting grid.
 
-    IPOPT/Radau contains internal collocation states.  Keeping those denser
-    nodes in an otherwise IRK/ACADOS RHO trace would overweight the fallback
-    cycle in fatigue integrals and would make the next cyclic shift
-    inconsistent.  This adapter retains only the target shooting grid while
-    preserving the IPOPT certification and timing metadata.
+    A recovery NLP may contain a different number of internal collocation
+    states. Keeping those nodes in the target RHO trace would overweight the
+    fallback cycle in fatigue integrals and make the next cyclic shift
+    inconsistent. This adapter retains only the target grid while preserving
+    the independent certification and timing metadata.
     """
 
     adapted = _adapt_warmup_solution_to_periodic_nodes(periodic_nmpc, solution)
@@ -14081,10 +14793,36 @@ def certified_ipopt_fallback_adapter(
     adapted.real_time_to_optimize = getattr(solution, "real_time_to_optimize", None)
     adapted.cost = getattr(solution, "cost", None)
     adapted.parameters = getattr(solution, "parameters", {})
+    # A fallback may be produced by a backend whose Solution object does not
+    # expose IPOPT-compatible multipliers. The next IPOPT window still calls
+    # ``set_lagrange_multiplier`` while advancing, so provide explicit zero
+    # vectors rather than reusing duals across solver conventions.
+    target_interface = getattr(periodic_nmpc, "ocp_solver", None)
+    for multiplier_name in ("lam_g", "lam_x"):
+        template = getattr(target_interface, multiplier_name, None)
+        if template is None:
+            template = getattr(solution, multiplier_name, None)
+        if template is not None:
+            setattr(adapted, multiplier_name, np.zeros_like(template))
     adapted._cocofest_feasibility_summary = dict(feasibility)
-    adapted._cocofest_hybrid_certifier = "ipopt_radau"
+    adapted._cocofest_hybrid_certifier = certifier
     adapted._cocofest_advanced_physical_rho = True
     return adapted
+
+
+def certified_ipopt_fallback_adapter(
+    periodic_nmpc,
+    solution,
+    feasibility: dict[str, object],
+) -> _WarmupSolutionAdapter:
+    """Backward-compatible IPOPT/Radau fallback adapter."""
+
+    return certified_recovery_fallback_adapter(
+        periodic_nmpc,
+        solution,
+        feasibility,
+        certifier="ipopt_radau",
+    )
 
 
 def _resample_warmup_data(
@@ -15406,34 +16144,42 @@ def solution_trace_compatibility_summary(
     }
 
 
-def run_periodic_ipopt_recovery(
+def run_periodic_nlp_recovery(
     recovery_nmpc,
     target_nmpc,
     *,
+    recovery_solver: str,
     max_iterations: int,
     tolerance: float,
-    linear_solver: str,
+    linear_solver: str | None,
     failed_target_solution,
     target_solver: str,
     mechanical_formulation: str,
     seed_source: str = "prepared_target_rho_primal",
+    c_compile: bool = False,
+    max_wall_time: float | None = None,
     echo: bool = False,
 ) -> tuple[object | None, dict[str, object]]:
-    """Solve one frozen RHO with IPOPT and inject a certified target-solver seed.
+    """Solve one frozen RHO with a second NLP backend and inject its primal.
 
     The caller copies the current target initial guesses, bounds and objective
-    targets into ``recovery_nmpc`` immediately before this call.  IPOPT is
-    therefore an auditable primal-restoration step, not an alternative RHO
+    targets into ``recovery_nmpc`` immediately before this call.  The recovery
+    backend is therefore an auditable primal-restoration step, not another RHO
     transfer path. A status-zero solution or an iteration-limited primal with
     measured feasibility may be copied back; the requested solver still has
     to certify its subsequent retry before the physical RHO can advance in
     strict mode. The opt-in hybrid mode may instead certify the last allowed
-    failure with this converged IPOPT solution.
+    failure with this independently converged recovery solution.
     """
+
+    if recovery_solver not in {"ipopt", "madnlp"}:
+        raise ValueError(
+            "Periodic NLP recovery currently supports IPOPT and MadNLP only."
+        )
 
     summary: dict[str, object] = {
         "available": True,
-        "solver": "ipopt",
+        "solver": recovery_solver,
         "target_solver": target_solver,
         "mechanical_formulation": mechanical_formulation,
         "transcription": "collocation_radau",
@@ -15450,11 +16196,22 @@ def run_periodic_ipopt_recovery(
     configure_wall_time_s = None
     solve_start = None
     try:
-        solver = configure_ipopt_solver(
-            max_iterations=max_iterations,
-            linear_solver=linear_solver,
-            tolerance=tolerance,
-        )
+        if recovery_solver == "ipopt":
+            solver = configure_ipopt_solver(
+                max_iterations=max_iterations,
+                linear_solver=linear_solver or "mumps",
+                tolerance=tolerance,
+                c_compile=c_compile,
+            )
+        else:
+            solver = configure_nlp_solver(
+                "madnlp",
+                max_iterations=max_iterations,
+                tolerance=tolerance,
+                madnlp_linear_solver=linear_solver,
+                madnlp_c_compile=c_compile,
+                madnlp_max_wall_time=max_wall_time,
+            )
         configure_wall_time_s = perf_counter() - configure_start
         solve_start = perf_counter()
         solution = super(RecedingHorizonOptimization, recovery_nmpc).solve(
@@ -15477,7 +16234,10 @@ def run_periodic_ipopt_recovery(
         summary["error"] = f"{type(exc).__name__}: {exc}"
         summary["traceback"] = traceback.format_exc()
         if echo:
-            print(f"{target_solver}_ipopt_recovery_error: {summary['error']}")
+            print(
+                f"{target_solver}_{recovery_solver}_recovery_error: "
+                f"{summary['error']}"
+            )
             print(summary["traceback"], end="")
         return None, summary
 
@@ -15532,13 +16292,77 @@ def run_periodic_ipopt_recovery(
     }
     if echo:
         print(
-            f"{target_solver}_ipopt_recovery: "
+            f"{target_solver}_{recovery_solver}_recovery: "
             f"status={solution.status} accepted={accepted} "
             f"inf_pr={feasibility['final_inf_pr']} "
             f"quality={summary['quality']} "
             f"solver_time_s={summary['solver_time_s']}"
         )
     return solution, summary
+
+
+def run_periodic_ipopt_recovery(
+    recovery_nmpc,
+    target_nmpc,
+    *,
+    max_iterations: int,
+    tolerance: float,
+    linear_solver: str,
+    failed_target_solution,
+    target_solver: str,
+    mechanical_formulation: str,
+    seed_source: str = "prepared_target_rho_primal",
+    echo: bool = False,
+) -> tuple[object | None, dict[str, object]]:
+    """Backward-compatible IPOPT specialization of periodic NLP recovery."""
+
+    return run_periodic_nlp_recovery(
+        recovery_nmpc,
+        target_nmpc,
+        recovery_solver="ipopt",
+        max_iterations=max_iterations,
+        tolerance=tolerance,
+        linear_solver=linear_solver,
+        failed_target_solution=failed_target_solution,
+        target_solver=target_solver,
+        mechanical_formulation=mechanical_formulation,
+        seed_source=seed_source,
+        echo=echo,
+    )
+
+
+def run_periodic_madnlp_recovery(
+    recovery_nmpc,
+    target_nmpc,
+    *,
+    max_iterations: int,
+    tolerance: float,
+    linear_solver: str | None,
+    failed_target_solution,
+    target_solver: str,
+    mechanical_formulation: str,
+    seed_source: str = "prepared_target_rho_primal",
+    c_compile: bool = False,
+    max_wall_time: float | None = None,
+    echo: bool = False,
+) -> tuple[object | None, dict[str, object]]:
+    """Restore one failed IPOPT RHO with an independently solved MadNLP NLP."""
+
+    return run_periodic_nlp_recovery(
+        recovery_nmpc,
+        target_nmpc,
+        recovery_solver="madnlp",
+        max_iterations=max_iterations,
+        tolerance=tolerance,
+        linear_solver=linear_solver,
+        failed_target_solution=failed_target_solution,
+        target_solver=target_solver,
+        mechanical_formulation=mechanical_formulation,
+        seed_source=seed_source,
+        c_compile=c_compile,
+        max_wall_time=max_wall_time,
+        echo=echo,
+    )
 
 
 def select_ipopt_recovery_stage(
@@ -15577,7 +16401,7 @@ def select_ipopt_recovery_stage(
 
 def apply_control_regularization_targets(periodic_nmpc, controls) -> list[str]:
     updated_keys = []
-    for penalty in periodic_nmpc.nlp[0].J:
+    for penalty in getattr(periodic_nmpc.nlp[0], "J", []):
         if not penalty:
             continue
 
@@ -15812,7 +16636,7 @@ def synchronize_terminal_wheel_objective_target(
     position_key = getattr(periodic_nmpc, "position_state_key", "q")
     position_index = int(getattr(periodic_nmpc, "wheel_state_index", 2))
     updated = 0
-    for penalty in periodic_nmpc.nlp[0].J:
+    for penalty in getattr(periodic_nmpc.nlp[0], "J", []):
         if not penalty or getattr(penalty, "target", None) is None:
             continue
         extra_parameters = getattr(penalty, "extra_parameters", {}) or {}
@@ -16411,6 +17235,7 @@ def run_standard_ipopt_warmup(
             else args.max_ipopt_iterations
         ),
         linear_solver=_warmup_ipopt_linear_solver(args),
+        hsl_library=getattr(args, "ipopt_hsl_library", None),
     )
     warmup_sol = super(RecedingHorizonOptimization, warmup_nmpc).solve(
         solver=warmup_solver,
@@ -16517,6 +17342,40 @@ def _should_apply_transfer_phase_one(
 def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
     preparation_start = perf_counter()
     apply_assisted_hot_start_defaults(args)
+    args.formulation = getattr(args, "formulation", "dynamic")
+    if args.formulation not in ("dynamic", "isokinetic"):
+        raise ValueError("formulation must be 'dynamic' or 'isokinetic'.")
+    isokinetic_config = None
+    if args.formulation == "isokinetic":
+        if args.mechanical_formulation != "reduced":
+            raise ValueError(
+                "The isokinetic formulation currently requires reduced mechanics."
+            )
+        isokinetic_config = IsokineticCyclingConfig(
+            omega_target_rad_s=getattr(
+                args, "isokinetic_omega", -float(2 * np.pi)
+            ),
+            energy_equivalent_torque_nm=getattr(
+                args, "energy_equivalent_torque", 0.2
+            ),
+            load_torque_min_nm=getattr(args, "load_torque_min", -3.0),
+            load_torque_max_nm=getattr(args, "load_torque_max", 3.0),
+            number_of_turns=args.cycles_per_window,
+        )
+        args.isokinetic_omega = isokinetic_config.omega_target_rad_s
+        args.energy_equivalent_torque = (
+            isokinetic_config.energy_equivalent_torque_nm
+        )
+        args.load_torque_min = isokinetic_config.load_torque_min_nm
+        args.load_torque_max = isokinetic_config.load_torque_max_nm
+        args.energy_target_j = isokinetic_config.energy_target_j
+        # Legacy warmups solve a different constant-torque forward-dynamics
+        # problem and cannot seed or certify this inverse isokinetic OCP.
+        args.acados_assisted_hot_start = False
+        args.disable_standard_ipopt_warmup = True
+        args.disable_periodic_fes_warmup_projection = True
+    else:
+        args.energy_target_j = None
     if (
         getattr(args, "rho_replay_checkpoint_output", None) is not None
         and not args.retry_failed_rho_without_advance
@@ -16597,6 +17456,13 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         )
     args.terminal_wheel_q_reference_mode = "absolute_initial"
     objectives = parse_objectives(args.objective)
+    validate_terminal_reserve_options(
+        args.terminal_reserve_weight,
+        args.terminal_reserve_temperature,
+    )
+    args.terminal_reserve_effective_weight = float(
+        10000.0 * args.terminal_reserve_weight
+    )
     torque_diagnostics = crank_torque_diagnostics(
         args.constant_crank_torque,
         args.wheel_qdot_regularization_target,
@@ -16736,9 +17602,9 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                 "mode and --retry-failed-rho-without-advance."
             )
     if getattr(args, "nlp_ipopt_recovery", False):
-        if args.solver not in {"madnlp", "fatrop"}:
+        if args.solver not in {"ipopt", "madnlp", "fatrop"}:
             raise ValueError(
-                "--nlp-ipopt-recovery requires --solver madnlp or fatrop."
+                "--nlp-ipopt-recovery requires --solver ipopt, madnlp, or fatrop."
             )
         if args.mechanical_formulation != "reduced":
             raise ValueError(
@@ -16757,14 +17623,66 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             raise ValueError(
                 "--nlp-ipopt-recovery-collocation-degree must be >= 1."
             )
+        recovery_linear_solver = getattr(
+            args, "nlp_ipopt_recovery_linear_solver", None
+        )
+        if (
+            args.solver == "ipopt"
+            and (recovery_linear_solver or args.ipopt_linear_solver)
+            == args.ipopt_linear_solver
+        ):
+            raise ValueError(
+                "An IPOPT target requires --nlp-ipopt-recovery-linear-solver "
+                "to differ from --ipopt-linear-solver."
+            )
     if getattr(args, "nlp_ipopt_fallback_advance", False):
         if not getattr(args, "nlp_ipopt_recovery", False):
             raise ValueError(
                 "--nlp-ipopt-fallback-advance requires --nlp-ipopt-recovery."
             )
-        if args.solver not in {"madnlp", "fatrop"}:
+        if args.solver not in {"ipopt", "madnlp", "fatrop"}:
             raise ValueError(
-                "--nlp-ipopt-fallback-advance requires MadNLP or Fatrop."
+                "--nlp-ipopt-fallback-advance requires IPOPT, MadNLP, or Fatrop."
+            )
+    if getattr(args, "ipopt_madnlp_recovery", False):
+        if getattr(args, "nlp_ipopt_recovery", False):
+            raise ValueError(
+                "--ipopt-madnlp-recovery and --nlp-ipopt-recovery are "
+                "mutually exclusive recovery strategies."
+            )
+        if args.solver != "ipopt":
+            raise ValueError(
+                "--ipopt-madnlp-recovery requires --solver ipopt."
+            )
+        if args.mechanical_formulation != "reduced":
+            raise ValueError(
+                "--ipopt-madnlp-recovery is restricted to the reduced formulation."
+            )
+        if args.single_shot or not args.retry_failed_rho_without_advance:
+            raise ValueError(
+                "--ipopt-madnlp-recovery requires the RHO mode and "
+                "--retry-failed-rho-without-advance."
+            )
+        if args.ipopt_madnlp_recovery_max_iterations < 1:
+            raise ValueError(
+                "--ipopt-madnlp-recovery-max-iterations must be >= 1."
+            )
+        if args.ipopt_madnlp_recovery_collocation_degree < 1:
+            raise ValueError(
+                "--ipopt-madnlp-recovery-collocation-degree must be >= 1."
+            )
+        if (
+            args.ipopt_madnlp_recovery_max_wall_time is not None
+            and args.ipopt_madnlp_recovery_max_wall_time <= 0
+        ):
+            raise ValueError(
+                "--ipopt-madnlp-recovery-max-wall-time must be positive."
+            )
+    if getattr(args, "ipopt_madnlp_fallback_advance", False):
+        if not getattr(args, "ipopt_madnlp_recovery", False):
+            raise ValueError(
+                "--ipopt-madnlp-fallback-advance requires "
+                "--ipopt-madnlp-recovery."
             )
     if getattr(args, "nlp_failed_rho_phase_one_recovery", False):
         if args.solver not in {"ipopt", "madnlp", "fatrop"}:
@@ -16780,6 +17698,11 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             raise ValueError(
                 "--nlp-failed-rho-phase-one-recovery and --nlp-ipopt-recovery "
                 "are mutually exclusive recovery strategies."
+            )
+        if getattr(args, "ipopt_madnlp_recovery", False):
+            raise ValueError(
+                "--nlp-failed-rho-phase-one-recovery and "
+                "--ipopt-madnlp-recovery are mutually exclusive recovery strategies."
             )
     if getattr(args, "acados_failed_rho_phase_one_recovery", False):
         if args.solver != "acados":
@@ -17503,7 +18426,11 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
     acados_seed_cache_path = (
         _acados_seed_cache_path(args, model_path) if args.solver == "acados" else None
     )
-    cycle_duration = 1.0
+    cycle_duration = (
+        isokinetic_config.duration_s / args.cycles_per_window
+        if isokinetic_config is not None
+        else 1.0
+    )
     total_window_duration = cycle_duration * args.cycles_per_window
     total_stimulations = args.stimulations_per_cycle * args.cycles_per_window
     stim_time = list(
@@ -17632,7 +18559,9 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         "physical_crank_terminal_angle": None,
         "periodic_cn_sum_approximation": periodic_cn_sum_approximation,
     }
-    if use_external_forces:
+    if isokinetic_config is not None:
+        pass
+    elif use_external_forces:
         cycling_info["resistive_torque"] = {
             "Segment_application": "wheel",
             "torque": np.array([0.0, 0.0, args.constant_crank_torque]),
@@ -17640,7 +18569,9 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
     else:
         cycling_info["constant_crank_torque"] = args.constant_crank_torque
     args.reduced_internal_crank_velocity_guard = bool(
-        args.solver == "acados" and args.mechanical_formulation == "reduced"
+        args.solver == "acados"
+        and args.mechanical_formulation == "reduced"
+        and isokinetic_config is None
     )
     simulation_conditions = {
         "n_cycles_simultaneous": args.cycles_per_window,
@@ -17650,6 +18581,8 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         "minimize_control": "control" in objectives,
         "cost_fun_weight": build_cost_fun_weight(objectives),
         "objective_shape": args.objective_shape,
+        "terminal_reserve_weight": args.terminal_reserve_weight,
+        "terminal_reserve_temperature": args.terminal_reserve_temperature,
         "control_regularization_weight": args.control_regularization_weight,
         "control_regularization_target": args.control_regularization_target,
         "wheel_qdot_regularization_weight": args.wheel_qdot_regularization_weight,
@@ -17692,6 +18625,27 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         ),
         "mechanical_formulation": args.mechanical_formulation,
         "reduced_cycling_dynamics": reduced_cycling_dynamics,
+        "formulation": args.formulation,
+        "isokinetic_omega": (
+            isokinetic_config.omega_target_rad_s
+            if isokinetic_config is not None
+            else -float(2 * np.pi)
+        ),
+        "energy_equivalent_torque": (
+            isokinetic_config.energy_equivalent_torque_nm
+            if isokinetic_config is not None
+            else 0.2
+        ),
+        "load_torque_min": (
+            isokinetic_config.load_torque_min_nm
+            if isokinetic_config is not None
+            else -1.0
+        ),
+        "load_torque_max": (
+            isokinetic_config.load_torque_max_nm
+            if isokinetic_config is not None
+            else 1.0
+        ),
     }
     nmpc_simulation_conditions = dict(simulation_conditions)
     if args.solver == "acados":
@@ -17756,12 +18710,12 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         velocity_key = nmpc.velocity_state_key
         wheel_index = nmpc.wheel_state_index
         position_slack = (
-            [args.acados_wheel_q_slack]
+            [0.0 if isokinetic_config is not None else args.acados_wheel_q_slack]
             if position_key == "theta"
             else [0.0, 0.0, args.acados_wheel_q_slack]
         )
         velocity_slack = (
-            [args.acados_wheel_qdot_slack]
+            [0.0 if isokinetic_config is not None else args.acados_wheel_qdot_slack]
             if velocity_key == "omega"
             else [0.0, 0.0, args.acados_wheel_qdot_slack]
         )
@@ -17775,7 +18729,11 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             "Tau1_": 0.0,
             "Km_": 0.0,
         }
-        terminal_position_slack = args.acados_terminal_wheel_q_slack
+        terminal_position_slack = (
+            0.0
+            if isokinetic_config is not None
+            else args.acados_terminal_wheel_q_slack
+        )
         terminal_wheel_q_slack_scale = 1.0
         if (
             position_key == "q"
@@ -17862,19 +18820,36 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
     if echo:
         print(f"model_formulation: {args.model_formulation}")
         print(f"mechanical_formulation: {args.mechanical_formulation}")
+        print(f"formulation: {args.formulation}")
         if args.mechanical_formulation == "reduced":
             print(
                 "reduced_profile_build_time_s: "
                 f"{args.reduced_profile_build_time_s:.6f}"
             )
-        print(f"torque_application: {args.torque_application}")
-        print(f"crank_torque_nm: {args.constant_crank_torque}")
-        print(f"crank_torque_role: {args.crank_torque_role}")
-        print(f"crank_assistance_nm: {args.crank_assistance_nm}")
-        print(
-            "expected_external_crank_power_w: "
-            f"{args.expected_external_crank_power_w}"
-        )
+        if isokinetic_config is not None:
+            print(
+                "isokinetic_omega_rad_s: "
+                f"{isokinetic_config.omega_target_rad_s}"
+            )
+            print(
+                "energy_equivalent_torque_nm: "
+                f"{isokinetic_config.energy_equivalent_torque_nm}"
+            )
+            print(f"energy_target_j: {isokinetic_config.energy_target_j}")
+            print(
+                "load_torque_bounds_nm: "
+                f"[{isokinetic_config.load_torque_min_nm}, "
+                f"{isokinetic_config.load_torque_max_nm}]"
+            )
+        else:
+            print(f"torque_application: {args.torque_application}")
+            print(f"crank_torque_nm: {args.constant_crank_torque}")
+            print(f"crank_torque_role: {args.crank_torque_role}")
+            print(f"crank_assistance_nm: {args.crank_assistance_nm}")
+            print(
+                "expected_external_crank_power_w: "
+                f"{args.expected_external_crank_power_w}"
+            )
         print(f"single_shot: {args.single_shot}")
         print(f"ode_solver: {args.ode_solver}")
         if args.ode_solver in ("rk4", "rk8"):
@@ -17897,6 +18872,15 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             f"{args.full_contact_position_tolerance}"
         )
         print(f"control_regularization_weight: {args.control_regularization_weight}")
+        print(f"terminal_reserve_weight: {args.terminal_reserve_weight}")
+        print(
+            "terminal_reserve_effective_weight: "
+            f"{args.terminal_reserve_effective_weight}"
+        )
+        print(
+            "terminal_reserve_temperature: "
+            f"{args.terminal_reserve_temperature}"
+        )
         print(f"control_regularization_target: {args.control_regularization_target}")
         print(
             "control_regularization_target_source: "
@@ -18411,7 +19395,10 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             f"{phase_one_max_state_change_by_block or None}"
         )
 
-    if periodic_cn_sum_approximation and not args.disable_standard_ipopt_warmup:
+    if should_run_standard_ipopt_warmup(
+        args,
+        periodic_cn_sum_approximation=periodic_cn_sum_approximation,
+    ):
         if echo:
             print("running_standard_ipopt_warmup: True")
         warmup_simulation_conditions = _target_independent_warmup_conditions(
@@ -19117,16 +20104,34 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
     ipopt_recovery_enabled = bool(
         args.acados_ipopt_recovery or getattr(args, "nlp_ipopt_recovery", False)
     )
-    ipopt_recovery_max_iterations = (
-        args.acados_ipopt_recovery_max_iterations
-        if args.acados_ipopt_recovery
-        else getattr(args, "nlp_ipopt_recovery_max_iterations", 2000)
+    madnlp_recovery_enabled = bool(
+        getattr(args, "ipopt_madnlp_recovery", False)
     )
-    ipopt_recovery_collocation_degree = (
-        args.acados_ipopt_recovery_collocation_degree
-        if args.acados_ipopt_recovery
-        else getattr(args, "nlp_ipopt_recovery_collocation_degree", 5)
+    nlp_recovery_enabled = ipopt_recovery_enabled or madnlp_recovery_enabled
+    recovery_backend = "madnlp" if madnlp_recovery_enabled else "ipopt"
+    ipopt_recovery_linear_solver = (
+        getattr(args, "nlp_ipopt_recovery_linear_solver", None)
+        or args.ipopt_linear_solver
     )
+    if madnlp_recovery_enabled:
+        ipopt_recovery_max_iterations = (
+            args.ipopt_madnlp_recovery_max_iterations
+        )
+        ipopt_recovery_collocation_degree = (
+            args.ipopt_madnlp_recovery_collocation_degree
+        )
+    elif args.acados_ipopt_recovery:
+        ipopt_recovery_max_iterations = args.acados_ipopt_recovery_max_iterations
+        ipopt_recovery_collocation_degree = (
+            args.acados_ipopt_recovery_collocation_degree
+        )
+    else:
+        ipopt_recovery_max_iterations = getattr(
+            args, "nlp_ipopt_recovery_max_iterations", 2000
+        )
+        ipopt_recovery_collocation_degree = getattr(
+            args, "nlp_ipopt_recovery_collocation_degree", 5
+        )
     ipopt_recovery_seed_collocation_degree = (
         getattr(args, "acados_ipopt_recovery_seed_collocation_degree", None)
         if args.acados_ipopt_recovery
@@ -19143,9 +20148,9 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         ipopt_recovery_seed_max_iterations = ipopt_recovery_max_iterations
     ipopt_recovery_nmpc = None
     ipopt_recovery_nmpcs = {}
-    if ipopt_recovery_enabled:
+    if nlp_recovery_enabled:
         # Use the same physical full or reduced OCP as the target solver, but
-        # a Radau CasADi/IPOPT transcription for a robust restoration solve.
+        # a Radau CasADi/NLP transcription for a robust restoration solve.
         # Per-window bounds, targets and the shifted primal are copied
         # immediately before each recovery attempt below.
         recovery_mhe_info = {**mhe_info, "use_sx": True}
@@ -19175,7 +20180,7 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         ]
         if echo:
             print(
-                f"{args.solver}_ipopt_recovery: enabled "
+                f"{args.solver}_{recovery_backend}_recovery: enabled "
                 f"(seed=Radau-{ipopt_recovery_seed_collocation_degree}/"
                 f"{ipopt_recovery_seed_max_iterations} iterations, "
                 f"certifier=Radau-{ipopt_recovery_collocation_degree}/"
@@ -19654,18 +20659,40 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                         active_ipopt_recovery_nmpc
                     )
                     recovery_seed_audit.pop("snapshot", None)
-                recovery_solution, recovery_summary = run_periodic_ipopt_recovery(
-                    active_ipopt_recovery_nmpc,
-                    self,
-                    max_iterations=recovery_iteration_budget,
-                    tolerance=window_feasibility_tolerance,
-                    linear_solver=args.ipopt_linear_solver,
-                    failed_target_solution=solution,
-                    target_solver=args.solver,
-                    mechanical_formulation=args.mechanical_formulation,
-                    seed_source=recovery_seed_source,
-                    echo=echo,
-                )
+                if recovery_backend == "madnlp":
+                    recovery_solution, recovery_summary = (
+                        run_periodic_madnlp_recovery(
+                            active_ipopt_recovery_nmpc,
+                            self,
+                            max_iterations=recovery_iteration_budget,
+                            tolerance=window_feasibility_tolerance,
+                            linear_solver=(
+                                args.ipopt_madnlp_recovery_linear_solver
+                            ),
+                            failed_target_solution=solution,
+                            target_solver=args.solver,
+                            mechanical_formulation=args.mechanical_formulation,
+                            seed_source=recovery_seed_source,
+                            c_compile=args.ipopt_madnlp_recovery_c_compile,
+                            max_wall_time=(
+                                args.ipopt_madnlp_recovery_max_wall_time
+                            ),
+                            echo=echo,
+                        )
+                    )
+                else:
+                    recovery_solution, recovery_summary = run_periodic_ipopt_recovery(
+                        active_ipopt_recovery_nmpc,
+                        self,
+                        max_iterations=recovery_iteration_budget,
+                        tolerance=window_feasibility_tolerance,
+                        linear_solver=ipopt_recovery_linear_solver,
+                        failed_target_solution=solution,
+                        target_solver=args.solver,
+                        mechanical_formulation=args.mechanical_formulation,
+                        seed_source=recovery_seed_source,
+                        echo=echo,
+                    )
                 recovery_summary.update(
                     {
                         "attempt_window": int(self.total_optimization_run) + 1,
@@ -19734,12 +20761,32 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                         recovery_summary["acados_solver_reset"] = recovery_summary[
                             "target_solver_reset"
                         ]
+                    elif args.solver == "ipopt":
+                        # The recovered primal came from a different sparse
+                        # factorization path. Do not pair it with multipliers
+                        # left by the failed target solve: the next MUMPS call
+                        # must certify this primal from a clean dual state.
+                        dual_reset = apply_nlp_dual_warm_start(
+                            self,
+                            None,
+                            solver_name="ipopt",
+                            mode="off",
+                        )
+                        dual_reset.update(
+                            {
+                                "window": int(self.total_optimization_run) + 1,
+                                "reason": "alternate_ipopt_linear_solver_recovery",
+                            }
+                        )
+                        nlp_dual_warm_start_summaries.append(dual_reset)
+                        recovery_summary["target_dual_reset"] = dual_reset
                     self._cocofest_recovery_seed_pending = True
                 ipopt_recovery_summaries.append(recovery_summary)
                 fallback_eligible = bool(
                     (
                         args.acados_ipopt_fallback_advance
                         or getattr(args, "nlp_ipopt_fallback_advance", False)
+                        or getattr(args, "ipopt_madnlp_fallback_advance", False)
                     )
                     and recovery_stage["may_advance_as_fallback"]
                     and recovery_solution is not None
@@ -19750,10 +20797,16 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                     )
                 )
                 if fallback_eligible:
-                    fallback_adapter = certified_ipopt_fallback_adapter(
+                    fallback_certifier = (
+                        f"ipopt_{ipopt_recovery_linear_solver}_radau"
+                        if recovery_backend == "ipopt" and args.solver == "ipopt"
+                        else f"{recovery_backend}_radau"
+                    )
+                    fallback_adapter = certified_recovery_fallback_adapter(
                         self,
                         recovery_solution,
                         recovery_summary["feasibility"],
+                        certifier=fallback_certifier,
                     )
                     fallback_adapter._cocofest_attempt_index = int(
                         self.total_optimization_run
@@ -19761,12 +20814,12 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                     fallback_adapter._cocofest_target_rho = target_rho
                     solution._cocofest_fallback_solution = fallback_adapter
                     recovery_summary["fallback_advanced"] = True
-                    recovery_summary["fallback_certifier"] = "ipopt_radau"
+                    recovery_summary["fallback_certifier"] = fallback_certifier
                 else:
                     recovery_summary["fallback_advanced"] = False
                 if echo:
                     print(
-                        f"{args.solver}_ipopt_recovery_seed: "
+                        f"{args.solver}_{recovery_backend}_recovery_seed: "
                         f"attempt_window={recovery_summary['attempt_window']} "
                         f"injected={recovery_summary['seed_injected']}"
                     )
@@ -19803,7 +20856,11 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                         "target_rho": target_rho,
                         "recovery_seed_pending": False,
                         "advanced": True,
-                        "certifier": "ipopt_radau",
+                        "certifier": getattr(
+                            fallback_adapter,
+                            "_cocofest_hybrid_certifier",
+                            f"{recovery_backend}_radau",
+                        ),
                     }
                 )
                 if rho_replay_checkpoint_output is not None:
@@ -19820,7 +20877,7 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                     }
                 if echo:
                     print(
-                        "rho_advanced_by_ipopt_fallback: "
+                        f"rho_advanced_by_{recovery_backend}_fallback: "
                         f"attempt_window={self.total_optimization_run + 1} "
                         f"target_rho={target_rho}"
                     )
@@ -21457,6 +22514,21 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             solver=solver,
             warm_start=None,
         )
+        if args.solver == "acados":
+            # The RHO callback augments Bioptim's exported feasibility data
+            # with the native ACADOS residual vector.  Single-shot solves
+            # bypass that callback, so perform the same independent audit
+            # here before building the summary or deciding whether a common
+            # seed may be saved.
+            native_feasibility = _solution_feasibility_summary(
+                sol, window_feasibility_tolerance
+            )
+            sol._cocofest_feasibility_summary = (
+                augment_feasibility_with_acados_residuals(
+                    native_feasibility,
+                    snapshot_acados_diagnostics(sol),
+                )
+            )
         if echo:
             summarize_single_shot(sol)
             if args.solver == "acados" and args.acados_diagnostics:
@@ -21504,6 +22576,14 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             absolute_cycle_reference=absolute_wheel_q_reference,
             absolute_cycle_tolerance=wheel_absolute_cycle_tolerance,
         )
+        if isokinetic_config is not None:
+            attach_isokinetic_audits(
+                summary,
+                isokinetic_config,
+                reduced_cycling_dynamics,
+                nmpc,
+                fatigue_capacity_scales,
+            )
         if args.solver == "acados" and args.acados_diagnostics:
             summary["acados_diagnostics"] = collect_acados_diagnostics(sol)
         if args.solver in NLP_SOLVER_NAMES:
@@ -21526,6 +22606,11 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         summary["standard_warmup_cache_hit"] = standard_warmup_cache_hit
         summary["warmup_cycles_consumed"] = args.warmup_cycles_consumed
         summary["fatigue_capacity_scales"] = fatigue_capacity_scales
+        attach_terminal_capacity_reserve_diagnostics(
+            summary,
+            fatigue_capacity_scales,
+            temperature=args.terminal_reserve_temperature,
+        )
         summary["wheel_q_scaling"] = wheel_q_scaling
         summary["absolute_wheel_q_origin_reference"] = absolute_wheel_q_origin_reference
         summary[
@@ -21579,6 +22664,8 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             summary["nlp_ipopt_recovery"] = {
                 "enabled": True,
                 "target_solver": args.solver,
+                "recovery_solver": "ipopt",
+                "recovery_linear_solver": ipopt_recovery_linear_solver,
                 "attempt_count": len(ipopt_recovery_summaries),
                 "injected_count": sum(
                     bool(item.get("seed_injected"))
@@ -21590,6 +22677,36 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                 "fallback_advanced_count": sum(
                     bool(item.get("fallback_advanced"))
                     for item in ipopt_recovery_summaries
+                ),
+                "recovery_wall_time_s": float(
+                    sum(
+                        item.get("wall_time_s") or 0.0
+                        for item in ipopt_recovery_summaries
+                    )
+                ),
+            }
+        elif getattr(args, "ipopt_madnlp_recovery", False):
+            summary["ipopt_madnlp_recovery"] = {
+                "enabled": True,
+                "target_solver": "ipopt",
+                "recovery_solver": "madnlp",
+                "attempt_count": len(ipopt_recovery_summaries),
+                "injected_count": sum(
+                    bool(item.get("seed_injected"))
+                    for item in ipopt_recovery_summaries
+                ),
+                "fallback_advance_enabled": bool(
+                    args.ipopt_madnlp_fallback_advance
+                ),
+                "fallback_advanced_count": sum(
+                    bool(item.get("fallback_advanced"))
+                    for item in ipopt_recovery_summaries
+                ),
+                "recovery_wall_time_s": float(
+                    sum(
+                        item.get("wall_time_s") or 0.0
+                        for item in ipopt_recovery_summaries
+                    )
                 ),
             }
         if control_homotopy_summaries:
@@ -21634,13 +22751,14 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                 args.max_consecutive_failing,
                 retry_without_advance=args.retry_failed_rho_without_advance,
                 recovery_requires_target_certification=(
-                    ipopt_recovery_enabled
+                    nlp_recovery_enabled
                     or getattr(args, "nlp_failed_rho_phase_one_recovery", False)
                     or getattr(args, "acados_failed_rho_phase_one_recovery", False)
                 ),
                 fallback_advances_physical_rho=bool(
                     args.acados_ipopt_fallback_advance
                     or getattr(args, "nlp_ipopt_fallback_advance", False)
+                    or getattr(args, "ipopt_madnlp_fallback_advance", False)
                 ),
                 requested_physical_rhos=requested_window_solves,
             ),
@@ -21667,6 +22785,11 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         summary["standard_warmup_cache_hit"] = standard_warmup_cache_hit
         summary["warmup_cycles_consumed"] = args.warmup_cycles_consumed
         summary["fatigue_capacity_scales"] = fatigue_capacity_scales
+        attach_terminal_capacity_reserve_diagnostics(
+            summary,
+            fatigue_capacity_scales,
+            temperature=args.terminal_reserve_temperature,
+        )
         summary["native_solver_status"] = _native_solver_status(nmpc)
         summary["pulse_width_active_set_summary"] = pulse_width_active_set_summary(nmpc)
         summary["compiled_nlp_reuse"] = compiled_nlp_tracker.summary()
@@ -21716,6 +22839,8 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             summary["nlp_ipopt_recovery"] = {
                 "enabled": True,
                 "target_solver": args.solver,
+                "recovery_solver": "ipopt",
+                "recovery_linear_solver": ipopt_recovery_linear_solver,
                 "attempt_count": len(ipopt_recovery_summaries),
                 "injected_count": sum(
                     bool(item.get("seed_injected"))
@@ -21727,6 +22852,36 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                 "fallback_advanced_count": sum(
                     bool(item.get("fallback_advanced"))
                     for item in ipopt_recovery_summaries
+                ),
+                "recovery_wall_time_s": float(
+                    sum(
+                        item.get("wall_time_s") or 0.0
+                        for item in ipopt_recovery_summaries
+                    )
+                ),
+            }
+        elif getattr(args, "ipopt_madnlp_recovery", False):
+            summary["ipopt_madnlp_recovery"] = {
+                "enabled": True,
+                "target_solver": "ipopt",
+                "recovery_solver": "madnlp",
+                "attempt_count": len(ipopt_recovery_summaries),
+                "injected_count": sum(
+                    bool(item.get("seed_injected"))
+                    for item in ipopt_recovery_summaries
+                ),
+                "fallback_advance_enabled": bool(
+                    args.ipopt_madnlp_fallback_advance
+                ),
+                "fallback_advanced_count": sum(
+                    bool(item.get("fallback_advanced"))
+                    for item in ipopt_recovery_summaries
+                ),
+                "recovery_wall_time_s": float(
+                    sum(
+                        item.get("wall_time_s") or 0.0
+                        for item in ipopt_recovery_summaries
+                    )
                 ),
             }
         if cycle_boundary_homotopy_summary is not None:
@@ -21815,6 +22970,14 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         absolute_cycle_reference=absolute_wheel_q_reference,
         absolute_cycle_tolerance=wheel_absolute_cycle_tolerance,
     )
+    if isokinetic_config is not None:
+        attach_isokinetic_audits(
+            summary,
+            isokinetic_config,
+            reduced_cycling_dynamics,
+            nmpc,
+            fatigue_capacity_scales,
+        )
     summary_build_wall_time_s = perf_counter() - summary_build_start
     if raw_solver_attempt_summary is not None:
         summary["solver_attempt_accounting"] = raw_solver_attempt_summary
@@ -21867,6 +23030,8 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         summary["nlp_ipopt_recovery"] = {
             "enabled": True,
             "target_solver": args.solver,
+            "recovery_solver": "ipopt",
+            "recovery_linear_solver": ipopt_recovery_linear_solver,
             "attempt_count": len(ipopt_recovery_summaries),
             "injected_count": sum(
                 bool(item.get("seed_injected")) for item in ipopt_recovery_summaries
@@ -21875,6 +23040,36 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             "fallback_advanced_count": sum(
                 bool(item.get("fallback_advanced"))
                 for item in ipopt_recovery_summaries
+            ),
+            "recovery_wall_time_s": float(
+                sum(
+                    item.get("wall_time_s") or 0.0
+                    for item in ipopt_recovery_summaries
+                )
+            ),
+        }
+    elif getattr(args, "ipopt_madnlp_recovery", False):
+        summary["ipopt_madnlp_recovery"] = {
+            "enabled": True,
+            "target_solver": "ipopt",
+            "recovery_solver": "madnlp",
+            "attempt_count": len(ipopt_recovery_summaries),
+            "injected_count": sum(
+                bool(item.get("seed_injected"))
+                for item in ipopt_recovery_summaries
+            ),
+            "fallback_advance_enabled": bool(
+                args.ipopt_madnlp_fallback_advance
+            ),
+            "fallback_advanced_count": sum(
+                bool(item.get("fallback_advanced"))
+                for item in ipopt_recovery_summaries
+            ),
+            "recovery_wall_time_s": float(
+                sum(
+                    item.get("wall_time_s") or 0.0
+                    for item in ipopt_recovery_summaries
+                )
             ),
         }
     if nlp_dual_warm_start_summaries:
@@ -21933,11 +23128,19 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             forced_iteration_cap_summaries
         )
     if ipopt_recovery_summaries:
-        summary["ipopt_recovery_summaries"] = ipopt_recovery_summaries
-        if args.solver == "acados":
-            summary["acados_ipopt_recovery_summaries"] = ipopt_recovery_summaries
+        if recovery_backend == "madnlp":
+            summary["madnlp_recovery_summaries"] = ipopt_recovery_summaries
+            summary["ipopt_madnlp_recovery_summaries"] = (
+                ipopt_recovery_summaries
+            )
         else:
-            summary["nlp_ipopt_recovery_summaries"] = ipopt_recovery_summaries
+            summary["ipopt_recovery_summaries"] = ipopt_recovery_summaries
+            if args.solver == "acados":
+                summary["acados_ipopt_recovery_summaries"] = (
+                    ipopt_recovery_summaries
+                )
+            else:
+                summary["nlp_ipopt_recovery_summaries"] = ipopt_recovery_summaries
     if transfer_active_set_guard_summaries:
         summary[
             "transfer_active_set_guard_summaries"
@@ -21997,6 +23200,11 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
     summary["standard_warmup_cache_hit"] = standard_warmup_cache_hit
     summary["warmup_cycles_consumed"] = args.warmup_cycles_consumed
     summary["fatigue_capacity_scales"] = fatigue_capacity_scales
+    attach_terminal_capacity_reserve_diagnostics(
+        summary,
+        fatigue_capacity_scales,
+        temperature=args.terminal_reserve_temperature,
+    )
     summary["wheel_q_scaling"] = wheel_q_scaling
     summary["absolute_wheel_q_origin_reference"] = absolute_wheel_q_origin_reference
     summary["absolute_wheel_q_start_cycle_index"] = absolute_wheel_q_start_cycle_index

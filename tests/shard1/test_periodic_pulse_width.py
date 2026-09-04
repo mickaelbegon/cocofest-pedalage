@@ -1218,6 +1218,8 @@ def test_nlp_ipopt_recovery_cli_is_opt_in():
             "1200",
             "--nlp-ipopt-recovery-collocation-degree",
             "5",
+            "--nlp-ipopt-recovery-linear-solver",
+            "ma57",
             "--nlp-ipopt-fallback-advance",
             "--madnlp-max-wall-time",
             "20",
@@ -1229,6 +1231,7 @@ def test_nlp_ipopt_recovery_cli_is_opt_in():
     assert args.nlp_ipopt_recovery is True
     assert args.nlp_ipopt_recovery_max_iterations == 1200
     assert args.nlp_ipopt_recovery_collocation_degree == 5
+    assert args.nlp_ipopt_recovery_linear_solver == "ma57"
     assert args.nlp_ipopt_fallback_advance is True
     assert args.madnlp_max_wall_time == 20.0
     assert args.madnlp_first_max_iter == 2000
@@ -1245,6 +1248,102 @@ def test_nlp_ipopt_recovery_cli_is_opt_in():
     assert 'MADNLP_FIRST_MAX_ITERATIONS:-${BENCHMARK_MAX_ITER}' in runner
     assert '--madnlp-first-max-iter "$madnlp_first_max_iterations"' in runner
     assert "--nlp-ipopt-fallback-advance" in runner
+
+
+def test_periodic_cli_supports_mumps_target_with_ma57_recovery():
+    args = periodic_example.build_argument_parser().parse_args(
+        [
+            "--solver",
+            "ipopt",
+            "--ipopt-linear-solver",
+            "mumps",
+            "--nlp-ipopt-recovery",
+            "--nlp-ipopt-recovery-linear-solver",
+            "ma57",
+            "--nlp-ipopt-fallback-advance",
+        ]
+    )
+
+    assert args.ipopt_linear_solver == "mumps"
+    assert args.nlp_ipopt_recovery is True
+    assert args.nlp_ipopt_recovery_linear_solver == "ma57"
+    assert args.nlp_ipopt_fallback_advance is True
+
+
+def test_ipopt_madnlp_recovery_cli_and_endurance_runner_are_explicit():
+    cli = [
+        "--ipopt-madnlp-recovery",
+        "--ipopt-madnlp-recovery-max-iterations",
+        "1200",
+        "--ipopt-madnlp-recovery-collocation-degree",
+        "5",
+        "--ipopt-madnlp-recovery-linear-solver",
+        "mumps",
+        "--ipopt-madnlp-recovery-max-wall-time",
+        "30",
+        "--ipopt-madnlp-recovery-c-compile",
+        "--ipopt-madnlp-fallback-advance",
+    ]
+    periodic_args = periodic_example.build_argument_parser().parse_args(cli)
+    comparison_args = comparison_example.build_cli().parse_args(cli)
+
+    for args in (periodic_args, comparison_args):
+        assert args.ipopt_madnlp_recovery is True
+        assert args.ipopt_madnlp_recovery_max_iterations == 1200
+        assert args.ipopt_madnlp_recovery_collocation_degree == 5
+        assert args.ipopt_madnlp_recovery_linear_solver == "mumps"
+        assert args.ipopt_madnlp_recovery_max_wall_time == 30.0
+        assert args.ipopt_madnlp_recovery_c_compile is True
+        assert args.ipopt_madnlp_fallback_advance is True
+
+    runner = (
+        Path(__file__).resolve().parents[2]
+        / ".github/scripts/run_cycling_benchmark_case.sh"
+    ).read_text(encoding="utf-8")
+    assert 'IPOPT_FAST_MAX_ITERATIONS:-200' in runner
+    assert "--ipopt-madnlp-recovery" in runner
+    assert "--ipopt-madnlp-fallback-advance" in runner
+    assert "--ipopt-madnlp-recovery-max-iterations" in runner
+    assert "--ipopt-madnlp-recovery-collocation-degree" in runner
+
+
+def test_recovery_fallback_adapter_records_the_actual_certifier():
+    target_nlp = SimpleNamespace(
+        x_init={"theta": SimpleNamespace(init=np.zeros((1, 3)))},
+        u_init={
+            "last_pulse_width_Biceps": SimpleNamespace(init=np.zeros((1, 2)))
+        },
+        model=SimpleNamespace(muscles_dynamics_model=[]),
+    )
+    target = SimpleNamespace(
+        nlp=[target_nlp],
+        ocp_solver=SimpleNamespace(
+            lam_g=np.ones(4),
+            lam_x=np.ones(3),
+        ),
+    )
+    recovered = periodic_example._WarmupSolutionAdapter(
+        states={"theta": np.array([[0.0, -np.pi, -2.0 * np.pi]])},
+        controls={"last_pulse_width_Biceps": 2.0e-4 * np.ones((1, 2))},
+    )
+    recovered.status = 0
+    recovered.iterations = 12
+    recovered.solver_time_to_optimize = 1.0
+    recovered.real_time_to_optimize = 1.1
+    recovered.cost = np.array([[3.0]])
+    recovered.parameters = {}
+
+    adapted = periodic_example.certified_recovery_fallback_adapter(
+        target,
+        recovered,
+        {"passes_tolerance": True},
+        certifier="madnlp_radau",
+    )
+
+    assert adapted._cocofest_hybrid_certifier == "madnlp_radau"
+    assert adapted._cocofest_advanced_physical_rho is True
+    np.testing.assert_array_equal(adapted.lam_g, np.zeros(4))
+    np.testing.assert_array_equal(adapted.lam_x, np.zeros(3))
 
 
 def test_madnlp_first_rho_budget_is_distinct_from_hot_rho_budget():
@@ -2715,6 +2814,31 @@ def test_standard_warmup_cache_metadata_rejects_a_resistance_seed(tmp_path):
         )
 
 
+def test_standard_warmup_cache_accepts_native_reduced_mechanics(tmp_path):
+    args = periodic_example.build_argument_parser().parse_args(
+        ["--mechanical-formulation", "reduced", "--model-formulation", "periodic_node"]
+    )
+    solution = periodic_example._WarmupSolutionAdapter(
+        states={
+            "theta": np.zeros((1, 181)),
+            "omega": -np.ones((1, 181)),
+        },
+        controls={
+            "last_pulse_width_Biceps": np.full(
+                (1, args.cycles_per_window * args.stimulations_per_cycle),
+                0.0002,
+            )
+        },
+        metadata=periodic_example._standard_warmup_metadata(args),
+    )
+
+    periodic_example._validate_standard_warmup_seed(
+        solution,
+        args,
+        tmp_path / "reduced_warmup.npz",
+    )
+
+
 def test_common_initial_solution_metadata_rejects_an_incompatible_horizon(
     tmp_path,
 ):
@@ -2751,7 +2875,7 @@ def test_common_initial_solution_metadata_rejects_an_incompatible_horizon(
         )
 
 
-def test_common_initial_solution_metadata_allows_a_transcription_change(
+def test_common_initial_solution_allows_transcription_and_terminal_objective_changes(
     tmp_path,
 ):
     args = SimpleNamespace(
@@ -2781,6 +2905,34 @@ def test_common_initial_solution_metadata_allows_a_transcription_change(
 
     periodic_example._validate_common_initial_solution_metadata(
         seed, args, tmp_path / "common.npz"
+    )
+    reserve_consumer = SimpleNamespace(**vars(args))
+    reserve_consumer.terminal_reserve_weight = 0.1
+    reserve_consumer.terminal_reserve_temperature = 0.01
+    periodic_example._validate_common_initial_solution_metadata(
+        seed,
+        reserve_consumer,
+        tmp_path / "common.npz",
+    )
+
+
+def test_common_initial_solution_bypasses_redundant_standard_warmup():
+    without_common_seed = SimpleNamespace(
+        disable_standard_ipopt_warmup=False,
+        common_initial_solution=None,
+    )
+    with_common_seed = SimpleNamespace(
+        disable_standard_ipopt_warmup=False,
+        common_initial_solution=Path("common.npz"),
+    )
+
+    assert periodic_example.should_run_standard_ipopt_warmup(
+        without_common_seed,
+        periodic_cn_sum_approximation=True,
+    )
+    assert not periodic_example.should_run_standard_ipopt_warmup(
+        with_common_seed,
+        periodic_cn_sum_approximation=True,
     )
 
 
@@ -5152,6 +5304,45 @@ def test_benchmark_reports_hot_window_timing_separately():
     np.testing.assert_allclose(performance["hot_wall_time_median_s"], 3.3)
 
 
+def test_benchmark_target_solver_timing_excludes_recovery_certified_rhos():
+    result = _benchmark_result([0, 0, 0], solver_success=True, success=True)
+    result["window_solutions"] = [
+        SimpleNamespace(
+            status=0,
+            iterations=100,
+            solver_time_to_optimize=10.0,
+            real_time_to_optimize=11.0,
+        ),
+        SimpleNamespace(
+            status=0,
+            iterations=40,
+            solver_time_to_optimize=1.0,
+            real_time_to_optimize=1.1,
+            _cocofest_hybrid_certifier="ipopt_ma57_radau",
+        ),
+        SimpleNamespace(
+            status=0,
+            iterations=20,
+            solver_time_to_optimize=2.0,
+            real_time_to_optimize=2.2,
+        ),
+    ]
+    result["window_feasibility"] = [{"passes_tolerance": True}] * 3
+
+    performance = comparison_example._window_performance(result)
+
+    assert performance["target_solver_only_window_count"] == 2
+    assert performance["target_solver_only_solver_time_s"] == 12.0
+    assert performance["target_solver_only_hot_window_count"] == 1
+    assert performance["target_solver_only_hot_solver_time_mean_s"] == 2.0
+    assert performance["target_solver_only_hot_solver_time_median_s"] == 2.0
+    assert performance["target_solver_only_hot_solver_time_p90_s"] == 2.0
+    assert performance["target_solver_only_hot_wall_time_mean_s"] == 2.2
+    assert performance["target_solver_only_hot_wall_time_median_s"] == 2.2
+    assert performance["target_solver_only_hot_wall_time_p90_s"] == 2.2
+    assert performance["target_solver_only_hot_iterations_mean"] == 20.0
+
+
 def test_stimulation_snapshots_use_one_based_cycles_and_real_crank_phase():
     cycle_count = 100
     shooting_per_cycle = 2
@@ -5927,7 +6118,7 @@ def test_endurance_cli_stops_on_failure_and_keeps_robust_irk_defaults():
 
     assert args.max_consecutive_failing == 1
     assert args.retry_failed_rho_without_advance is False
-    assert args.n_threads == (comparison_example.os.cpu_count() or 1)
+    assert args.n_threads == comparison_example.default_worker_threads()
     assert args.acados_integrator_type == "IRK"
     assert args.acados_sim_stages == 4
     assert args.acados_sim_steps == 5
@@ -5947,6 +6138,167 @@ def test_endurance_cli_stops_on_failure_and_keeps_robust_irk_defaults():
     assert args.periodic_ipopt_refinement_ode_solver == "target"
 
 
+def test_terminal_reserve_cli_defaults_are_disabled_and_shared():
+    periodic_args = periodic_example.build_argument_parser().parse_args([])
+    comparison_args = comparison_example.build_cli().parse_args([])
+
+    assert periodic_args.terminal_reserve_weight == 0.0
+    assert comparison_args.terminal_reserve_weight == 0.0
+    assert periodic_args.terminal_reserve_temperature == pytest.approx(
+        comparison_args.terminal_reserve_temperature
+    )
+
+
+@pytest.mark.parametrize("weight", [-1.0, np.nan, np.inf, -np.inf])
+def test_terminal_reserve_rejects_invalid_weight(weight):
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        periodic_example.validate_terminal_reserve_options(weight, 0.005)
+
+
+@pytest.mark.parametrize("temperature", [0.0, -1.0, np.nan, np.inf, -np.inf])
+def test_terminal_reserve_rejects_invalid_temperature(temperature):
+    with pytest.raises(ValueError, match="finite and strictly positive"):
+        periodic_example.validate_terminal_reserve_options(0.0, temperature)
+
+
+@pytest.mark.parametrize("weight", [-1.0, np.nan, np.inf, -np.inf])
+def test_objective_builder_rejects_invalid_terminal_reserve_weight(weight):
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        mhe_example.set_objective_functions(
+            model=SimpleNamespace(muscles_dynamics_model=[]),
+            minimize_force=False,
+            minimize_fatigue=False,
+            minimize_control=False,
+            cost_fun_weight=[0.0, 0.0, 0.0],
+            target=2.0 * np.pi,
+            terminal_reserve_weight=weight,
+        )
+
+
+@pytest.mark.parametrize("temperature", [0.0, -1.0, np.nan, np.inf, -np.inf])
+def test_objective_builder_always_validates_terminal_reserve_temperature(temperature):
+    with pytest.raises(ValueError, match="finite and positive"):
+        mhe_example.set_objective_functions(
+            model=SimpleNamespace(muscles_dynamics_model=[]),
+            minimize_force=False,
+            minimize_fatigue=False,
+            minimize_control=False,
+            cost_fun_weight=[0.0, 0.0, 0.0],
+            target=2.0 * np.pi,
+            terminal_reserve_weight=0.0,
+            terminal_reserve_temperature=temperature,
+        )
+
+
+def test_terminal_reserve_changes_codegen_signature():
+    baseline = periodic_example.build_argument_parser().parse_args([])
+    reserve = periodic_example.build_argument_parser().parse_args(
+        ["--terminal-reserve-weight", "0.25", "--terminal-reserve-temperature", "0.01"]
+    )
+
+    assert periodic_example._codegen_signature(baseline) != periodic_example._codegen_signature(
+        reserve
+    )
+
+
+def test_terminal_reserve_codegen_signature_tracks_implementation_sources(monkeypatch):
+    stamped_names = []
+
+    def fake_source_stamp(path):
+        stamped_names.append(Path(path).name)
+        return Path(path).name
+
+    monkeypatch.setattr(periodic_example, "_source_stamp", fake_source_stamp)
+    periodic_example._codegen_signature(
+        periodic_example.build_argument_parser().parse_args([])
+    )
+
+    assert "custom_objectives.py" in stamped_names
+    assert "muscle_reserve.py" in stamped_names
+    assert "cycling_pulse_width_mhe.py" in stamped_names
+
+
+def test_terminal_reserve_diagnostics_report_hard_minimum_and_smoothing_gap():
+    summary = {
+        "state_traces": {
+            "A_Biceps": np.array([[100.0, 80.0]]),
+            "A_Triceps": np.array([[200.0, 120.0]]),
+        }
+    }
+
+    periodic_example.attach_terminal_capacity_reserve_diagnostics(
+        summary,
+        {"A_Biceps": 100.0, "A_Triceps": 200.0},
+        temperature=0.01,
+    )
+
+    diagnostics = summary["terminal_capacity_reserve"]
+    assert diagnostics["available"] is True
+    assert diagnostics["minimum_ratio"] == pytest.approx(0.6)
+    assert 0.0 <= diagnostics["optimism_gap"]
+    assert diagnostics["optimism_gap"] <= diagnostics["maximum_optimism_gap"]
+    assert diagnostics["penalty"] == pytest.approx(
+        1.0 - diagnostics["smooth_minimum_ratio"]
+    )
+    assert diagnostics["physiological_domain_valid"] is True
+    assert diagnostics["physiological_domain_error"] is None
+
+
+def test_terminal_reserve_diagnostics_flag_non_physiological_capacity():
+    summary = {"state_traces": {"A_Biceps": np.array([[100.0, 101.0]])}}
+
+    periodic_example.attach_terminal_capacity_reserve_diagnostics(
+        summary,
+        {"A_Biceps": 100.0},
+        temperature=0.005,
+    )
+
+    diagnostics = summary["terminal_capacity_reserve"]
+    assert diagnostics["available"] is True
+    assert diagnostics["physiological_domain_valid"] is False
+    assert "[0, 1]" in diagnostics["physiological_domain_error"]
+
+
+def test_terminal_reserve_diagnostics_reject_incomplete_muscle_population():
+    summary = {"state_traces": {"A_Biceps": np.array([[100.0, 99.0]])}}
+
+    periodic_example.attach_terminal_capacity_reserve_diagnostics(
+        summary,
+        {"A_Biceps": 100.0, "A_Triceps": 200.0},
+        temperature=0.005,
+    )
+
+    diagnostics = summary["terminal_capacity_reserve"]
+    assert diagnostics == {
+        "available": False,
+        "reason": "missing_capacity_state_traces",
+        "missing_state_keys": ["A_Triceps"],
+    }
+
+
+def test_comparison_forwards_terminal_reserve_to_every_solver(monkeypatch):
+    captured = {}
+
+    def fake_run(solver_name, args, **_):
+        captured[solver_name] = args
+        return {}
+
+    monkeypatch.setattr(comparison_example, "_run_benchmark_case", fake_run)
+    monkeypatch.setattr(comparison_example, "print_solver_overview", lambda _: None)
+
+    comparison_example.main(
+        solvers=("ipopt", "madnlp"),
+        n_windows=1,
+        terminal_reserve_weight=0.25,
+        terminal_reserve_temperature=0.01,
+    )
+
+    for solver_name in ("ipopt", "madnlp"):
+        args = captured[solver_name]
+        assert args.terminal_reserve_weight == pytest.approx(0.25)
+        assert args.terminal_reserve_temperature == pytest.approx(0.01)
+
+
 def test_solver_clis_accept_explicit_thread_count():
     periodic_args = periodic_example.build_argument_parser().parse_args(
         ["--n-threads", "8"]
@@ -5954,11 +6306,25 @@ def test_solver_clis_accept_explicit_thread_count():
     mumps_args = comparison_example.build_cli().parse_args(
         ["--madnlp-linear-solver", "mumps"]
     )
+    ma57_args = comparison_example.build_cli().parse_args(
+        ["--madnlp-linear-solver", "ma57"]
+    )
     comparison_args = comparison_example.build_cli().parse_args(["--n-threads", "8"])
 
     assert periodic_args.n_threads == 8
     assert mumps_args.madnlp_linear_solver == "mumps"
+    assert ma57_args.madnlp_linear_solver == "ma57"
     assert comparison_args.n_threads == 8
+
+
+def test_solver_clis_default_hsl_library_from_benchmark_environment(monkeypatch):
+    monkeypatch.setenv("IPOPT_HSL_LIBRARY", "/opt/coinhsl/libhsl.so")
+
+    periodic_args = periodic_example.build_argument_parser().parse_args([])
+    comparison_args = comparison_example.build_cli().parse_args([])
+
+    assert periodic_args.ipopt_hsl_library == "/opt/coinhsl/libhsl.so"
+    assert comparison_args.ipopt_hsl_library == "/opt/coinhsl/libhsl.so"
 
 
 def test_solver_clis_expose_ipopt_fatrop_and_madnlp_compilation_options():
@@ -6075,6 +6441,12 @@ def test_warmup_cache_signature_is_independent_from_target_linear_solver(
         )
         != mumps_signature
     )
+
+
+def test_standard_warmup_forwards_the_configured_hsl_library():
+    source = inspect.getsource(periodic_example.run_standard_ipopt_warmup)
+
+    assert 'hsl_library=getattr(args, "ipopt_hsl_library", None)' in source
 
 
 def test_warmup_cache_signature_ignores_reduced_runtime_dynamics(tmp_path):
@@ -6444,7 +6816,7 @@ def test_explicit_acados_tolerance_remains_the_window_tolerance():
     assert tolerance == pytest.approx(3e-5)
 
 
-def test_nlp_solver_stats_snapshot_keeps_oracle_timing_without_iterations():
+def test_nlp_solver_stats_snapshot_keeps_timing_and_compact_iteration_diagnostics():
     stats = {
         "t_wall_total": 2.0,
         "t_wall_nlp_hess_l": 1.0,
@@ -6453,7 +6825,12 @@ def test_nlp_solver_stats_snapshot_keeps_oracle_timing_without_iterations():
         "iter_count": 5,
         "success": True,
         "return_status": "Solve_Succeeded",
-        "iterations": {"inf_pr": [1.0, 0.0]},
+        "iterations": {
+            "inf_pr": [1.0, 0.0],
+            "inf_du": [10.0, 0.25],
+            "mu": [0.1, np.nan],
+            "large_unused_trace": list(range(100)),
+        },
         "unrelated": object(),
     }
     nmpc = SimpleNamespace(
@@ -6468,6 +6845,16 @@ def test_nlp_solver_stats_snapshot_keeps_oracle_timing_without_iterations():
     assert snapshot["n_call_nlp_hess_l"] == 4
     assert snapshot["return_status"] == "Solve_Succeeded"
     assert "iterations" not in snapshot
+    assert snapshot["iteration_diagnostics"]["inf_pr"] == {
+        "count": 2,
+        "initial": 1.0,
+        "final": 0.0,
+        "minimum": 0.0,
+        "maximum": 1.0,
+    }
+    assert snapshot["iteration_diagnostics"]["inf_du"]["final"] == 0.25
+    assert snapshot["iteration_diagnostics"]["mu"]["final"] is None
+    assert "large_unused_trace" not in snapshot["iteration_diagnostics"]
     assert "unrelated" not in snapshot
 
 
@@ -6642,6 +7029,9 @@ def test_benchmark_json_summary_contains_comparable_fatigue_metrics(tmp_path):
     assert payload["schema_version"] == 3
     assert payload["runtime"]["logical_cpu_count"] >= 1
     assert "OMP_NUM_THREADS" in payload["runtime"]["thread_environment"]
+    assert "OMP_THREAD_LIMIT" in payload["runtime"]["thread_environment"]
+    assert "OMP_DYNAMIC" in payload["runtime"]["thread_environment"]
+    assert "BLIS_NUM_THREADS" in payload["runtime"]["thread_environment"]
     assert payload["configurations"]["madnlp"]["objective"] == "fatigue"
     assert payload["configurations"]["madnlp"]["constant_crank_torque"] == -0.24
     assert payload["configurations"]["madnlp"]["max_consecutive_failing"] == 2

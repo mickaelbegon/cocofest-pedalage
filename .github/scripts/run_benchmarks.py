@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -62,6 +63,87 @@ SEED_FILES = (
     "common-full.npz",
     "reduced-cycling-fourier12.npz",
 )
+
+
+def finite_float(value: str) -> float:
+    """Parse a finite CLI floating-point value."""
+
+    try:
+        parsed = float(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(f"must be a number, got {value!r}") from error
+    if not math.isfinite(parsed):
+        raise argparse.ArgumentTypeError(f"must be finite, got {value!r}")
+    return parsed
+
+
+def nonnegative_finite_float(value: str) -> float:
+    """Parse a finite energy-equivalent torque."""
+
+    parsed = finite_float(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be greater than or equal to zero")
+    return parsed
+
+
+def negative_finite_float(value: str) -> float:
+    """Parse the crank convention's strictly negative isokinetic speed."""
+
+    parsed = finite_float(value)
+    if parsed >= 0:
+        raise argparse.ArgumentTypeError("must be strictly negative")
+    return parsed
+
+
+def isokinetic_configuration_name(args: argparse.Namespace) -> str:
+    """Return a collision-resistant name for one isokinetic configuration."""
+
+    if args.formulation == "dynamic":
+        return ""
+    torque = format(args.energy_equivalent_torque, ".12g")
+    omega = format(args.isokinetic_omega, ".12g")
+    torque_min = format(args.load_torque_min, ".12g")
+    torque_max = format(args.load_torque_max, ".12g")
+    return (
+        f"isokinetic-torque-{torque}-omega-{omega}"
+        f"-load-{torque_min}-to-{torque_max}"
+    )
+
+
+def isokinetic_directory_suffix(args: argparse.Namespace) -> str:
+    """Name an isokinetic campaign without changing dynamic result paths."""
+
+    name = isokinetic_configuration_name(args)
+    return f"-{name}" if name else ""
+
+
+def case_result_dir_name(case: "Case", args: argparse.Namespace) -> str:
+    """Return the case directory, isolated for an isokinetic campaign."""
+
+    return f"{case.result_dir_name}{isokinetic_directory_suffix(args)}"
+
+
+def default_worker_threads() -> int:
+    """Return the physical cores available to this process when detectable."""
+
+    logical_count = os.cpu_count() or 1
+    try:
+        allowed_cpus = os.sched_getaffinity(0)
+    except AttributeError:
+        allowed_cpus = range(logical_count)
+    topology = set()
+    for cpu in allowed_cpus:
+        topology_root = Path(f"/sys/devices/system/cpu/cpu{cpu}/topology")
+        try:
+            topology.add(
+                (
+                    (topology_root / "physical_package_id").read_text().strip(),
+                    (topology_root / "core_id").read_text().strip(),
+                )
+            )
+        except OSError:
+            return len(allowed_cpus)
+    return len(topology) or len(allowed_cpus)
 
 
 @dataclass(frozen=True)
@@ -277,11 +359,13 @@ def base_environment(prefix: Path, suite: str, threads: int,
         "OMP_NUM_THREADS",
         "OMP_THREAD_LIMIT",
         "OPENBLAS_NUM_THREADS",
+        "BLIS_NUM_THREADS",
         "MKL_NUM_THREADS",
         "NUMEXPR_NUM_THREADS",
         "JULIA_NUM_THREADS",
     ):
         env[variable] = str(numeric_threads)
+    env["OMP_DYNAMIC"] = "FALSE"
     return env
 
 
@@ -291,7 +375,18 @@ def build_case_environment(case: Case, prefix: Path, args: argparse.Namespace) -
     # run_cycling_benchmark_case.sh lets these environment variables win over its
     # positional arguments, so set them from the case rather than inheriting a
     # stale value from the caller's shell.
-    env["DUAL_WARM_START"] = case.dual_warm_start
+    # The isokinetic RHO transfer is materially better conditioned in MadNLP
+    # when bound multipliers are retained.  Its default 1e-6 termination can
+    # otherwise report success while the independently reconstructed primal
+    # still violates a bound by O(2e-5).  Keep this backend-specific numerical
+    # policy out of the continuous OCP and make the benchmark gate stricter.
+    env["DUAL_WARM_START"] = (
+        "bounds"
+        if args.formulation == "isokinetic" and case.solver == "madnlp"
+        else case.dual_warm_start
+    )
+    if args.formulation == "isokinetic" and case.solver == "madnlp":
+        env["BENCHMARK_NLP_TOLERANCE"] = "1e-8"
     env["PARAMETRIC_KKT_PREDICTOR"] = "true" if case.kkt_predictor else "false"
     env["PARAMETRIC_KKT_DUAL_MODE"] = case.kkt_dual_mode
 
@@ -300,6 +395,21 @@ def build_case_environment(case: Case, prefix: Path, args: argparse.Namespace) -
     env["BENCHMARK_ASSISTANCE"] = args.assistance
     env["BENCHMARK_Q_SLACK"] = args.q_slack
     env["BENCHMARK_MAX_ITER"] = str(args.max_iter)
+    # The shell runner reads these names too, so direct shell and IDE launches
+    # use one unambiguous interface for every NLP backend.
+    env["BENCHMARK_FORMULATION"] = args.formulation
+    env["BENCHMARK_ENERGY_EQUIVALENT_TORQUE"] = str(args.energy_equivalent_torque)
+    env["BENCHMARK_ISOKINETIC_OMEGA"] = str(args.isokinetic_omega)
+    env["BENCHMARK_LOAD_TORQUE_MIN"] = str(args.load_torque_min)
+    env["BENCHMARK_LOAD_TORQUE_MAX"] = str(args.load_torque_max)
+    if args.formulation == "isokinetic":
+        # The isokinetic reference is IPOPT/MA57.  A deployment may have MA57
+        # linked directly into IPOPT; otherwise IPOPT_HSL_LIBRARY supplies the
+        # CoinHSL shared object through the shell runner.
+        env["IPOPT_LINEAR_SOLVER"] = "ma57"
+        env["WARMUP_IPOPT_LINEAR_SOLVER"] = "ma57"
+        if args.ipopt_hsl_library is not None:
+            env["IPOPT_HSL_LIBRARY"] = str(args.ipopt_hsl_library)
     return env
 
 
@@ -333,7 +443,7 @@ def build_command(case: Case, prefix: Path, args: argparse.Namespace) -> tuple[l
     # run_ryzen5950x_endurance_sweep.sh; only the horizon, the thread count and
     # the crank torque follow this driver's options. ACADOS emits its generated
     # C into the working directory, so each case gets its own codegen folder.
-    case_dir = REPO_ROOT / args.output_root / case.result_dir_name
+    case_dir = REPO_ROOT / args.output_root / case_result_dir_name(case, args)
     codegen_dir = case_dir / "codegen"
     codegen_dir.mkdir(parents=True, exist_ok=True)
     seed_dir = REPO_ROOT / "benchmark-seed"
@@ -342,7 +452,8 @@ def build_command(case: Case, prefix: Path, args: argparse.Namespace) -> tuple[l
         str(REPO_ROOT / "examples/fes_multibody/cycling/cycling_fes_solver_comparison.py"),
         "--solvers", "acados",
         "--objective", "fatigue",
-        "--ipopt-profile", "periodic_collocation",
+        "--ipopt-profile",
+        "scientific-radau5" if args.formulation == "isokinetic" else "periodic_collocation",
         "--ipopt-use-sx",
         "--ipopt-enforce-start-constraints",
         "--cycles-per-window", str(args.cycles_per_window),
@@ -353,31 +464,82 @@ def build_command(case: Case, prefix: Path, args: argparse.Namespace) -> tuple[l
         "--primal-feasibility-threshold", "1e-5",
         "--max-consecutive-failing", "2",
         "--retry-failed-rho-without-advance",
-        "--standard-warmup-seed",
-        str(REPO_ROOT / ".github/benchmark-seeds/legacy-resistive-0p22-warmup.npz"),
-        "--legacy-standard-warmup-seed-signed-torque", "0.22",
-        "--standard-warmup-seed-continuation",
-        "--common-initial-solution", str(seed_dir / f"common-{case.mechanics}.npz"),
-        "--warmup-ipopt-linear-solver", "mumps",
-        "--ipopt-linear-solver", "mumps",
+        *(
+            [
+                "--standard-warmup-seed",
+                str(
+                    REPO_ROOT
+                    / ".github/benchmark-seeds/legacy-resistive-0p22-warmup.npz"
+                ),
+                "--legacy-standard-warmup-seed-signed-torque",
+                "0.22",
+                "--standard-warmup-seed-continuation",
+                "--common-initial-solution",
+                str(seed_dir / f"common-{case.mechanics}.npz"),
+            ]
+            if args.formulation == "dynamic"
+            else []
+        ),
+        "--warmup-ipopt-linear-solver",
+        "ma57" if args.formulation == "isokinetic" else "mumps",
+        "--ipopt-linear-solver",
+        "ma57" if args.formulation == "isokinetic" else "mumps",
+        *(
+            ["--ipopt-hsl-library", str(args.ipopt_hsl_library)]
+            if args.ipopt_hsl_library is not None
+            else []
+        ),
         "--ipopt-disable-historical-initial-guess",
         "--reduced-cycling-profile", str(seed_dir / "reduced-cycling-fourier12.npz"),
         "--state-scaling", "full",
         "--first-node-wheel-q-slack", "0",
         "--terminal-wheel-q-slack", args.q_slack,
         "--mechanical-formulation", case.mechanics,
+        "--formulation", args.formulation,
+        "--energy-equivalent-torque", str(args.energy_equivalent_torque),
+        "--isokinetic-omega", str(args.isokinetic_omega),
+        "--load-torque-min", str(args.load_torque_min),
+        "--load-torque-max", str(args.load_torque_max),
         "--experimental-reduced-acados",
         "--acados-dir", str(prefix),
         "--acados-check-reuse-possible",
         "--acados-max-iter", "100",
-        "--acados-nlp-solver-type", "SQP",
+        "--acados-nlp-solver-type",
+        (
+            "SQP_WITH_FEASIBLE_QP"
+            if args.formulation == "isokinetic"
+            else "SQP"
+        ),
+        *(
+            ["--acados-search-direction-mode", "BYRD_OMOJOKUN"]
+            if args.formulation == "isokinetic"
+            else []
+        ),
         "--acados-integrator-type", "IRK",
         "--acados-collocation-type", "GAUSS_LEGENDRE",
         "--acados-sim-stages", "4",
         "--acados-sim-steps", "5",
         "--acados-newton-iter", "5",
         "--acados-stationarity-tolerance", "5e-3",
-        "--acados-control-homotopy-release-final-radius",
+        *(
+            ["--acados-control-homotopy-release-final-radius"]
+            if args.formulation == "dynamic"
+            else []
+        ),
+        *(
+            ["--periodic-ipopt-refinement-each-window"]
+            if args.formulation == "isokinetic"
+            else []
+        ),
+        *(
+            [
+                "--periodic-ipopt-refinement-ode-solver", "collocation",
+                "--periodic-ipopt-refinement-collocation-degree", "5",
+                "--periodic-ipopt-refinement-collocation-method", "radau",
+            ]
+            if args.formulation == "isokinetic"
+            else []
+        ),
         "--compact-rho-output",
         "--print-traces",
         "--codegen-tag", f"ide-{case.key}",
@@ -450,7 +612,7 @@ def report(selected: list[Case], args: argparse.Namespace) -> int:
     output_root = REPO_ROOT / args.output_root
     rows = []
     for case in selected:
-        record = read_result(output_root / case.result_dir_name / "result.json")
+        record = read_result(output_root / case_result_dir_name(case, args) / "result.json")
         rows.append((case, record))
 
     print(f"\n{'=' * 100}")
@@ -514,8 +676,10 @@ def report(selected: list[Case], args: argparse.Namespace) -> int:
             print(f"  {transcription}: single solver, no cross-check")
 
     summary_dir = REPO_ROOT / args.summary_dir
+    if args.formulation == "isokinetic":
+        summary_dir /= isokinetic_configuration_name(args)
     result_files = sorted(
-        str(output_root / case.result_dir_name / "result.json")
+        str(output_root / case_result_dir_name(case, args) / "result.json")
         for case, record in rows
         if record is not None
     )
@@ -573,13 +737,60 @@ def parse_arguments(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--cycles", type=int, default=1, help="RHO count (default: 1)")
     parser.add_argument("--cycles-per-window", type=int, default=1)
-    parser.add_argument("--threads", type=int, default=os.cpu_count() or 1,
-                        help="BENCHMARK_THREADS, the --n-threads of the solver")
+    parser.add_argument("--threads", type=int, default=default_worker_threads(),
+                        help="BENCHMARK_THREADS (default: available physical cores)")
     parser.add_argument("--numeric-threads", type=int, default=1,
                         help="threads inside BLAS/OpenMP/Julia (default: 1, see section 9.1)")
     parser.add_argument("--assistance", default="0.00",
                         help="crank torque; 'signed:+0.15' is a resistance of 0.15 N.m")
     parser.add_argument("--q-slack", default="0.002")
+    parser.add_argument(
+        "--ipopt-hsl-library",
+        type=Path,
+        default=(
+            Path(os.environ["IPOPT_HSL_LIBRARY"])
+            if os.environ.get("IPOPT_HSL_LIBRARY")
+            else None
+        ),
+        help=(
+            "optional CoinHSL shared library passed to IPOPT as hsllib; "
+            "needed when MA57 is not linked directly into IPOPT"
+        ),
+    )
+    parser.add_argument(
+        "--formulation",
+        choices=("dynamic", "isokinetic"),
+        default="dynamic",
+        help="cycling mechanics formulation (default: dynamic)",
+    )
+    parser.add_argument(
+        "--energy-equivalent-torque",
+        type=nonnegative_finite_float,
+        default=0.2,
+        metavar="N_M",
+        help="non-negative torque defining the isokinetic work target (default: 0.2)",
+    )
+    parser.add_argument(
+        "--isokinetic-omega",
+        type=negative_finite_float,
+        default=-2 * math.pi,
+        metavar="RAD_S",
+        help="strictly negative target crank velocity (default: -2*pi)",
+    )
+    parser.add_argument(
+        "--load-torque-min",
+        type=finite_float,
+        default=-3.0,
+        metavar="N_M",
+        help="finite lower bound on isokinetic load torque (default: -3)",
+    )
+    parser.add_argument(
+        "--load-torque-max",
+        type=finite_float,
+        default=3.0,
+        metavar="N_M",
+        help="finite upper bound on isokinetic load torque (default: 3)",
+    )
     parser.add_argument("--max-iter", type=int, default=2000)
     parser.add_argument("--output-root", default="local-results")
     parser.add_argument("--summary-dir", default="local-summary")
@@ -594,7 +805,17 @@ def parse_arguments(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--seed-only", action="store_true",
                         help="build benchmark-seed/ and stop, running no solver case")
     parser.add_argument("--list", action="store_true", help="list the cases and exit")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if not args.load_torque_min < 0.0 < args.load_torque_max:
+        parser.error(
+            "--load-torque-min/--load-torque-max must allow assistance and "
+            "resistance (MIN < 0 < MAX)"
+        )
+    if args.energy_equivalent_torque > args.load_torque_max:
+        parser.error(
+            "--energy-equivalent-torque cannot exceed --load-torque-max"
+        )
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -685,6 +906,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     log_dir = REPO_ROOT / args.output_root / "_logs"
+    if args.formulation == "isokinetic":
+        log_dir /= isokinetic_configuration_name(args)
     log_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Repository : {REPO_ROOT}")

@@ -18,8 +18,24 @@ from tempfile import TemporaryDirectory
 from time import perf_counter
 import traceback
 
+# Default to one level of parallelism even for direct IDE/CLI launches.  The
+# benchmark launchers may still override these variables before this module is
+# imported for controlled scaling experiments.
+for _single_thread_variable in (
+    "OMP_NUM_THREADS",
+    "OMP_THREAD_LIMIT",
+    "OPENBLAS_NUM_THREADS",
+    "BLIS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+):
+    os.environ.setdefault(_single_thread_variable, "1")
+os.environ.setdefault("OMP_DYNAMIC", "FALSE")
+
 import numpy as np
 from bioptim import SolutionMerge
+
+from cocofest.optimization.muscle_reserve import DEFAULT_SMOOTH_MIN_TEMPERATURE
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
@@ -31,6 +47,7 @@ try:
         DEFAULT_CRANK_TORQUE_NM,
         NLP_SOLVER_NAMES,
         build_argument_parser,
+        default_worker_threads,
         parse_control_homotopy_radii,
         parse_crank_assistance,
         parse_proximal_control_weights,
@@ -46,6 +63,7 @@ except ImportError:
         DEFAULT_CRANK_TORQUE_NM,
         NLP_SOLVER_NAMES,
         build_argument_parser,
+        default_worker_threads,
         parse_control_homotopy_radii,
         parse_crank_assistance,
         parse_proximal_control_weights,
@@ -83,8 +101,17 @@ BENCHMARK_CONFIGURATION_FIELDS = (
     "single_shot",
     "objective",
     "objective_shape",
+    "terminal_reserve_weight",
+    "terminal_reserve_effective_weight",
+    "terminal_reserve_temperature",
     "model_formulation",
     "mechanical_formulation",
+    "formulation",
+    "isokinetic_omega",
+    "energy_equivalent_torque",
+    "energy_target_j",
+    "load_torque_min",
+    "load_torque_max",
     "mechanical_equivalence_audit",
     "full_contact_constraints_terminal",
     "full_contact_position_terminal",
@@ -172,6 +199,14 @@ BENCHMARK_CONFIGURATION_FIELDS = (
     "nlp_ipopt_recovery",
     "nlp_ipopt_recovery_max_iterations",
     "nlp_ipopt_recovery_collocation_degree",
+    "nlp_ipopt_recovery_linear_solver",
+    "ipopt_madnlp_recovery",
+    "ipopt_madnlp_recovery_max_iterations",
+    "ipopt_madnlp_recovery_collocation_degree",
+    "ipopt_madnlp_recovery_linear_solver",
+    "ipopt_madnlp_recovery_max_wall_time",
+    "ipopt_madnlp_recovery_c_compile",
+    "ipopt_madnlp_fallback_advance",
     "nlp_failed_rho_phase_one_recovery",
     "acados_failed_rho_phase_one_recovery",
     "acados_initial_irk_rollout",
@@ -689,8 +724,12 @@ def _window_performance(result: dict) -> dict:
                 "window": index,
                 "status": solution.status,
                 "success": solution.status == 0,
+                "iterations": getattr(solution, "iterations", None),
                 "solver_time_s": solution.solver_time_to_optimize,
                 "wall_time_s": solution.real_time_to_optimize,
+                "certifier": getattr(
+                    solution, "_cocofest_hybrid_certifier", "target_solver"
+                ),
             }
         )
 
@@ -717,6 +756,39 @@ def _window_performance(result: dict) -> dict:
         )
         return float(np.percentile(values, percentile)) if values.size else None
 
+    # Hybrid recovery cycles are valid physical RHO trajectories, but they
+    # must not be folded into target-backend timing.  Keep a second, explicit
+    # population containing only RHO certified by the requested solver (for
+    # example IPOPT+MUMPS), excluding failed attempts and MA57 fallbacks.
+    target_rows = [
+        row for row in successful_rows if row["certifier"] == "target_solver"
+    ]
+    target_hot_rows = [row for row in target_rows if row["window"] > 0]
+
+    def row_stat(
+        selected_rows: list[dict], key: str, percentile: float
+    ) -> float | None:
+        values = np.asarray(
+            [
+                float(row[key])
+                for row in selected_rows
+                if row[key] is not None and np.isfinite(float(row[key]))
+            ],
+            dtype=float,
+        )
+        return float(np.percentile(values, percentile)) if values.size else None
+
+    def row_mean(selected_rows: list[dict], key: str) -> float | None:
+        values = np.asarray(
+            [
+                float(row[key])
+                for row in selected_rows
+                if row[key] is not None and np.isfinite(float(row[key]))
+            ],
+            dtype=float,
+        )
+        return float(np.mean(values)) if values.size else None
+
     return {
         "rows": rows,
         "successful_prefix_windows": prefix,
@@ -736,6 +808,47 @@ def _window_performance(result: dict) -> dict:
         "hot_solver_time_p90_s": hot_stat("solver_time_s", 90),
         "hot_wall_time_median_s": hot_stat("wall_time_s", 50),
         "hot_wall_time_p90_s": hot_stat("wall_time_s", 90),
+        "target_solver_only_window_count": len(target_rows),
+        "target_solver_only_solver_time_s": float(
+            sum(float(row["solver_time_s"] or 0.0) for row in target_rows)
+        ),
+        "target_solver_only_solver_time_mean_s": row_mean(
+            target_rows, "solver_time_s"
+        ),
+        "target_solver_only_solver_time_median_s": row_stat(
+            target_rows, "solver_time_s", 50
+        ),
+        "target_solver_only_solver_time_p90_s": row_stat(
+            target_rows, "solver_time_s", 90
+        ),
+        "target_solver_only_hot_window_count": len(target_hot_rows),
+        "target_solver_only_hot_solver_time_mean_s": row_mean(
+            target_hot_rows, "solver_time_s"
+        ),
+        "target_solver_only_hot_solver_time_median_s": row_stat(
+            target_hot_rows, "solver_time_s", 50
+        ),
+        "target_solver_only_hot_solver_time_p90_s": row_stat(
+            target_hot_rows, "solver_time_s", 90
+        ),
+        "target_solver_only_hot_wall_time_mean_s": row_mean(
+            target_hot_rows, "wall_time_s"
+        ),
+        "target_solver_only_hot_wall_time_median_s": row_stat(
+            target_hot_rows, "wall_time_s", 50
+        ),
+        "target_solver_only_hot_wall_time_p90_s": row_stat(
+            target_hot_rows, "wall_time_s", 90
+        ),
+        "target_solver_only_hot_iterations_mean": row_mean(
+            target_hot_rows, "iterations"
+        ),
+        "target_solver_only_hot_iterations_median": row_stat(
+            target_hot_rows, "iterations", 50
+        ),
+        "target_solver_only_hot_iterations_p90": row_stat(
+            target_hot_rows, "iterations", 90
+        ),
     }
 
 
@@ -1463,6 +1576,8 @@ def _solver_config(
     single_shot: bool,
     objective: str,
     objective_shape: str,
+    terminal_reserve_weight: float,
+    terminal_reserve_temperature: float,
     cycles_per_window: int,
     stimulations_per_cycle: int,
     n_windows: int,
@@ -1587,6 +1702,8 @@ def _solver_config(
             stimulations_per_cycle=stimulations_per_cycle,
             objective=objective,
             objective_shape=objective_shape,
+            terminal_reserve_weight=terminal_reserve_weight,
+            terminal_reserve_temperature=terminal_reserve_temperature,
             constant_crank_torque=resistive_torque,
             max_ipopt_iterations=ipopt_max_iter,
             ipopt_linear_solver=ipopt_linear_solver,
@@ -1743,6 +1860,8 @@ def _solver_config(
             stimulations_per_cycle=stimulations_per_cycle,
             objective=objective,
             objective_shape=objective_shape,
+            terminal_reserve_weight=terminal_reserve_weight,
+            terminal_reserve_temperature=terminal_reserve_temperature,
             constant_crank_torque=resistive_torque,
             max_acados_iterations=acados_max_iter,
             acados_assisted_hot_start=acados_assisted_hot_start,
@@ -2299,6 +2418,13 @@ def _benchmark_window_rows(result: dict) -> list[dict]:
                     else None
                 ),
                 "validated": index < validated_prefix,
+                "certifier": (
+                    getattr(
+                        solution, "_cocofest_hybrid_certifier", "target_solver"
+                    )
+                    if solution is not None
+                    else None
+                ),
                 "iterations": (iterations[index] if index < len(iterations) else None),
                 "objective": (
                     _finite_float(objectives[index])
@@ -3179,6 +3305,51 @@ def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
                 "hot_solver_time_p90_s": performance["hot_solver_time_p90_s"],
                 "hot_wall_time_median_s": performance["hot_wall_time_median_s"],
                 "hot_wall_time_p90_s": performance["hot_wall_time_p90_s"],
+                "target_solver_only_window_count": performance[
+                    "target_solver_only_window_count"
+                ],
+                "target_solver_only_solver_time_s": performance[
+                    "target_solver_only_solver_time_s"
+                ],
+                "target_solver_only_solver_time_mean_s": performance[
+                    "target_solver_only_solver_time_mean_s"
+                ],
+                "target_solver_only_solver_time_median_s": performance[
+                    "target_solver_only_solver_time_median_s"
+                ],
+                "target_solver_only_solver_time_p90_s": performance[
+                    "target_solver_only_solver_time_p90_s"
+                ],
+                "target_solver_only_hot_window_count": performance[
+                    "target_solver_only_hot_window_count"
+                ],
+                "target_solver_only_hot_solver_time_mean_s": performance[
+                    "target_solver_only_hot_solver_time_mean_s"
+                ],
+                "target_solver_only_hot_solver_time_median_s": performance[
+                    "target_solver_only_hot_solver_time_median_s"
+                ],
+                "target_solver_only_hot_solver_time_p90_s": performance[
+                    "target_solver_only_hot_solver_time_p90_s"
+                ],
+                "target_solver_only_hot_wall_time_mean_s": performance[
+                    "target_solver_only_hot_wall_time_mean_s"
+                ],
+                "target_solver_only_hot_wall_time_median_s": performance[
+                    "target_solver_only_hot_wall_time_median_s"
+                ],
+                "target_solver_only_hot_wall_time_p90_s": performance[
+                    "target_solver_only_hot_wall_time_p90_s"
+                ],
+                "target_solver_only_hot_iterations_mean": performance[
+                    "target_solver_only_hot_iterations_mean"
+                ],
+                "target_solver_only_hot_iterations_median": performance[
+                    "target_solver_only_hot_iterations_median"
+                ],
+                "target_solver_only_hot_iterations_p90": performance[
+                    "target_solver_only_hot_iterations_p90"
+                ],
                 "hot_effective_wall_time_median_s": (
                     None
                     if not strict_hot_effective_wall_times
@@ -3242,6 +3413,13 @@ def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
                 "mechanical_equivalence_audit": result.get(
                     "mechanical_equivalence_audit"
                 ),
+                "isokinetic_scientific_success": result.get(
+                    "isokinetic_scientific_success"
+                ),
+                "isokinetic_audits": result.get("isokinetic_audits") or [],
+                "isokinetic_load_torque_traces": result.get(
+                    "isokinetic_load_torque_traces"
+                ) or [],
                 "nlp_crank_diagnostics": result.get("nlp_crank_diagnostics"),
                 "physical_crank_diagnostics": result.get("physical_crank_diagnostics"),
                 "state_boundary_jumps": result.get("state_boundary_jumps")
@@ -3321,6 +3499,12 @@ def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
                 "nlp_ipopt_recovery_summaries": (
                     result.get("nlp_ipopt_recovery_summaries") or []
                 ),
+                "ipopt_madnlp_recovery": result.get(
+                    "ipopt_madnlp_recovery"
+                ),
+                "ipopt_madnlp_recovery_summaries": (
+                    result.get("ipopt_madnlp_recovery_summaries") or []
+                ),
                 "nlp_failed_rho_phase_one_summaries": (
                     result.get("nlp_failed_rho_phase_one_summaries") or []
                 ),
@@ -3343,6 +3527,9 @@ def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
                     "historical_cache_hit": result.get("standard_warmup_cache_hit"),
                 },
                 "fatigue_capacity_scales": result.get("fatigue_capacity_scales", {}),
+                "terminal_capacity_reserve": result.get(
+                    "terminal_capacity_reserve"
+                ),
                 "error": result.get("error"),
             }
         )
@@ -3398,8 +3585,12 @@ def write_benchmark_summary(output_path: str | Path, results: dict[str, dict]) -
             "thread_environment": {
                 name: os.environ.get(name)
                 for name in (
+                    "BENCHMARK_THREADS",
                     "OMP_NUM_THREADS",
+                    "OMP_THREAD_LIMIT",
+                    "OMP_DYNAMIC",
                     "OPENBLAS_NUM_THREADS",
+                    "BLIS_NUM_THREADS",
                     "MKL_NUM_THREADS",
                     "VECLIB_MAXIMUM_THREADS",
                     "NUMEXPR_NUM_THREADS",
@@ -3488,12 +3679,19 @@ def _set_rho_retry_without_advance(solver_args, enabled: bool) -> None:
 def main(
     objective: str = "fatigue",
     objective_shape: str = "quadratic",
+    terminal_reserve_weight: float = 0.0,
+    terminal_reserve_temperature: float = DEFAULT_SMOOTH_MIN_TEMPERATURE,
     solvers: tuple[str, ...] = BENCHMARK_SOLVERS,
     single_shot: bool = False,
     cycles_per_window: int = 1,
     stimulations_per_cycle: int = 30,
     n_windows: int = 2,
     mechanical_formulation: str = "full",
+    formulation: str = "dynamic",
+    energy_equivalent_torque: float = 0.2,
+    isokinetic_omega: float = -float(2 * np.pi),
+    load_torque_min: float = -3.0,
+    load_torque_max: float = 3.0,
     reduced_cycling_profile: str | Path | None = None,
     experimental_reduced_acados: bool = False,
     full_contact_constraints_terminal: bool = False,
@@ -3663,6 +3861,14 @@ def main(
     nlp_ipopt_fallback_advance: bool = False,
     nlp_ipopt_recovery_max_iterations: int = 2000,
     nlp_ipopt_recovery_collocation_degree: int = 5,
+    nlp_ipopt_recovery_linear_solver: str | None = None,
+    ipopt_madnlp_recovery: bool = False,
+    ipopt_madnlp_recovery_max_iterations: int = 2000,
+    ipopt_madnlp_recovery_collocation_degree: int = 5,
+    ipopt_madnlp_recovery_linear_solver: str = "mumps",
+    ipopt_madnlp_recovery_max_wall_time: float | None = None,
+    ipopt_madnlp_recovery_c_compile: bool = False,
+    ipopt_madnlp_fallback_advance: bool = False,
     nlp_failed_rho_phase_one_recovery: bool = False,
     acados_failed_rho_phase_one_recovery: bool = False,
     acados_initial_irk_rollout: bool = False,
@@ -3801,11 +4007,16 @@ def main(
         rho_prepared_checkpoint_output_template
     )
     reduced_cycling_profile = resolve_invocation_path(reduced_cycling_profile)
-    ipopt_hsl_library = resolve_invocation_path(ipopt_hsl_library)
+    # ``IPOPT_HSL_LIBRARY`` is the portable benchmark-environment contract.
+    # Retain the explicit CLI argument as the higher-priority override so the
+    # same command works on workstations and CI without a host-specific path.
+    ipopt_hsl_library = resolve_invocation_path(
+        ipopt_hsl_library or os.environ.get("IPOPT_HSL_LIBRARY")
+    )
     output_json = resolve_invocation_path(output_json)
     os.chdir(EXAMPLE_DIR)
     if n_threads is None:
-        n_threads = os.cpu_count() or 1
+        n_threads = default_worker_threads()
     if n_threads < 1:
         raise ValueError("n_threads must be at least 1.")
     if single_shot and n_windows != cycles_per_window:
@@ -3844,6 +4055,8 @@ def main(
         single_shot=single_shot,
         objective=objective,
         objective_shape=objective_shape,
+        terminal_reserve_weight=terminal_reserve_weight,
+        terminal_reserve_temperature=terminal_reserve_temperature,
         cycles_per_window=cycles_per_window,
         stimulations_per_cycle=stimulations_per_cycle,
         n_windows=n_windows,
@@ -3952,6 +4165,8 @@ def main(
         single_shot=single_shot,
         objective=objective,
         objective_shape=objective_shape,
+        terminal_reserve_weight=terminal_reserve_weight,
+        terminal_reserve_temperature=terminal_reserve_temperature,
         cycles_per_window=cycles_per_window,
         stimulations_per_cycle=stimulations_per_cycle,
         n_windows=n_windows,
@@ -4076,6 +4291,12 @@ def main(
     )
     acados_args.disable_standard_ipopt_warmup = acados_disable_standard_ipopt_warmup
     ipopt_args.warmup_ipopt_linear_solver = warmup_ipopt_linear_solver
+    # The acados path builds a separate IPOPT NLP for its periodic refinement.
+    # Carry both MA57 selectors onto that namespace: otherwise a command that
+    # requests ``--ipopt-linear-solver ma57 --ipopt-hsl-library ...`` silently
+    # refines with the default MUMPS backend.
+    acados_args.warmup_ipopt_linear_solver = warmup_ipopt_linear_solver
+    acados_args.ipopt_hsl_library = ipopt_hsl_library
     ipopt_args.standard_warmup_seed = standard_warmup_seed
     acados_args.standard_warmup_seed = standard_warmup_seed
     ipopt_args.standard_warmup_seed_continuation = standard_warmup_seed_continuation
@@ -4143,6 +4364,7 @@ def main(
         setattr(ipopt_args, name, value)
     ipopt_args.compact_rho_output = compact_rho_output
     acados_args.compact_rho_output = compact_rho_output
+    acados_args.periodic_ipopt_refinement = bool(periodic_ipopt_refinement)
     ipopt_args.validate_integrator_maps = validate_integrator_maps
     acados_args.validate_integrator_maps = validate_integrator_maps
     ipopt_args.high_accuracy_trace_max_cycles = high_accuracy_trace_max_cycles
@@ -4475,7 +4697,7 @@ def main(
         madnlp_first_max_iterations=madnlp_first_max_iter,
         periodic_ipopt_hot_start=optional_nlp_periodic_ipopt_hot_start,
     )
-    for optional_nlp_args in (fatrop_args, madnlp_args):
+    for optional_nlp_args in (ipopt_args, fatrop_args, madnlp_args):
         optional_nlp_args.nlp_ipopt_recovery = nlp_ipopt_recovery
         optional_nlp_args.nlp_ipopt_fallback_advance = nlp_ipopt_fallback_advance
         optional_nlp_args.nlp_ipopt_recovery_max_iterations = (
@@ -4484,6 +4706,28 @@ def main(
         optional_nlp_args.nlp_ipopt_recovery_collocation_degree = (
             nlp_ipopt_recovery_collocation_degree
         )
+        optional_nlp_args.nlp_ipopt_recovery_linear_solver = (
+            nlp_ipopt_recovery_linear_solver
+        )
+    ipopt_args.ipopt_madnlp_recovery = ipopt_madnlp_recovery
+    ipopt_args.ipopt_madnlp_recovery_max_iterations = (
+        ipopt_madnlp_recovery_max_iterations
+    )
+    ipopt_args.ipopt_madnlp_recovery_collocation_degree = (
+        ipopt_madnlp_recovery_collocation_degree
+    )
+    ipopt_args.ipopt_madnlp_recovery_linear_solver = (
+        ipopt_madnlp_recovery_linear_solver
+    )
+    ipopt_args.ipopt_madnlp_recovery_max_wall_time = (
+        ipopt_madnlp_recovery_max_wall_time
+    )
+    ipopt_args.ipopt_madnlp_recovery_c_compile = (
+        ipopt_madnlp_recovery_c_compile
+    )
+    ipopt_args.ipopt_madnlp_fallback_advance = (
+        ipopt_madnlp_fallback_advance
+    )
     for nlp_args in (ipopt_args, fatrop_args, madnlp_args):
         nlp_args.nlp_failed_rho_phase_one_recovery = nlp_failed_rho_phase_one_recovery
     ipopt_args.ipopt_c_compile = ipopt_c_compile
@@ -4583,6 +4827,32 @@ def main(
         )
     if mechanical_formulation not in ("full", "reduced"):
         raise ValueError("mechanical_formulation must be 'full' or 'reduced'.")
+    if formulation not in ("dynamic", "isokinetic"):
+        raise ValueError("formulation must be 'dynamic' or 'isokinetic'.")
+    if formulation == "isokinetic" and mechanical_formulation != "reduced":
+        raise ValueError(
+            "The isokinetic formulation currently requires reduced mechanics."
+        )
+    if not np.isfinite(energy_equivalent_torque) or energy_equivalent_torque < 0:
+        raise ValueError("energy_equivalent_torque must be finite and non-negative.")
+    if not np.isfinite(isokinetic_omega) or isokinetic_omega >= 0:
+        raise ValueError("isokinetic_omega must be finite and strictly negative.")
+    if not np.isfinite(load_torque_min) or not np.isfinite(load_torque_max):
+        raise ValueError("The load-torque bounds must be finite.")
+    if load_torque_min >= load_torque_max:
+        raise ValueError("load_torque_min must be smaller than load_torque_max.")
+    if not load_torque_min <= energy_equivalent_torque <= load_torque_max:
+        raise ValueError(
+            "energy_equivalent_torque must lie inside the load-torque bounds."
+        )
+    for solver_configuration in solver_args.values():
+        solver_configuration.formulation = formulation
+        solver_configuration.energy_equivalent_torque = float(
+            energy_equivalent_torque
+        )
+        solver_configuration.isokinetic_omega = float(isokinetic_omega)
+        solver_configuration.load_torque_min = float(load_torque_min)
+        solver_configuration.load_torque_max = float(load_torque_max)
     if mechanical_formulation == "reduced":
         supported = {"ipopt", "fatrop", "madnlp"}
         if experimental_reduced_acados:
@@ -4658,6 +4928,21 @@ def build_cli() -> argparse.ArgumentParser:
         default="quadratic",
         choices=("quadratic", "linear"),
     )
+    parser.add_argument(
+        "--terminal-reserve-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Dimensionless multiplier on a smooth approximation of the minimum "
+            "terminal A/A_scale, shared by every solver; zero omits the Mayer term."
+        ),
+    )
+    parser.add_argument(
+        "--terminal-reserve-temperature",
+        type=float,
+        default=DEFAULT_SMOOTH_MIN_TEMPERATURE,
+        help="Dimensionless smooth-min temperature for terminal muscle reserve.",
+    )
     parser.add_argument("--cycles-per-window", type=int, default=1)
     parser.add_argument("--stimulations-per-cycle", type=int, default=30)
     parser.add_argument(
@@ -4686,6 +4971,18 @@ def build_cli() -> argparse.ArgumentParser:
             "theta/omega reduction. Reduced mode accepts IPOPT and MadNLP."
         ),
     )
+    parser.add_argument(
+        "--formulation",
+        choices=("dynamic", "isokinetic"),
+        default="dynamic",
+        help="Use forward crank dynamics or the reduced isokinetic inverse dynamics.",
+    )
+    parser.add_argument("--energy-equivalent-torque", type=float, default=0.2)
+    parser.add_argument(
+        "--isokinetic-omega", type=float, default=-float(2 * np.pi)
+    )
+    parser.add_argument("--load-torque-min", type=float, default=-3.0)
+    parser.add_argument("--load-torque-max", type=float, default=3.0)
     parser.add_argument(
         "--reduced-cycling-profile",
         type=Path,
@@ -4745,9 +5042,9 @@ def build_cli() -> argparse.ArgumentParser:
     parser.add_argument(
         "--n-threads",
         type=int,
-        default=os.cpu_count() or 1,
+        default=default_worker_threads(),
         help=(
-            "Number of Bioptim/CasADi workers. Defaults to all logical CPUs; "
+            "Number of Bioptim/CasADi workers. Defaults to physical cores; "
             "avoid adding nested BLAS threads unless measured."
         ),
     )
@@ -4884,8 +5181,11 @@ def build_cli() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--ipopt-hsl-library",
-        default=None,
-        help="Absolute CoinHSL library passed to IPOPT's hsllib option.",
+        default=os.environ.get("IPOPT_HSL_LIBRARY"),
+        help=(
+            "CoinHSL library passed to IPOPT's hsllib option; defaults to "
+            "IPOPT_HSL_LIBRARY when exported."
+        ),
     )
     parser.add_argument("--ipopt-print-level", type=int, default=0)
     parser.add_argument("--ipopt-print-timing-statistics", action="store_true")
@@ -5006,6 +5306,7 @@ def build_cli() -> argparse.ArgumentParser:
         default=None,
         choices=(
             "mumps",
+            "ma57",
             "umfpack",
             "lapack_cpu",
             "pardiso_mkl",
@@ -5014,9 +5315,10 @@ def build_cli() -> argparse.ArgumentParser:
             "cucholesky",
         ),
         help=(
-            "MadNLP C-runtime linear solver. The default is mumps; pardiso_mkl "
-            "requires the x86-64 libMad MKL runtime, and GPU choices require a "
-            "compatible runtime and runner."
+            "MadNLP C-runtime linear solver. The default is mumps; ma57 "
+            "requires a separately built HSL-enabled libMad runtime, "
+            "pardiso_mkl requires the x86-64 MKL runtime, and GPU choices "
+            "require a compatible runtime and runner."
         ),
     )
     parser.add_argument(
@@ -5889,20 +6191,71 @@ def build_cli() -> argparse.ArgumentParser:
         "--nlp-ipopt-recovery",
         action="store_true",
         help=(
-            "After an uncertified reduced MadNLP/Fatrop RHO, restore the same "
-            "frozen RHO with IPOPT and require a final certification by the "
-            "requested NLP solver before advancing."
+            "After an uncertified reduced IPOPT/MadNLP/Fatrop RHO, restore the "
+            "same frozen RHO with IPOPT and require a final certification by "
+            "the requested target solver before advancing."
         ),
     )
     parser.add_argument("--nlp-ipopt-recovery-max-iterations", type=int, default=2000)
     parser.add_argument("--nlp-ipopt-recovery-collocation-degree", type=int, default=5)
     parser.add_argument(
+        "--nlp-ipopt-recovery-linear-solver",
+        type=str,
+        default=None,
+        help=(
+            "Linear solver used by the IPOPT recovery NLP. An IPOPT target "
+            "must select a solver different from --ipopt-linear-solver."
+        ),
+    )
+    parser.add_argument(
         "--nlp-ipopt-fallback-advance",
         action="store_true",
         help=(
             "Allow the final converged and feasible IPOPT/Radau recovery to "
-            "certify a reduced MadNLP/Fatrop RHO and return the next RHO to "
-            "the fast backend."
+            "certify a reduced IPOPT/MadNLP/Fatrop RHO and return the next RHO "
+            "to the requested target backend."
+        ),
+    )
+    parser.add_argument(
+        "--ipopt-madnlp-recovery",
+        action="store_true",
+        help=(
+            "After an uncertified reduced IPOPT RHO, restore the same frozen "
+            "Radau NLP with MadNLP before retrying IPOPT."
+        ),
+    )
+    parser.add_argument(
+        "--ipopt-madnlp-recovery-max-iterations", type=int, default=2000
+    )
+    parser.add_argument(
+        "--ipopt-madnlp-recovery-collocation-degree", type=int, default=5
+    )
+    parser.add_argument(
+        "--ipopt-madnlp-recovery-linear-solver",
+        choices=(
+            "mumps",
+            "ma57",
+            "umfpack",
+            "lapack_cpu",
+            "pardiso_mkl",
+            "cudss",
+            "lapack_gpu",
+            "cucholesky",
+        ),
+        default="mumps",
+    )
+    parser.add_argument(
+        "--ipopt-madnlp-recovery-max-wall-time", type=float, default=None
+    )
+    parser.add_argument(
+        "--ipopt-madnlp-recovery-c-compile", action="store_true"
+    )
+    parser.add_argument(
+        "--ipopt-madnlp-fallback-advance",
+        action="store_true",
+        help=(
+            "Let the final certified MadNLP recovery advance a failed reduced "
+            "IPOPT RHO, then return the next RHO to IPOPT."
         ),
     )
     parser.add_argument(
@@ -6158,10 +6511,17 @@ if __name__ == "__main__":
         output_json=args.output_json,
         objective=args.objective,
         objective_shape=args.objective_shape,
+        terminal_reserve_weight=args.terminal_reserve_weight,
+        terminal_reserve_temperature=args.terminal_reserve_temperature,
         cycles_per_window=args.cycles_per_window,
         stimulations_per_cycle=args.stimulations_per_cycle,
         n_windows=args.n_windows,
         mechanical_formulation=args.mechanical_formulation,
+        formulation=args.formulation,
+        energy_equivalent_torque=args.energy_equivalent_torque,
+        isokinetic_omega=args.isokinetic_omega,
+        load_torque_min=args.load_torque_min,
+        load_torque_max=args.load_torque_max,
         reduced_cycling_profile=args.reduced_cycling_profile,
         experimental_reduced_acados=args.experimental_reduced_acados,
         full_contact_constraints_terminal=(args.full_contact_constraints_terminal),
@@ -6420,6 +6780,28 @@ if __name__ == "__main__":
         nlp_ipopt_recovery_max_iterations=(args.nlp_ipopt_recovery_max_iterations),
         nlp_ipopt_recovery_collocation_degree=(
             args.nlp_ipopt_recovery_collocation_degree
+        ),
+        nlp_ipopt_recovery_linear_solver=(
+            args.nlp_ipopt_recovery_linear_solver
+        ),
+        ipopt_madnlp_recovery=args.ipopt_madnlp_recovery,
+        ipopt_madnlp_recovery_max_iterations=(
+            args.ipopt_madnlp_recovery_max_iterations
+        ),
+        ipopt_madnlp_recovery_collocation_degree=(
+            args.ipopt_madnlp_recovery_collocation_degree
+        ),
+        ipopt_madnlp_recovery_linear_solver=(
+            args.ipopt_madnlp_recovery_linear_solver
+        ),
+        ipopt_madnlp_recovery_max_wall_time=(
+            args.ipopt_madnlp_recovery_max_wall_time
+        ),
+        ipopt_madnlp_recovery_c_compile=(
+            args.ipopt_madnlp_recovery_c_compile
+        ),
+        ipopt_madnlp_fallback_advance=(
+            args.ipopt_madnlp_fallback_advance
         ),
         nlp_failed_rho_phase_one_recovery=(args.nlp_failed_rho_phase_one_recovery),
         acados_initial_irk_rollout=args.acados_initial_irk_rollout,

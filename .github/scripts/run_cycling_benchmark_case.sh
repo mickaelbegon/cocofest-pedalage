@@ -3,6 +3,7 @@ set -euo pipefail
 
 if [[ "$#" -lt 5 || "$#" -gt 14 ]]; then
   echo "usage: $0 CASE SOLVER MECHANICS BACKEND ODE [ROOT] [WINDOWS] [COMPILE] [GRAPH] [FATROP_SCALING] [COLLOCATION_DEGREE] [IPOPT_PROFILE] [DUAL_WARM_START] [TARGET_REFINEMENT]" >&2
+  echo "environment: BENCHMARK_FORMULATION={dynamic,isokinetic}, BENCHMARK_ENERGY_EQUIVALENT_TORQUE>=0, BENCHMARK_ISOKINETIC_OMEGA<0, BENCHMARK_LOAD_TORQUE_MIN<0<MAX (finite)" >&2
   exit 2
 fi
 
@@ -21,7 +22,88 @@ ipopt_profile="${12:-periodic_collocation}"
 dual_warm_start="${DUAL_WARM_START:-${13:-auto}}"
 target_refinement="${14:-auto}"
 workspace="${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is required}"
-case_dir="${workspace}/${case_root}/${case_slug}-${mechanics}"
+benchmark_formulation="${BENCHMARK_FORMULATION:-dynamic}"
+energy_equivalent_torque="${BENCHMARK_ENERGY_EQUIVALENT_TORQUE:-0.2}"
+isokinetic_omega="${BENCHMARK_ISOKINETIC_OMEGA:--6.283185307179586}"
+load_torque_min="${BENCHMARK_LOAD_TORQUE_MIN:--3.0}"
+load_torque_max="${BENCHMARK_LOAD_TORQUE_MAX:-3.0}"
+python_executable="${PYTHON_EXECUTABLE:-}"
+if [[ -z "$python_executable" ]]; then
+  python_executable="$(command -v python || command -v python3 || true)"
+fi
+if [[ -z "$python_executable" ]]; then
+  echo "A Python interpreter is required (set PYTHON_EXECUTABLE or add python/python3 to PATH)." >&2
+  exit 2
+fi
+
+is_finite_number() {
+  "$python_executable" -c 'import math, sys
+try:
+    value = float(sys.argv[1])
+except ValueError:
+    raise SystemExit(1)
+raise SystemExit(0 if math.isfinite(value) else 1)' "$1"
+}
+
+case "$benchmark_formulation" in
+  dynamic|isokinetic) ;;
+  *) echo "BENCHMARK_FORMULATION must be dynamic or isokinetic, got '$benchmark_formulation'." >&2; exit 2 ;;
+esac
+for numeric_setting in "$energy_equivalent_torque" "$isokinetic_omega" "$load_torque_min" "$load_torque_max"; do
+  if ! is_finite_number "$numeric_setting"; then
+    echo "Isokinetic numerical settings must be finite; got '$numeric_setting'." >&2
+    exit 2
+  fi
+done
+if ! "$python_executable" -c 'import sys; raise SystemExit(0 if float(sys.argv[1]) >= 0 else 1)' "$energy_equivalent_torque"; then
+  echo "BENCHMARK_ENERGY_EQUIVALENT_TORQUE must be greater than or equal to zero." >&2
+  exit 2
+fi
+if ! "$python_executable" -c 'import sys; raise SystemExit(0 if float(sys.argv[1]) < 0 else 1)' "$isokinetic_omega"; then
+  echo "BENCHMARK_ISOKINETIC_OMEGA must be strictly negative." >&2
+  exit 2
+fi
+if ! "$python_executable" -c 'import sys; lower, upper = map(float, sys.argv[1:]); raise SystemExit(0 if lower < 0 < upper else 1)' "$load_torque_min" "$load_torque_max"; then
+  echo "BENCHMARK_LOAD_TORQUE_MIN/MAX must allow assistance and resistance (MIN < 0 < MAX)." >&2
+  exit 2
+fi
+if ! "$python_executable" -c 'import sys; target, upper = map(float, sys.argv[1:]); raise SystemExit(0 if target <= upper else 1)' "$energy_equivalent_torque" "$load_torque_max"; then
+  echo "BENCHMARK_ENERGY_EQUIVALENT_TORQUE cannot exceed BENCHMARK_LOAD_TORQUE_MAX." >&2
+  exit 2
+fi
+
+# Use one parallelism level by default: Bioptim/CasADi maps span physical
+# cores, while sparse/BLAS kernels stay single-threaded.  NUMERIC_THREADS and
+# BENCHMARK_THREADS remain the two explicit scaling controls.
+if [[ -z "${BENCHMARK_THREADS:-}" ]]; then
+  BENCHMARK_THREADS="$(lscpu -p=CORE,SOCKET 2>/dev/null | awk -F, '
+    !/^#/ {seen[$1 FS $2]=1}
+    END {print length(seen)}
+  ')"
+  if ! [[ "$BENCHMARK_THREADS" =~ ^[1-9][0-9]*$ ]]; then
+    BENCHMARK_THREADS="$(nproc)"
+  fi
+fi
+export BENCHMARK_THREADS
+numeric_threads="${NUMERIC_THREADS:-1}"
+export OMP_NUM_THREADS="$numeric_threads"
+export OMP_THREAD_LIMIT="$numeric_threads"
+export OMP_DYNAMIC="${OMP_DYNAMIC:-FALSE}"
+export OPENBLAS_NUM_THREADS="$numeric_threads"
+export BLIS_NUM_THREADS="$numeric_threads"
+export MKL_NUM_THREADS="$numeric_threads"
+export NUMEXPR_NUM_THREADS="$numeric_threads"
+export JULIA_NUM_THREADS="$numeric_threads"
+
+formulation_directory_suffix=""
+if [[ "$benchmark_formulation" == "isokinetic" ]]; then
+  formulation_directory_suffix="-isokinetic-torque-${energy_equivalent_torque}-omega-${isokinetic_omega}-load-${load_torque_min}-to-${load_torque_max}"
+fi
+if [[ "$case_root" == /* ]]; then
+  case_dir="${case_root}/${case_slug}-${mechanics}${formulation_directory_suffix}"
+else
+  case_dir="${workspace}/${case_root}/${case_slug}-${mechanics}${formulation_directory_suffix}"
+fi
 result="$case_dir/result.json"
 solver_options=()
 initialization_options=(--no-optional-nlp-periodic-ipopt-hot-start)
@@ -31,9 +113,20 @@ nlp_transfer_preparation="${NLP_TRANSFER_PREPARATION:-none}"
 nlp_phase_one_screen_threshold="${NLP_PHASE_ONE_SCREEN_THRESHOLD:-0.001}"
 nlp_phase_one_mode="${NLP_PHASE_ONE_MODE:-mechanical}"
 nlp_failed_rho_phase_one_recovery="${NLP_FAILED_RHO_PHASE_ONE_RECOVERY:-false}"
+nlp_ipopt_recovery="${NLP_IPOPT_RECOVERY:-false}"
+nlp_ipopt_fallback_advance="${NLP_IPOPT_FALLBACK_ADVANCE:-false}"
+nlp_ipopt_recovery_max_iterations="${NLP_IPOPT_RECOVERY_MAX_ITERATIONS:-${BENCHMARK_MAX_ITER}}"
+nlp_ipopt_recovery_linear_solver="${NLP_IPOPT_RECOVERY_LINEAR_SOLVER:-ma57}"
 madnlp_fast_max_iterations="${MADNLP_FAST_MAX_ITERATIONS:-73}"
 madnlp_fast_max_wall_time="${MADNLP_FAST_MAX_WALL_TIME:-20}"
 madnlp_first_max_iterations="${MADNLP_FIRST_MAX_ITERATIONS:-${BENCHMARK_MAX_ITER}}"
+ipopt_fast_max_iterations="${IPOPT_FAST_MAX_ITERATIONS:-200}"
+ipopt_linear_solver="${IPOPT_LINEAR_SOLVER:-mumps}"
+warmup_ipopt_linear_solver="${WARMUP_IPOPT_LINEAR_SOLVER:-${ipopt_linear_solver}}"
+ipopt_hsl_library="${IPOPT_HSL_LIBRARY:-}"
+ipopt_madnlp_recovery_max_iterations="${IPOPT_MADNLP_RECOVERY_MAX_ITERATIONS:-${BENCHMARK_MAX_ITER}}"
+ipopt_madnlp_recovery_max_wall_time="${IPOPT_MADNLP_RECOVERY_MAX_WALL_TIME:-none}"
+ipopt_madnlp_recovery_linear_solver="${IPOPT_MADNLP_RECOVERY_LINEAR_SOLVER:-mumps}"
 high_accuracy_trace_max_cycles="${HIGH_ACCURACY_TRACE_MAX_CYCLES:-30}"
 high_accuracy_trace_cycle_milestones="${HIGH_ACCURACY_TRACE_CYCLE_MILESTONES:-430,660,779}"
 rho_pulse_width_transfer_mode="${RHO_PULSE_WIDTH_TRANSFER_MODE:-repeat}"
@@ -70,6 +163,14 @@ esac
 case "$nlp_failed_rho_phase_one_recovery" in
   true|false) ;;
   *) echo "NLP_FAILED_RHO_PHASE_ONE_RECOVERY must be true or false; got '$nlp_failed_rho_phase_one_recovery'." >&2; exit 2 ;;
+esac
+case "$nlp_ipopt_recovery" in
+  true|false) ;;
+  *) echo "NLP_IPOPT_RECOVERY must be true or false; got '$nlp_ipopt_recovery'." >&2; exit 2 ;;
+esac
+case "$nlp_ipopt_fallback_advance" in
+  true|false) ;;
+  *) echo "NLP_IPOPT_FALLBACK_ADVANCE must be true or false; got '$nlp_ipopt_fallback_advance'." >&2; exit 2 ;;
 esac
 case "$rho_pulse_width_transfer_mode" in
   repeat|extrapolate|lag2) ;;
@@ -142,12 +243,41 @@ if [[ "$solver" == "ipopt" ]]; then
   if [[ "$dual_warm_start" == "auto" ]]; then
     dual_warm_start="bounds"
   fi
-  solver_options+=(
-    --ipopt-max-iter "$BENCHMARK_MAX_ITER"
-    --ipopt-dual-warm-start-mode "$dual_warm_start"
-  )
+  solver_options+=(--ipopt-dual-warm-start-mode "$dual_warm_start")
+  if [[ "$nlp_ipopt_recovery" == "true" ]]; then
+    solver_options+=(
+      --ipopt-max-iter "$ipopt_fast_max_iterations"
+      --nlp-ipopt-recovery
+      --nlp-ipopt-recovery-max-iterations "$nlp_ipopt_recovery_max_iterations"
+      --nlp-ipopt-recovery-collocation-degree "$collocation_degree"
+      --nlp-ipopt-recovery-linear-solver "$nlp_ipopt_recovery_linear_solver"
+    )
+    if [[ "$nlp_ipopt_fallback_advance" == "true" ]]; then
+      solver_options+=(--nlp-ipopt-fallback-advance)
+    fi
+  elif [[ "$case_slug" == *"fatigue-endurance"* && "$nlp_failed_rho_phase_one_recovery" != "true" ]]; then
+    solver_options+=(
+      --ipopt-max-iter "$ipopt_fast_max_iterations"
+      --ipopt-madnlp-recovery
+      --ipopt-madnlp-fallback-advance
+      --ipopt-madnlp-recovery-max-iterations "$ipopt_madnlp_recovery_max_iterations"
+      --ipopt-madnlp-recovery-collocation-degree "$collocation_degree"
+      --ipopt-madnlp-recovery-linear-solver "$ipopt_madnlp_recovery_linear_solver"
+    )
+    if [[ "$ipopt_madnlp_recovery_max_wall_time" != "none" ]]; then
+      solver_options+=(
+        --ipopt-madnlp-recovery-max-wall-time
+        "$ipopt_madnlp_recovery_max_wall_time"
+      )
+    fi
+  else
+    solver_options+=(--ipopt-max-iter "$BENCHMARK_MAX_ITER")
+  fi
   if [[ "$compile_mode" == "true" ]]; then
     solver_options+=(--ipopt-c-compile)
+    if [[ "$case_slug" == *"fatigue-endurance"* && "$nlp_failed_rho_phase_one_recovery" != "true" && "$nlp_ipopt_recovery" != "true" ]]; then
+      solver_options+=(--ipopt-madnlp-recovery-c-compile)
+    fi
   fi
 elif [[ "$solver" == "fatrop" ]]; then
   if [[ "$dual_warm_start" == "auto" ]]; then
@@ -222,6 +352,13 @@ if [[ "$solver" == "ipopt" || "$solver" == "madnlp" || "$solver" == "fatrop" ]];
     solver_options+=(--nlp-failed-rho-phase-one-recovery)
   fi
 fi
+if [[ -n "$ipopt_hsl_library" ]]; then
+  if [[ ! -f "$ipopt_hsl_library" ]]; then
+    echo "IPOPT_HSL_LIBRARY does not name a readable file: '$ipopt_hsl_library'." >&2
+    exit 2
+  fi
+  solver_options+=(--ipopt-hsl-library "$ipopt_hsl_library")
+fi
 if [[ "$solver" != "fatrop" && "$ode_solver" == "collocation" ]]; then
   solver_options+=(
     --ipopt-ode-solver collocation
@@ -277,17 +414,31 @@ fi
 
 # Keep the standard bridge enabled: the certified common seed records one
 # consumed warmup cycle and rejects consumers configured with zero.
+seed_options=()
+if [[ "$benchmark_formulation" == "dynamic" ]]; then
+  seed_options+=(
+    --standard-warmup-seed "$workspace/.github/benchmark-seeds/legacy-resistive-0p22-warmup.npz"
+    --legacy-standard-warmup-seed-signed-torque 0.22
+    --standard-warmup-seed-continuation
+    --common-initial-solution "$common_initial_solution"
+  )
+fi
 set +e
 set -o pipefail
 pushd "$codegen_dir" >/dev/null
 heartbeat() {
-  while sleep 45; do
+  local heartbeat_sleep_pid=""
+  trap '[[ -z "$heartbeat_sleep_pid" ]] || kill "$heartbeat_sleep_pid" 2>/dev/null; exit 0' TERM INT
+  while true; do
+    sleep 45 &
+    heartbeat_sleep_pid=$!
+    wait "$heartbeat_sleep_pid" || return 0
     echo "benchmark heartbeat: ${case_slug}/${mechanics} is still running"
   done
 }
 heartbeat &
 heartbeat_pid=$!
-python "$workspace/examples/fes_multibody/cycling/cycling_fes_solver_comparison.py" \
+"$python_executable" "$workspace/examples/fes_multibody/cycling/cycling_fes_solver_comparison.py" \
   --solvers "$solver" \
   --objective fatigue \
   --ipopt-profile "$ipopt_profile" \
@@ -301,18 +452,20 @@ python "$workspace/examples/fes_multibody/cycling/cycling_fes_solver_comparison.
   --primal-feasibility-threshold 1e-5 \
   --max-consecutive-failing 2 \
   --retry-failed-rho-without-advance \
-  --standard-warmup-seed "$workspace/.github/benchmark-seeds/legacy-resistive-0p22-warmup.npz" \
-  --legacy-standard-warmup-seed-signed-torque 0.22 \
-  --standard-warmup-seed-continuation \
-  --common-initial-solution "$common_initial_solution" \
+  "${seed_options[@]}" \
   "${initialization_options[@]}" \
-  --warmup-ipopt-linear-solver mumps \
-  --ipopt-linear-solver mumps \
+  --warmup-ipopt-linear-solver "$warmup_ipopt_linear_solver" \
+  --ipopt-linear-solver "$ipopt_linear_solver" \
   --ipopt-disable-historical-initial-guess \
   --reduced-cycling-profile "$workspace/benchmark-seed/reduced-cycling-fourier12.npz" \
   --state-scaling full \
   --first-node-wheel-q-slack 0 \
   --terminal-wheel-q-slack "$BENCHMARK_Q_SLACK" \
+  --formulation "$benchmark_formulation" \
+  --energy-equivalent-torque "$energy_equivalent_torque" \
+  --isokinetic-omega "$isokinetic_omega" \
+  --load-torque-min "$load_torque_min" \
+  --load-torque-max "$load_torque_max" \
   --compact-rho-output \
   --rho-pulse-width-transfer-mode "$rho_pulse_width_transfer_mode" \
   --rho-pulse-width-extrapolation-factor "$rho_pulse_width_extrapolation_factor" \
