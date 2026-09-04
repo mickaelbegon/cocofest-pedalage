@@ -852,6 +852,13 @@ def _common_solver_options(args: argparse.Namespace) -> list[str]:
         "fatigue",
         "--ipopt-profile",
         "periodic_collocation",
+        # Keep the non-strict periodic profile so the monolithic FHO can use
+        # MX, but make Radau-5 the shared transcription for the reference RHO
+        # and for both IPOPT and MadNLP full-horizon solves.
+        "--ipopt-collocation-degree",
+        "5",
+        "--ipopt-collocation-method",
+        "radau",
         "--ipopt-enforce-start-constraints",
         "--stimulations-per-cycle",
         "30",

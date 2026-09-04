@@ -971,3 +971,46 @@ def test_full_horizon_can_use_ipopt_locally_with_mx(tmp_path):
     assert "--ipopt-no-use-sx" in command
     assert command[command.index("--ipopt-linear-solver") + 1] == "ma57"
     assert "--exact-initial-nlp-audit" not in command
+
+
+def test_reference_rho_and_full_horizon_backends_default_to_radau5(tmp_path):
+    common = dict(
+        python="python",
+        workspace=tmp_path,
+        seed_dir=tmp_path / "seed",
+        n_threads=4,
+        crank_assistance=0.0,
+        max_iterations=2000,
+        terminal_wheel_q_slack=0.002,
+        max_cycles=5,
+    )
+    ipopt_args = SimpleNamespace(**common, full_horizon_solver="ipopt")
+    madnlp_args = SimpleNamespace(**common, full_horizon_solver="madnlp")
+    commands = (
+        full_horizon._rho_command(
+            ipopt_args,
+            tmp_path / "rho.json",
+            tmp_path / "rho.npz",
+        ),
+        full_horizon._full_horizon_command(
+            ipopt_args,
+            5,
+            tmp_path / "ipopt-prefix.npz",
+            tmp_path / "ipopt.json",
+            tmp_path / "ipopt.npz",
+        ),
+        full_horizon._full_horizon_command(
+            madnlp_args,
+            5,
+            tmp_path / "madnlp-prefix.npz",
+            tmp_path / "madnlp.json",
+            tmp_path / "madnlp.npz",
+        ),
+    )
+
+    assert commands[0][commands[0].index("--solvers") + 1] == "ipopt"
+    assert commands[1][commands[1].index("--solvers") + 1] == "ipopt"
+    assert commands[2][commands[2].index("--solvers") + 1] == "madnlp"
+    for command in commands:
+        assert command[command.index("--ipopt-collocation-degree") + 1] == "5"
+        assert command[command.index("--ipopt-collocation-method") + 1] == "radau"
