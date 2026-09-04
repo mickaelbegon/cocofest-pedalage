@@ -50,6 +50,113 @@ def test_horizon_sweep_requires_the_two_rho_bootstrap_cycles():
         full_horizon.horizon_sweep_targets(1)
 
 
+def test_rho_only_is_an_explicit_benchmark_mode(tmp_path):
+    args = full_horizon.build_parser().parse_args(
+        [
+            "--workspace",
+            str(tmp_path),
+            "--seed-dir",
+            str(tmp_path / "seed"),
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--max-cycles",
+            "150",
+            "--n-threads",
+            "4",
+            "--rho-only",
+        ]
+    )
+
+    assert args.rho_only is True
+
+
+def test_rho_only_writes_a_complete_report_and_skips_full_horizon(
+    tmp_path, monkeypatch
+):
+    output = tmp_path / "output"
+    args = full_horizon.build_parser().parse_args(
+        [
+            "--workspace",
+            str(tmp_path),
+            "--seed-dir",
+            str(tmp_path / "seed"),
+            "--output-dir",
+            str(output),
+            "--max-cycles",
+            "5",
+            "--n-threads",
+            "2",
+            "--rho-only",
+        ]
+    )
+    monitored_commands = []
+
+    def fake_run_monitored(command, **kwargs):
+        monitored_commands.append(command)
+        return full_horizon.MonitoredRun(
+            command=command,
+            return_code=0,
+            peak_rss_bytes=1024,
+            elapsed_s=0.1,
+            memory_limit_exceeded=False,
+            timed_out=False,
+            log_path=str(kwargs["log_path"]),
+        )
+
+    monkeypatch.setattr(full_horizon, "available_memory_bytes", lambda: 16 * full_horizon.GIB)
+    monkeypatch.setattr(full_horizon, "run_monitored", fake_run_monitored)
+    monkeypatch.setattr(full_horizon, "_benchmark_validated_cycles", lambda *_args, **_kwargs: 5)
+    monkeypatch.setattr(full_horizon, "_seed_cycle_count", lambda _path: 5)
+    monkeypatch.setattr(full_horizon, "_log_has_unknown_mumps_warning", lambda _path: False)
+
+    assert full_horizon.run(args) == 0
+    report = json.loads((output / "full-horizon-report.json").read_text())
+    assert report["stop_reason"] == "rho_only_completed"
+    assert report["rho_available_cycles"] == 5
+    assert report["full_horizon_attempts"] == []
+    assert len(monitored_commands) == 1
+
+
+def test_rho_only_rejects_a_partial_reference(tmp_path, monkeypatch):
+    args = full_horizon.build_parser().parse_args(
+        [
+            "--workspace",
+            str(tmp_path),
+            "--seed-dir",
+            str(tmp_path / "seed"),
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--max-cycles",
+            "5",
+            "--n-threads",
+            "2",
+            "--rho-only",
+        ]
+    )
+    monkeypatch.setattr(full_horizon, "available_memory_bytes", lambda: 16 * full_horizon.GIB)
+    monkeypatch.setattr(
+        full_horizon,
+        "run_monitored",
+        lambda command, **kwargs: full_horizon.MonitoredRun(
+            command=command,
+            return_code=0,
+            peak_rss_bytes=1024,
+            elapsed_s=0.1,
+            memory_limit_exceeded=False,
+            timed_out=False,
+            log_path=str(kwargs["log_path"]),
+        ),
+    )
+    monkeypatch.setattr(full_horizon, "_benchmark_validated_cycles", lambda *_args, **_kwargs: 3)
+    monkeypatch.setattr(full_horizon, "_seed_cycle_count", lambda _path: 3)
+    monkeypatch.setattr(full_horizon, "_log_has_unknown_mumps_warning", lambda _path: False)
+    monkeypatch.setattr(full_horizon, "_benchmark_payload_is_readable", lambda _path: True)
+
+    assert full_horizon.run(args) == 2
+    report = json.loads((args.output_dir / "full-horizon-report.json").read_text())
+    assert report["stop_reason"] == "rho_incomplete"
+
+
 def test_resume_rebases_artifact_paths_after_the_campaign_is_moved(tmp_path):
     campaign = tmp_path / "downloaded-campaign"
     rho = campaign / "rho-reduced" / "concatenated-solution.npz"
@@ -537,7 +644,7 @@ def test_validated_cycles_retains_a_shorter_rho_prefix(tmp_path):
                         "cycles_per_window": 1,
                         "n_windows": 100,
                         "use_sx": True,
-                        "ipopt_linear_solver": "mumps",
+                        "ipopt_linear_solver": "ma57",
                     }
                 },
             }
@@ -586,7 +693,7 @@ def test_rho_extension_accepts_a_valid_cycle_rejected_by_endurance_semantics(
                         "cycles_per_window": 1,
                         "n_windows": 1,
                         "use_sx": True,
-                        "ipopt_linear_solver": "mumps",
+                        "ipopt_linear_solver": "ma57",
                     }
                 },
             }
@@ -772,15 +879,23 @@ def test_rho_and_full_horizon_use_the_intended_solver_contract(tmp_path):
     )
 
     assert rho[rho.index("--solvers") + 1] == "ipopt"
-    assert full[full.index("--solvers") + 1] == "madnlp"
+    assert full[full.index("--solvers") + 1] == "ipopt"
     assert "--single-shot" not in rho
     assert "--allow-partial-receding-horizon-solution-output" in rho
     assert "--ipopt-use-sx" in rho
+    assert "--ipopt-c-compile" in rho
     assert "--ipopt-enable-periodic-fes-warmup-projection" in rho
     assert rho[rho.index("--periodic-fes-warmup-projection-strategy") + 1] == "rollout"
     assert "--common-initial-solution-recenter-first-node-bounds" in rho
     assert "--ipopt-no-use-sx" not in rho
     assert rho[rho.index("--ipopt-max-iter") + 1] == "2000"
+    one_cycle_rho = full_horizon._rho_command(
+        args,
+        tmp_path / "one-cycle-rho.json",
+        tmp_path / "one-cycle-rho.npz",
+        n_windows=1,
+    )
+    assert "--ipopt-c-compile" not in one_cycle_rho
     assert "--single-shot" in full
     assert full[full.index("--mechanical-formulation") + 1] == "reduced"
     assert full[full.index("--full-horizon-prefix-solution") + 1] == str(
@@ -791,7 +906,7 @@ def test_rho_and_full_horizon_use_the_intended_solver_contract(tmp_path):
         == "reduced"
     )
     assert "--ipopt-no-use-sx" in paired_reduced
-    assert full[full.index("--madnlp-linear-solver") + 1] == "mumps"
+    assert full[full.index("--ipopt-linear-solver") + 1] == "ma57"
     assert "--ipopt-no-use-sx" in full
     assert "--ipopt-disable-standard-warmup" in full
     assert "--adopt-common-initial-solution-warmup-cycles" in full
@@ -799,7 +914,7 @@ def test_rho_and_full_horizon_use_the_intended_solver_contract(tmp_path):
     assert "--adopt-common-initial-solution-warmup-cycles" not in one_cycle_full
     assert "--optional-nlp-periodic-ipopt-hot-start" in full
     assert "--initial-guess-diagnostics" in full
-    assert "--exact-initial-nlp-audit" in full
+    assert "--exact-initial-nlp-audit" not in full
     assert "--acados-diagnostics" not in full
     assert "--periodic-ipopt-refinement-use-sx" in full
     assert full[full.index("--periodic-ipopt-refinement-iterations") + 1] == "2000"
@@ -829,5 +944,5 @@ def test_full_horizon_can_use_ipopt_locally_with_mx(tmp_path):
     assert command[command.index("--solvers") + 1] == "ipopt"
     assert "--single-shot" in command
     assert "--ipopt-no-use-sx" in command
-    assert command[command.index("--ipopt-linear-solver") + 1] == "mumps"
+    assert command[command.index("--ipopt-linear-solver") + 1] == "ma57"
     assert "--exact-initial-nlp-audit" not in command

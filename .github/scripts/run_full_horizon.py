@@ -44,7 +44,12 @@ from pathlib import Path
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from run_benchmarks import REPO_ROOT, base_environment, conda_env_prefix  # noqa: E402
+from run_benchmarks import (  # noqa: E402
+    REPO_ROOT,
+    base_environment,
+    conda_env_prefix,
+    default_worker_threads,
+)
 
 BENCHMARK = REPO_ROOT / ".github" / "scripts" / "run_full_horizon_benchmark.py"
 REPORT_NAME = "full-horizon-report.md"
@@ -77,7 +82,7 @@ def parse_arguments(argv: list[str] | None) -> argparse.Namespace:
         choices=("madnlp", "ipopt"),
         help="FHO solver; inferred from the stored report when resuming",
     )
-    parser.add_argument("--threads", type=int, default=os.cpu_count() or 1)
+    parser.add_argument("--threads", type=int, default=default_worker_threads())
     parser.add_argument("--numeric-threads", type=int, default=1)
     parser.add_argument("--memory-limit-gib", default="auto",
                         help="process-tree peak RSS cap, or 'auto'")
@@ -103,6 +108,14 @@ def parse_arguments(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--attempt-timeout-s", type=float, default=None,
                         help="wall-time cap per solver attempt")
+    parser.add_argument(
+        "--rho-only",
+        action="store_true",
+        help=(
+            "solve and certify only the N-cycle RHO reference; do not launch "
+            "any monolithic FHO"
+        ),
+    )
     parser.add_argument("--resume", action="store_true",
                         help="continue from the largest certified FHO in --output-dir")
     parser.add_argument("--report-only", action="store_true",
@@ -207,6 +220,8 @@ def show_report(output_dir: Path) -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_arguments(argv)
+    if args.rho_only and (args.resume or args.resume_from is not None):
+        raise ValueError("--rho-only cannot be combined with --resume or --resume-from.")
     if args.resume_from is not None:
         output_dir = find_resume_directory(args.resume_from)
         args.resume = True
@@ -234,11 +249,18 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 1
 
-    suite = "madnlp32" if args.solver == "madnlp" else "rho32"
+    # RHO-only always runs IPOPT, irrespective of the FHO backend selected for
+    # a future continuation.
+    suite = (
+        "rho32"
+        if args.rho_only
+        else ("madnlp32" if args.solver == "madnlp" else "rho32")
+    )
+    effective_solver = "ipopt" if args.rho_only else args.solver
     prefix = conda_env_prefix(suite)
     if prefix is None:
         print(f"Environment cocofest-{suite} not found; it is required by "
-              f"--solver {args.solver}.", file=sys.stderr)
+              f"solver {effective_solver}.", file=sys.stderr)
         return 1
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -265,12 +287,16 @@ def main(argv: list[str] | None = None) -> int:
         command += ["--attempt-timeout-s", str(args.attempt_timeout_s)]
     if args.resume:
         command.append("--resume")
+    if args.rho_only:
+        command.append("--rho-only")
 
     environment = base_environment(prefix, suite, args.threads, args.numeric_threads)
     log_path = output_dir / "driver.log"
 
     print(f"Repository  : {REPO_ROOT}")
-    print(f"Environment : {prefix.name}  (solver: {args.solver})")
+    print(f"Environment : {prefix.name}  (solver: {effective_solver})")
+    if args.rho_only:
+        print("Mode        : RHO reference only (no FHO)")
     if resume_report is not None:
         print(
             "Resume      : "

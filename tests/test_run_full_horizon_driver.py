@@ -68,3 +68,9 @@ def test_explicit_resume_target_overrides_the_old_ceiling(tmp_path):
     driver.apply_run_defaults(args, campaign)
 
     assert args.max_cycles == 150
+
+
+def test_rho_only_is_an_explicit_driver_mode():
+    args = driver.parse_arguments(["--rho-only", "--max-cycles", "150"])
+
+    assert args.rho_only is True

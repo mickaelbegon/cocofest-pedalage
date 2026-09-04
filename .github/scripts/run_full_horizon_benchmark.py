@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run an RSS-bounded RHO-to-full-horizon continuation with MadNLP.
+"""Run an RSS-bounded RHO-to-full-horizon continuation with IPOPT/MA57.
 
 Two consecutive reduced RHO cycles first initialize FHO_2.  Every subsequent
 problem is built from the last certified full-horizon solution.  By default the
@@ -698,6 +698,12 @@ def append_rho_extension_cycle(
     return metadata
 
 
+def _linear_solver_for(solver: str) -> str:
+    """Return the benchmark's linear-solver contract for an NLP backend."""
+
+    return "ma57" if solver == "ipopt" else "mumps"
+
+
 def _benchmark_success(
     result_path: Path,
     *,
@@ -729,7 +735,8 @@ def _benchmark_success(
             == (expected_cycles if expected_mode == "single_shot" else 1)
             and int(configuration.get("n_windows") or 0) == expected_cycles
             and configuration.get("use_sx") is expected_use_sx
-            and configuration.get(f"{expected_solver}_linear_solver") == "mumps"
+            and configuration.get(f"{expected_solver}_linear_solver")
+            == _linear_solver_for(expected_solver)
         )
     except (OSError, ValueError, KeyError, IndexError, TypeError):
         return False
@@ -784,7 +791,7 @@ def _rho_extension_success(result_path: Path) -> bool:
             and int(configuration.get("cycles_per_window") or 0) == 1
             and int(configuration.get("n_windows") or 0) == 1
             and configuration.get("use_sx") is True
-            and configuration.get("ipopt_linear_solver") == "mumps"
+            and configuration.get("ipopt_linear_solver") == "ma57"
         )
     except (OSError, ValueError, KeyError, IndexError, TypeError):
         return False
@@ -820,7 +827,8 @@ def _benchmark_validated_cycles(
             or int(configuration.get("cycles_per_window") or 0) != 1
             or int(configuration.get("n_windows") or 0) != expected_requested_cycles
             or configuration.get("use_sx") is not True
-            or configuration.get(f"{expected_solver}_linear_solver") != "mumps"
+            or configuration.get(f"{expected_solver}_linear_solver")
+            != _linear_solver_for(expected_solver)
         ):
             return 0
         covered = int(result.get("covered_cycles") or 0)
@@ -863,9 +871,9 @@ def _common_solver_options(args: argparse.Namespace) -> list[str]:
         "0.22",
         "--standard-warmup-seed-continuation",
         "--warmup-ipopt-linear-solver",
-        "mumps",
+        "ma57",
         "--ipopt-linear-solver",
-        "mumps",
+        "ma57",
         "--madnlp-linear-solver",
         "mumps",
         "--madnlp-max-iter",
@@ -898,7 +906,7 @@ def _rho_command(
         raise ValueError("n_windows must be strictly positive.")
     if common_initial_solution is None:
         common_initial_solution = args.seed_dir / "common-reduced.npz"
-    return [
+    command = [
         args.python,
         str(
             args.workspace
@@ -907,31 +915,42 @@ def _rho_command(
         "--solvers",
         "ipopt",
         *_common_solver_options(args),
-        "--ipopt-use-sx",
-        "--no-optional-nlp-periodic-ipopt-hot-start",
-        "--ipopt-enable-periodic-fes-warmup-projection",
-        "--periodic-fes-warmup-projection-strategy",
-        "rollout",
-        "--initial-guess-diagnostics",
-        "--ipopt-max-iter",
-        str(args.max_iterations),
-        "--cycles-per-window",
-        "1",
-        "--n-windows",
-        str(n_windows),
-        "--max-consecutive-failing",
-        "1",
-        "--mechanical-formulation",
-        "reduced",
-        "--common-initial-solution",
-        str(common_initial_solution),
-        "--common-initial-solution-recenter-first-node-bounds",
-        "--receding-horizon-solution-output",
-        str(seed_path),
-        "--allow-partial-receding-horizon-solution-output",
-        "--output-json",
-        str(result_path),
     ]
+    # All reference-RHO windows share one fixed one-cycle transcription.  C
+    # codegen is therefore built once and reused for every window in this
+    # process.  Do not enable it for the one-cycle homotopy extensions: each
+    # extension is a separate process, so it would only add a build cost.
+    if n_windows > 1:
+        command.append("--ipopt-c-compile")
+    command.extend(
+        [
+            "--ipopt-use-sx",
+            "--no-optional-nlp-periodic-ipopt-hot-start",
+            "--ipopt-enable-periodic-fes-warmup-projection",
+            "--periodic-fes-warmup-projection-strategy",
+            "rollout",
+            "--initial-guess-diagnostics",
+            "--ipopt-max-iter",
+            str(args.max_iterations),
+            "--cycles-per-window",
+            "1",
+            "--n-windows",
+            str(n_windows),
+            "--max-consecutive-failing",
+            "1",
+            "--mechanical-formulation",
+            "reduced",
+            "--common-initial-solution",
+            str(common_initial_solution),
+            "--common-initial-solution-recenter-first-node-bounds",
+            "--receding-horizon-solution-output",
+            str(seed_path),
+            "--allow-partial-receding-horizon-solution-output",
+            "--output-json",
+            str(result_path),
+        ]
+    )
+    return command
 
 
 def _full_horizon_command(
@@ -946,7 +965,7 @@ def _full_horizon_command(
 ) -> list[str]:
     if mechanical_formulation not in {"full", "reduced"}:
         raise ValueError("mechanical_formulation must be 'full' or 'reduced'.")
-    full_horizon_solver = getattr(args, "full_horizon_solver", "madnlp")
+    full_horizon_solver = getattr(args, "full_horizon_solver", "ipopt")
     command = [
         args.python,
         str(
@@ -1013,7 +1032,7 @@ def _attempt_record(
     mechanical_formulation: str = "reduced",
     solution_path: Path | None = None,
     prefix_solution_path: Path | None = None,
-    expected_solver: str = "madnlp",
+    expected_solver: str = "ipopt",
 ) -> dict:
     unknown_mumps_warning = _log_has_unknown_mumps_warning(Path(monitored.log_path))
     certificate = _benchmark_success(
@@ -1234,11 +1253,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--full-horizon-solver",
         choices=("madnlp", "ipopt"),
-        default="madnlp",
+        default="ipopt",
         help="NLP solver used for the reduced/MX monolithic FHO problems.",
     )
     parser.add_argument("--crank-assistance", type=float, default=0.0)
     parser.add_argument("--terminal-wheel-q-slack", type=float, default=0.002)
+    parser.add_argument(
+        "--rho-only",
+        action="store_true",
+        help=(
+            "solve and certify only the concatenated RHO reference; skip all "
+            "full-horizon attempts"
+        ),
+    )
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--poll-interval-s", type=float, default=0.5)
     parser.add_argument(
@@ -1420,7 +1447,7 @@ def _run_horizon_attempt(
         log_path=case_dir / "solver.log",
         rss_limit_bytes=rss_limit_bytes,
         heartbeat_label=(
-            f"FHO_{cycles} solver={getattr(args, 'full_horizon_solver', 'madnlp')} "
+            f"FHO_{cycles} solver={getattr(args, 'full_horizon_solver', 'ipopt')} "
             f"seed={heartbeat_seed_label or f'FHO_{cycles - 1}+RHO_{cycles}'}"
         ),
         poll_interval_s=args.poll_interval_s,
@@ -1434,7 +1461,7 @@ def _run_horizon_attempt(
         mechanical_formulation=mechanical_formulation,
         solution_path=solution_path,
         prefix_solution_path=prefix_solution_path,
-        expected_solver=getattr(args, "full_horizon_solver", "madnlp"),
+        expected_solver=getattr(args, "full_horizon_solver", "ipopt"),
     )
 
 
@@ -1932,7 +1959,8 @@ def run(args: argparse.Namespace) -> int:
         "full_horizon_graph": "MX",
         "rho_solver": "ipopt",
         "full_horizon_solver": args.full_horizon_solver,
-        "linear_solver": "mumps",
+        "rho_only": args.rho_only,
+        "linear_solver": "ma57",
         "initialization": "rho_reference_to_fho_terminal_state_homotopy",
         "continuation_step_cycles": args.continuation_step_cycles,
         "jump_objective_relative_tolerance": (
@@ -1984,6 +2012,10 @@ def run(args: argparse.Namespace) -> int:
         {
             "success": (
                 rho_available_cycles >= 2
+                and (
+                    not args.rho_only
+                    or rho_available_cycles == args.max_cycles
+                )
                 and rho_monitored.return_code == 0
                 and not rho_monitored.memory_limit_exceeded
                 and not rho_monitored.timed_out
@@ -2016,13 +2048,28 @@ def run(args: argparse.Namespace) -> int:
                 else (
                     "rho_infrastructure_error"
                     if rho_infrastructure_error
-                    else "rho_solver_failure"
+                    else (
+                        "rho_incomplete"
+                        if args.rho_only and rho_available_cycles >= 2
+                        else "rho_solver_failure"
+                    )
                 )
             )
         )
         _write_report(report_path, report)
         _write_markdown(markdown_path, report)
         return 3 if rho_infrastructure_error else 2
+
+    if args.rho_only:
+        report["stop_reason"] = "rho_only_completed"
+        _write_report(report_path, report)
+        _write_markdown(markdown_path, report)
+        print(
+            f"RHO-only completed: {rho_available_cycles}/{args.max_cycles} "
+            "cycles certified; FHO skipped.",
+            flush=True,
+        )
+        return 0
 
     effective_max_cycles = min(args.max_cycles, rho_available_cycles)
     report["effective_max_cycles"] = effective_max_cycles
