@@ -1,269 +1,261 @@
 # RHO isocinétique à travail mécanique imposé
 
-## Statut et périmètre
+## Contrat scientifique
 
-Ce document fixe le contrat scientifique et logiciel de la nouvelle simulation
-RHO isocinétique. La première implémentation cible la mécanique réduite, qui
-dispose déjà d'une coordonnée physique de manivelle `theta`, de sa vitesse
-`omega` et d'une projection validée des forces musculaires sur la manivelle.
-Le même OCP devra être transmis sans changement de modèle à IPOPT, MadNLP et
-acados.
+Cette formulation cible la mécanique réduite du pédalage. Elle utilise les
+mêmes profils cinématiques, projections musculaires et modèles de Ding que la
+formulation dynamique, mais impose la vitesse de la manivelle par construction.
+Le même OCP continu est transmis à IPOPT, MadNLP et acados; leur transcription
+reste propre au backend (Radau direct ou IRK multiple-shooting).
 
-Une fenêtre RHO nominale représente un tour en une seconde :
-
-\[
-\omega^\star=-2\pi\ \mathrm{rad\,s^{-1}},\qquad
-T=1\ \mathrm{s},\qquad
-\theta(T)-\theta(0)=-2\pi.
-\]
-
-Les fenêtres de plusieurs tours restent possibles. Pour `H` tours, `T=H` et
-le travail cible est multiplié par `H`.
-
-## Convention de signe et travail demandé
-
-La manivelle tourne dans le sens négatif. Le couple externe nodal
-`tau_load` suit la convention actuelle du projet :
-
-- `tau_load > 0` : couple résistant, donc puissance mécanique externe
-  `tau_load * b_ext(theta) * omega < 0`;
-- `tau_load < 0` : couple assistif, donc puissance mécanique externe
-  `tau_load * b_ext(theta) * omega > 0`.
-
-Le couple est appliqué sur le DDL de manivelle du modèle complet. Sa vitesse
-est `qdot_crank = b_ext(theta) * omega`, où `b_ext` est le coefficient de
-projection déjà présent dans le profil réduit. Le travail net produit contre la
-charge est donc défini exactement par
+Pour `H` tours et une vitesse négative prescrite `omega_star`, la durée et le
+déplacement sont
 
 \[
-E_{\mathrm{prod}}(T)
-=-\int_0^T \tau_{\mathrm{load}}(t)
-\,b_{\mathrm{ext}}(\theta(t))\,\omega^\star\,\mathrm dt.
+T=\frac{2\pi H}{|\omega^\star|},\qquad
+\theta(T)-\theta(0)=\omega^\star T=-2\pi H.
 \]
 
-Comme le DDL de manivelle accomplit exactement un tour, une résistance
-constante de `0.2 N.m` impose
+Les valeurs nominales sont `omega_star = -2*pi rad/s`, `H = 1` et donc
+`T = 1 s`. Le paramètre modifiable `energy_equivalent_torque_nm` vaut `0.2`
+par défaut et définit
 
 \[
-E^\star=0.2\times 2\pi=1.2566370614\ \mathrm J.
+E^\star=\tau_{eq}\,2\pi H
+=0.2\times2\pi=1.2566370614359172\ \mathrm J.
 \]
 
-Le paramètre utilisateur sera le couple équivalent
-`energy_equivalent_torque_nm`, de valeur nominale `0.2`. Le code calculera
-`E_target = energy_equivalent_torque_nm * 2*pi * H`; la constante en joules ne
-sera pas dupliquée dans les scripts. Cette égalité porte sur le travail **net** :
-une phase assistive retranche donc de l'énergie à une phase résistante. C'est
-le sens retenu pour « production globale ».
-
-## Variables de décision
-
-Pour les quatre muscles actuels, le vecteur d'état est
+La convention est la suivante : `tau_load > 0` est résistant,
+`tau_load < 0` est assistif et la rotation est négative. Si
+`qdot_crank = b_ext(theta) omega_star`, le travail net produit contre la charge
+est
 
 \[
-x=\left[
-\{C_{n,m},F_m,A_m,\tau_{1,m},K_{m}\}_{m=1}^{4},
-\theta,\omega,E_{\mathrm{prod}}
-\right]^\mathsf T\in\mathbb R^{23}.
+E_{prod}(T)=-\int_0^T\tau_{load}(t)b_{ext}(\theta(t))
+\omega^\star\,dt.
 \]
 
-Les vingt premiers états et leurs lois de Ding restent inchangés. Le vecteur
-de commande est
+Une phase assistive retranche donc bien du travail à une phase résistante.
+
+## OCP résolu
+
+### États et commandes
+
+Pour quatre muscles de Ding avec fatigue, le vecteur d'état est
 
 \[
-u=\left[pw_1,pw_2,pw_3,pw_4,\tau_{\mathrm{load}}\right]^\mathsf T
-\in\mathbb R^5.
+x=[\{C_{n,m},F_m,A_m,\tau_{1,m},K_m\}_{m=1}^{4},
+\theta,\omega,E_{prod}]^T\in\mathbb R^{23}.
 \]
 
-Les largeurs d'impulsion et le couple de charge sont constants par intervalle
-de tir. Les limites du couple seront explicites et communes aux trois solveurs,
-par exemple `[-1, +1] N.m` au départ; elles ne devront jamais être déduites du
-travail cible. Autoriser les deux signes est important, mais des bornes physiques
-finies sont nécessaires pour empêcher une alternance assistance/résistance
-arbitrairement grande.
-
-## Dynamique différentielle et équilibre isocinétique
-
-Pour chaque muscle, les dynamiques FES/fatigue existantes s'écrivent
+Les seules commandes libres sont les quatre largeurs d'impulsion
 
 \[
-\dot z_m=f_{\mathrm{Ding},m}
-(z_m,pw_m,\ell_m(\theta),v_m(\theta,\omega^\star)).
+u=[pw_1,pw_2,pw_3,pw_4]^T\in\mathbb R^4.
 \]
 
-La cinématique et l'accumulateur de travail sont
+Le couple de charge n'est volontairement pas une cinquième commande. Il est
+la sortie d'effort de l'expérience isocinétique et est éliminé analytiquement.
+Cela supprime une commande et une égalité algébrique par nœud, améliore le
+conditionnement et force exactement le même équilibre dans les trois backends.
+
+### Dynamique musculaire et cinématique
+
+Pour chaque muscle,
 
 \[
-\dot\theta=\omega^\star,\qquad
-\dot\omega=0,\qquad
-\dot E_{\mathrm{prod}}=-\tau_{\mathrm{load}}
-b_{\mathrm{ext}}(\theta)\omega^\star.
+\dot z_m=f_{Ding,m}(z_m,pw_m,
+\ell_m(\theta),v_m(\theta,\omega^\star)).
 \]
 
-La vitesse ne sera donc pas obtenue en intégrant la dynamique directe : elle
-est imposée par construction, y compris entre les nœuds de tir d'un intégrateur
-IRK. La dynamique mécanique réduite actuelle devient une égalité d'équilibre
-inverse à chaque nœud :
+La cinématique imposée vaut
 
 \[
-g_{\tau,k}=
-\sum_m b_m(\theta_k)F_{m,k}
-+b_{\mathrm{ext}}(\theta_k)\tau_{\mathrm{load},k}
--g(\theta_k)
--c(\theta_k)(\omega^\star)^2=0.
+\dot\theta=\omega^\star,\qquad \dot\omega=0.
 \]
 
-Il s'agit exactement du numérateur de
-`ReducedCyclingDynamics.casadi_acceleration`; aucune seconde approximation
-mécanique ne doit être introduite. L'inertie effective n'apparaît plus dans
-l'égalité puisque l'accélération prescrite est nulle. Une petite valeur de
-`b_ext` devra provoquer un rejet explicite du profil plutôt qu'un couple mal
-conditionné.
+`omega(0)=omega_star` suffit alors à imposer cette vitesse aux nœuds et aux
+stages de l'intégrateur. L'angle initial est fixé et la dynamique impose
+l'angle terminal exact.
 
-## Contraintes
+### Équilibre inverse et couple résultant
 
-Les contraintes du NLP sont les suivantes.
-
-1. Défauts de transcription des vingt dynamiques de Ding, de `theta`, de
-   `omega` et de `E_prod`.
-2. `omega_k = -2*pi rad/s` à tous les nœuds d'état. La dynamique
-   `dot(omega)=0` garantit également cette vitesse à l'intérieur des
-   intervalles.
-3. `theta_0` fixé à la fin du RHO certifié précédent et
-   `theta_N = theta_0 - 2*pi*H`. La trajectoire isocinétique rend les anciennes
-   marges de vitesse et d'angle terminal inutiles.
-4. Équilibre `g_tau,k = 0` à chaque nœud portant un couple. Pour une
-   collocation, l'équilibre sera aussi évalué aux points de collocation si le
-   couple y est disponible; sinon l'audit haute précision bornera le résidu
-   interpolé entre deux tirs.
-5. Bornes physiologiques existantes de tous les états de Ding et bornes
-   `pd0_m <= pw_m,k <= 600 us`.
-6. Bornes nodales communes
-   `tau_assist_min <= tau_load,k <= tau_resist_max`.
-7. `E_prod(0)=0` et
-   `E_prod(T)=energy_equivalent_torque_nm*2*pi*H`. L'état d'énergie est remis
-   à zéro à chaque nouvelle fenêtre RHO; il n'est pas transféré comme un
-   état de fatigue.
-
-L'accumulateur transforme la contrainte intégrale dense en dynamique locale et
-borne terminale. Cette forme conserve la structure creuse pour IPOPT/MadNLP et
-est directement représentable par acados.
-
-## Fonction objectif
-
-L'objectif scientifique par défaut demeure la fatigue existante :
+Le numérateur exact de l'accélération réduite est
 
 \[
-J_{\mathrm{fatigue}}=
-10^4\int_0^T\sum_m
-\left(1-\frac{A_m(t)}{A_{m,0}}\right)^2\mathrm dt.
+r(\theta,\omega,F,\tau)=
+\sum_m b_m(\theta)F_m+b_{ext}(\theta)\tau
+-g(\theta)-c(\theta)\omega^2.
 \]
 
-Les variantes force et charge de stimulation existantes restent sélectionnables.
-Un faible terme optionnel de régularisation du couple peut être ajouté pour
-stabiliser une solution non unique,
+L'accélération prescrite étant nulle, le couple requis est
 
 \[
-J_\tau=w_\tau\int_0^T
-(\tau_{\mathrm{load}}-\bar\tau)^2\mathrm dt,
+\tau_{load}^{req}=
+\frac{g(\theta)+c(\theta)(\omega^\star)^2
+-\sum_m b_m(\theta)F_m}{b_{ext}(\theta)}.
 \]
 
-mais `w_tau=0` sera le cas scientifique de référence. Toute valeur non nulle
-devra apparaître dans les métadonnées et dans les tableaux de benchmark.
+Le profil est rejeté si `b_ext` n'est pas strictement positif ou devient
+inférieur à `1e-8`. Sur le profil nominal audité :
+`b_ext in [0.590876, 1.452200]`, moyenne `1.0`, rapport max/min `2.458`, et
+l'erreur de cohérence de projection tangentielle vaut `1.22e-15`.
 
-## Transfert entre RHO et amorçage
-
-Les états physiologiques conservent la politique actuelle : les états rapides
-sont décalés cycliquement, les états de fatigue sont prolongés continûment et
-le premier nœud est raccordé au dernier état certifié. `theta` est décalé de
-`-2*pi`, `omega` reste exactement à `-2*pi`, et `E_prod` est recréé sur
-`[0,E_target]` à chaque RHO.
-
-Le nouveau couple est initialisé à partir de l'équilibre inverse du seed :
+La dynamique de l'accumulateur est évaluée sans division suivie d'une
+remultiplication :
 
 \[
-\tau_{\mathrm{load},k}^{(0)}=
-\frac{g(\theta_k)+c(\theta_k)(\omega^\star)^2
--\sum_m b_m(\theta_k)F_{m,k}}
-{b_{\mathrm{ext}}(\theta_k)}.
+\dot E_{prod}
+=-\tau_{load}^{req}b_{ext}\omega^\star
+=\left(\sum_m b_mF_m-g-c(\omega^\star)^2\right)\omega^\star.
 \]
 
-Cette trajectoire est projetée dans les bornes de couple. L'état d'énergie
-initial est obtenu par quadrature de ce couple. Si son terminal diffère de la
-cible, le solveur adapte les stimulations et le profil de charge; les trois
-solveurs partent toutefois du même primal. La préparation IPOPT optionnelle
-d'acados devra elle aussi résoudre la formulation isocinétique, pas l'ancien
-OCP à couple constant.
+### Bornes et contraintes
 
-## Architecture d'implémentation
+Le NLP impose :
 
-La logique scientifique sera extraite dans un petit module réutilisable, au
-lieu d'ajouter des branches spécifiques aux solveurs dans le grand script de
-comparaison. Ce module contiendra :
+1. les défauts de transcription des 23 états;
+2. `theta(0)=theta_previous`, `omega(0)=omega_star` et `E_prod(0)=0`;
+3. `E_prod(T)=E_star`;
+4. les bornes physiologiques existantes des états de Ding;
+5. `pd0_m <= pw_m,k <= 600 us`;
+6. `tau_min <= tau_load_req(x_k) <= tau_max` aux nœuds de tir et au nœud
+   terminal.
 
-- la configuration validée (`omega`, couple équivalent, bornes de couple);
-- le calcul unique de `E_target` et des conventions de signe;
-- l'expression d'équilibre inverse et le calcul du seed de couple;
-- les audits indépendants de vitesse, d'équilibre et de travail.
+Les bornes par défaut `[-3, 3] Nm` sont des bornes d'exploration, pas encore
+une calibration ergométrique universelle. Elles autorisent les phases
+assistives et résistantes. Un garde intérieur de `min(0.05 Nm, 1 % de la
+plage)` est appliqué aux nœuds du NLP, puis le couple est réévalué sur une
+intégration DOP853 dense (65 échantillons par intervalle).
 
-`ReducedFesCyclingModel` recevra un mode isocinétique qui ajoute le contrôle de
-couple et l'accumulateur, tout en conservant le mode dynamique actuel par
-défaut. `prepare_nmpc`, les bornes et le transfert RHO appelleront des
-sous-fonctions dédiées. Le script de comparaison ne fera que traduire les
-arguments CLI en cette configuration.
+Bioptim n'expose pas aujourd'hui les états SX intermédiaires de collocation à
+cette contrainte personnalisée. La borne analytique est donc imposée aux nœuds
+de tir et au terminal, puis vérifiée après résolution sur les stages de la
+transcription et sur le replay dense. Le replay est une vérification pratique,
+pas une preuve d'extremum continu entre ses échantillons.
 
-## Interface de benchmark visée
+Avec `N` intervalles, la séquence de commande libre contient `4N` largeurs
+d'impulsion et le travail ajoute une contrainte terminale scalaire. `theta`,
+`omega`, `E_prod` et `tau_load_req` ne rajoutent aucune commande libre.
 
-Une seule commande doit lancer exactement la même formulation :
+### Objectif
+
+L'objectif sélectionné par le benchmark reste celui du projet : fatigue,
+force, charge de stimulation, ou combinaison pondérée. Le cas nominal fatigue
+minimise notamment la fonction de fatigue existante avec son poids `1e4`.
+Il n'y a pas de pénalité artificielle sur le couple : le profil de couple est
+déterminé par les stimulations, l'équilibre inverse et le travail global.
+
+## RHO, initialisation et caches
+
+À la transition entre deux fenêtres, les états physiologiques suivent la
+politique de transfert existante. `theta` continue d'un tour, `omega` demeure
+`omega_star`, tandis que `E_prod` est remis à zéro et doit atteindre `E_star`
+dans chaque nouvelle fenêtre. Ce saut volontaire d'énergie ne représente pas
+une discontinuité physique : `E_prod` mesure le travail local de la fenêtre.
+
+Le seed isocinétique construit `theta` linéaire, `omega` constant et
+`E_prod` linéaire. Le raffinement IPOPT optionnel d'acados résout la formulation
+isocinétique cible, jamais l'ancien OCP à couple constant. Les signatures des
+caches de raffinement, des seeds acados et des seeds communs incluent la
+formulation, `omega_star`, `tau_eq`, `tau_min` et `tau_max`; un seed physique
+incompatible est rejeté.
+
+## Certification numérique
+
+Deux niveaux sont distingués explicitement.
+
+Le certificat du NLP exige simultanément : succès du solveur, valeurs finies,
+erreur de vitesse `<= 1e-9 rad/s`, erreur d'angle `<= 1e-8 rad`, résidu réduit
+`<= 1e-6`, erreur terminale et quadrature de transcription du travail
+`<= 1e-6 J`, et violation des bornes de couple `<= 1e-8 Nm`.
+
+Le replay physique indépendant DOP853 (`rtol=1e-11`, `atol=1e-13`) exige en
+plus les bornes de couple sur la grille dense et une erreur de travail
+`<= 0.02 J`. Cette tolérance de smoke test vaut 1.59 % du travail nominal. Elle
+ne doit pas être présentée comme une précision continue de `1e-6 J` : avec la
+discrétisation nominale, les erreurs mesurées sont `7.64e-3 J` au degré Radau 3
+et `1.39e-3 J` au degré 5. Une étude de convergence temporelle est nécessaire
+avant d'abaisser ce seuil.
+
+L'équilibre inverse a aussi été comparé à la dynamique mécanique complète sur
+le profil nominal : erreur maximale `1.17e-5 Nm`. Le seuil de `1e-6` certifie
+donc l'équilibre du modèle réduit; une revendication d'équivalence au modèle
+complet doit employer au moins `2e-5 Nm` ou raffiner le profil réduit.
+
+## Lancement des benchmarks
+
+La référence isocinétique est Radau-5 pour IPOPT et MadNLP. acados conserve
+son IRK natif, mais son raffinement IPOPT par fenêtre utilise aussi Radau-5 et
+MA57. Le pilote commun lance les mêmes paramètres physiques sur les trois
+backends :
 
 ```bash
 python .github/scripts/run_benchmarks.py \
   --formulation isokinetic \
-  --cases ipopt madnlp-mumps acados-irk \
+  --cases ipopt-radau5 madnlp-mumps-radau5 acados-irk \
   --cycles 5 \
+  --ipopt-hsl-library /chemin/vers/libhsl.so \
   --energy-equivalent-torque 0.2 \
   --isokinetic-omega=-6.283185307179586 \
-  --load-torque-min -1.0 \
-  --load-torque-max 1.0
+  --load-torque-min -3 \
+  --load-torque-max 3
 ```
 
-Le pilote transmettra ces options au script shell et au chemin acados. Le nom
-du répertoire de sortie inclura la formulation et le couple équivalent afin de
-ne jamais écraser les campagnes dynamiques actuelles. Les scripts existants de
-résumé resteront la source unique des temps, itérations et objectifs.
+L'option explicite est prioritaire. Exporter une seule fois
+`IPOPT_HSL_LIBRARY=/chemin/vers/libhsl.so` rend aussi cette bibliothèque le
+défaut de toutes les CLI IPOPT : benchmark RHO, raffinement IPOPT d'acados et
+workflows full-horizon.
 
-Chaque résultat JSON et chaque seed NPZ enregistrera au minimum : formulation,
-vitesse cible, travail cible, bornes de couple, trace `tau_load`, trace
-`E_prod`, erreur maximale de vitesse, résidu maximal d'équilibre, travail
-recalculé par quadrature et erreur terminale d'énergie.
+Pour un diagnostic rapide, le même jeu d'options est disponible dans
+`cycling_fes_solver_comparison.py`. Les JSON contiennent les paramètres, les
+traces `theta/omega/E_prod/tau_load`, les diagnostics solveur et les audits de
+certification. Les répertoires isocinétiques portent un suffixe comprenant le
+couple équivalent afin de ne pas écraser les campagnes dynamiques.
 
-## Critères d'acceptation
+Le benchmark de validation à cinq RHO, 30 stimulations/tour et bornes
+`[-3,3] Nm` donne actuellement :
 
-Un RHO n'est certifié que si le solveur annonce le succès et si un audit
-indépendant confirme simultanément :
+| Backend | RHO certifiés | Itérations | Temps solveur total | Objectif cumulé | Erreur DOP853 max |
+|---|---:|---|---:|---:|---:|
+| IPOPT/MA57, Radau-5 | 5/5 | 59, 61, 48, 49, 48 | 5.055 s | 0.361551 | 1.307e-3 J |
+| MadNLP/MUMPS, Radau-5, tol. 1e-8 | 5/5 | 55, 44, 49, 48, 50 | 14.863 s | 137.399646 | 2.149e-3 J |
+| acados/IRK + raffinement IPOPT | 5/5 | 2, 3, 3, 3, 3 | 0.753 s | 0.352908 | 8.379e-6 J |
 
-- `max(abs(omega-omega_target)) <= 1e-9 rad/s`;
-- erreur angulaire terminale `<= 1e-8 rad`;
-- résidu nodal d'équilibre `<= 1e-6` dans les unités mises à l'échelle;
-- erreur de travail terminale et erreur de quadrature `<= 1e-6 J`;
-- respect des bornes de couple, des PW et des états physiologiques;
-- aucune valeur non finie.
+Les temps acados ci-dessus sont les temps du solveur cible; les raffinements
+IPOPT de préparation ne sont pas inclus et cette ligne reste une référence
+Radau-3 de transition jusqu'à la fin de sa campagne Radau-5/MA57. Les deux
+campagnes NLP Radau-5 satisfont le certificat de transcription (`E <= 1.47e-13
+J`, résidu réduit `< 5e-14`, erreur de vitesse `< 4e-13 rad/s`) et le replay
+DOP853. L'objectif MadNLP beaucoup plus élevé
+malgré la faisabilité signale un bassin local différent et interdit de conclure
+à l'équivalence des optima sur cette seule campagne.
 
-Les seuils seront des constantes partagées par les trois solveurs. Les
-benchmarks rapporteront aussi l'accord inter-solveur sur l'objectif, le travail
-et le profil de couple, sans exiger que les couples nodaux soient identiques si
-l'optimum n'est pas unique.
+## Plan de match en sept étapes et portes de validation
 
-## Plan de réalisation
-
-1. Ajouter et tester le module de configuration, les conventions de signe, la
-   cible de travail et l'équilibre inverse.
-2. Étendre le modèle réduit avec `tau_load`, `E_prod`, la dynamique
-   isocinétique et la contrainte d'équilibre, sans modifier le mode existant.
-3. Extraire les constructeurs de bornes/initialisations isocinétiques et adapter
-   le transfert RHO pour remettre l'énergie à zéro.
-4. Ajouter l'interface CLI et les métadonnées, puis brancher les trois chemins
-   IPOPT, MadNLP et acados sur cette interface unique.
-5. Ajouter les audits post-solve et les tests unitaires, puis un smoke test à
-   un RHO pour chaque backend.
-6. Exécuter un benchmark apparié de cinq RHO avant toute campagne longue et
-   comparer faisabilité, objectif, temps, itérations et trajectoires.
+1. **Contrat et signes.** Centraliser les paramètres et formules. Porte : tests
+   analytiques de signe, durée, angle et `E_star`; vérification indépendante
+   qu'un couple constant de `0.2 Nm` donne exactement `0.2*2*pi J`.
+2. **Profil réduit.** Vérifier `b_ext`, les projections et l'équivalence au
+   modèle complet. Porte : positivité/marge de `b_ext`, cohérence tangentielle
+   `1.22e-15`, écart complet/réduit `1.17e-5 Nm` documenté.
+3. **OCP isocinétique.** Ajouter `E_prod`, imposer la cinématique et éliminer
+   analytiquement le couple sans altérer le mode dynamique. Porte : tests de
+   dimensions, invariance à l'état `omega`, résidu d'équilibre et dérivée
+   d'énergie symbolique/numérique.
+4. **RHO et seeds.** Construire bornes/initialisations et remettre l'énergie à
+   zéro à chaque fenêtre. Porte : test de raccord des états physiologiques,
+   angle/vitesse, saut volontaire d'énergie et résolution de deux RHO.
+5. **Interface solveurs.** Exposer une CLI commune, isoler les sorties et
+   signer les caches avec tous les paramètres physiques. Porte : tests du
+   pilote et rejet d'un seed incompatible.
+6. **Certification backend.** Lancer un smoke test IPOPT, MadNLP et acados sur
+   le même primal; appliquer le certificat NLP et le replay DOP853. Une étape
+   n'est verte que si le statut solveur et les deux audits sont verts; un
+   statut acados `MINSTEP` reste un échec même avec un seed physiquement
+   faisable.
+7. **Benchmark apparié et sensibilité.** Lancer au moins cinq RHO et comparer
+   faisabilité, temps, itérations, objectif, travail et extrema du couple.
+   Répéter avec les bornes de couple resserrées (notamment `[-1,1]`, `[-2,2]`,
+   `[-3,3]`) en conservant Radau-5 avant toute conclusion scientifique
+   ou campagne longue.
