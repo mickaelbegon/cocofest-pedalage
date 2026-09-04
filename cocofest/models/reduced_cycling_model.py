@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 
 from casadi import MX, SX, vertcat
@@ -21,12 +22,19 @@ from cocofest.models.state_configure import StateConfigure
 
 
 class ReducedFesCyclingModel(StateDynamics):
-    """Twenty Ding states plus physical crank angle and angular velocity.
+    """Ding states plus the physical crank mechanics.
 
     The four five-state Ding models and their pulse-width controls are retained
     exactly.  The three-coordinate constrained multibody subsystem is replaced
     by the tangent-projected two-state system ``theta_dot = omega`` and
     ``omega_dot = f(theta, omega, muscle forces)``.
+
+    When ``isokinetic`` is enabled, ``omega`` is constant by construction,
+    ``theta`` advances at ``isokinetic_omega``. The required load torque is
+    eliminated analytically from the inverse mechanical balance and evaluated
+    at every integrator stage. ``E_prod`` integrates the net work produced
+    against that load. The default remains the original 22-state
+    forward-dynamics model.
     """
 
     def __init__(
@@ -35,6 +43,8 @@ class ReducedFesCyclingModel(StateDynamics):
         reduced_dynamics: ReducedCyclingDynamics,
         muscles_model: Sequence[FesModel],
         external_crank_torque: float = 0.0,
+        isokinetic: bool = False,
+        isokinetic_omega: float = -2.0 * math.pi,
         activate_force_length_relationship: bool = True,
         activate_force_velocity_relationship: bool = True,
         activate_passive_force_relationship: bool = True,
@@ -44,6 +54,8 @@ class ReducedFesCyclingModel(StateDynamics):
         self.reduced_dynamics = reduced_dynamics
         self.muscles_dynamics_model = list(muscles_model)
         self.external_crank_torque = float(external_crank_torque)
+        self.isokinetic = bool(isokinetic)
+        self.isokinetic_omega = float(isokinetic_omega)
         self.activate_force_length_relationship = bool(
             activate_force_length_relationship
         )
@@ -54,6 +66,19 @@ class ReducedFesCyclingModel(StateDynamics):
             activate_passive_force_relationship
         )
         self._name = str(name)
+
+        if not math.isfinite(self.isokinetic_omega):
+            raise ValueError("isokinetic_omega must be finite.")
+        if self.isokinetic and self.isokinetic_omega >= 0.0:
+            raise ValueError(
+                "isokinetic_omega must be strictly negative for the current "
+                "cycling convention."
+            )
+        if self.isokinetic and self.external_crank_torque != 0.0:
+            raise ValueError(
+                "external_crank_torque cannot be used together with the "
+                "analytically eliminated isokinetic load."
+            )
 
         model_names = tuple(
             str(model.muscle_name) for model in self.muscles_dynamics_model
@@ -101,7 +126,7 @@ class ReducedFesCyclingModel(StateDynamics):
 
     @property
     def nb_state(self) -> int:
-        return 22
+        return 23 if self.isokinetic else 22
 
     @property
     def contact_types(self) -> tuple:
@@ -137,6 +162,12 @@ class ReducedFesCyclingModel(StateDynamics):
                 ),
             )
         )
+        if self.isokinetic:
+            functions.append(
+                lambda ocp, nlp: ConfigureVariables.configure_new_variable(
+                    "E_prod", ["net_external_work"], ocp, nlp, as_states=True
+                )
+            )
         return functions
 
     @property
@@ -172,12 +203,63 @@ class ReducedFesCyclingModel(StateDynamics):
                 "reduced_dynamics": self.reduced_dynamics,
                 "muscles_model": self.muscles_dynamics_model,
                 "external_crank_torque": self.external_crank_torque,
+                "isokinetic": self.isokinetic,
+                "isokinetic_omega": self.isokinetic_omega,
                 "activate_force_length_relationship": self.activate_force_length_relationship,
                 "activate_force_velocity_relationship": self.activate_force_velocity_relationship,
                 "activate_passive_force_relationship": self.activate_passive_force_relationship,
                 "name": self._name,
             },
         )
+
+    def external_torque_effectiveness(self, theta):
+        """Return ``b_ext(theta)`` from the fitted reduced profile."""
+
+        values = self.reduced_dynamics.coefficients.casadi(
+            self.reduced_dynamics.kinematics.progress(theta)
+        )
+        return values[self.reduced_dynamics._external_index]
+
+    def mechanical_equilibrium_residual(
+        self,
+        theta,
+        omega,
+        muscle_forces,
+        tau_load,
+    ):
+        """Return the isokinetic inverse-dynamics balance residual.
+
+        This is exactly the numerator used by
+        :meth:`ReducedCyclingDynamics.casadi_acceleration`, exposed separately
+        so an OCP constraint can impose zero acceleration without introducing
+        the effective inertia.
+        """
+
+        from casadi import dot
+
+        values = self.reduced_dynamics.coefficients.casadi(
+            self.reduced_dynamics.kinematics.progress(theta)
+        )
+        return (
+            dot(values[self.reduced_dynamics._muscle_slice], muscle_forces)
+            + values[self.reduced_dynamics._external_index] * tau_load
+            - values[self.reduced_dynamics._gravity_index]
+            - values[self.reduced_dynamics._velocity_index] * omega**2
+        )
+
+    def required_load_torque(self, theta, omega, muscle_forces):
+        """Return the load torque that makes the reduced acceleration zero."""
+
+        from casadi import dot
+
+        values = self.reduced_dynamics.coefficients.casadi(
+            self.reduced_dynamics.kinematics.progress(theta)
+        )
+        return (
+            values[self.reduced_dynamics._gravity_index]
+            + values[self.reduced_dynamics._velocity_index] * omega**2
+            - dot(values[self.reduced_dynamics._muscle_slice], muscle_forces)
+        ) / values[self.reduced_dynamics._external_index]
 
     def dynamics(
         self,
@@ -191,13 +273,16 @@ class ReducedFesCyclingModel(StateDynamics):
     ) -> DynamicsEvaluation:
         theta = DynamicsFunctions.get(nlp.states["theta"], states)
         omega = DynamicsFunctions.get(nlp.states["omega"], states)
+        mechanical_omega = self.isokinetic_omega if self.isokinetic else omega
         if (
             self.activate_force_length_relationship
             or self.activate_force_velocity_relationship
             or self.activate_passive_force_relationship
         ):
             force_length, force_velocity, passive_force = (
-                self.reduced_dynamics.casadi_muscle_relationships(theta, omega)
+                self.reduced_dynamics.casadi_muscle_relationships(
+                    theta, mechanical_omega
+                )
             )
         else:
             force_length = [1.0] * len(self.muscles_dynamics_model)
@@ -253,13 +338,33 @@ class ReducedFesCyclingModel(StateDynamics):
                 )
             )
 
-        omega_dot = self.reduced_dynamics.casadi_acceleration(
-            theta,
-            omega,
-            vertcat(*muscle_forces),
-            self.external_crank_torque,
-        )
-        dxdt = vertcat(*muscle_derivatives, omega, omega_dot)
+        if self.isokinetic:
+            # Substitute the inverse balance into -tau_load*b_ext*omega.
+            # This avoids a needless division/remultiplication by b_ext while
+            # retaining tau_load itself for bounds and post-solve reporting.
+            energy_dot = (
+                self.mechanical_equilibrium_residual(
+                    theta,
+                    mechanical_omega,
+                    vertcat(*muscle_forces),
+                    0.0,
+                )
+                * mechanical_omega
+            )
+            dxdt = vertcat(
+                *muscle_derivatives,
+                self.isokinetic_omega,
+                0.0,
+                energy_dot,
+            )
+        else:
+            omega_dot = self.reduced_dynamics.casadi_acceleration(
+                theta,
+                omega,
+                vertcat(*muscle_forces),
+                self.external_crank_torque,
+            )
+            dxdt = vertcat(*muscle_derivatives, omega, omega_dot)
         defects = None
         if isinstance(nlp.dynamics_type.ode_solver, OdeSolver.COLLOCATION):
             defects = (
