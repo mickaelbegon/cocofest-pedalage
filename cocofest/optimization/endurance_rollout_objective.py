@@ -8,9 +8,10 @@ with a different certified profile without rebuilding its graph.
 
 The objective is the normalized smooth maximum of recruitment utilization
 over future cycles, muscles and phase intervals.  It uses no muscle-specific
-weight and no FHO datum.  Discrete domain failures cannot be represented by a
-smooth symbolic expression; callers must first pass the numerical source-cycle
-gate implemented by :mod:`cocofest.optimization.rho_rollout_adapter`.
+weight and no FHO datum.  The function also returns every symbolic domain
+margin used by the rollout.  A future OCP integration must constrain these
+margins to be strictly positive; exposing them prevents an optimizer from
+silently exploiting negative recruitment or a singular denominator.
 """
 
 from __future__ import annotations
@@ -121,6 +122,7 @@ class RolloutObjectiveExpressions:
     smooth_maximum_utilization: Any
     utilizations: Any
     final_slow_states: Any
+    domain_margins: Any
 
 
 def _profile_matrix(values, *, name: str, layout: RolloutObjectiveLayout) -> np.ndarray:
@@ -191,6 +193,19 @@ def pack_rollout_objective_parameters(
         "first_half_force_integral": first_integral,
         "second_half_force_integral": second_integral,
     }
+    if np.any(fields["force"] < 0.0):
+        raise ValueError("force must be non-negative throughout the packed profile.")
+    if np.any(fields["cn"] <= 0.0):
+        raise ValueError("cn must be strictly positive throughout the packed profile.")
+    mechanical_gain = fields["force_length"] * fields["force_velocity"] + fields["passive_force"]
+    if np.any(mechanical_gain <= 0.0):
+        raise ValueError("the packed profile must have strictly positive mechanical gain.")
+    if np.any(fields["half_decay"] <= 0.0) or np.any(fields["half_decay"] > 1.0):
+        raise ValueError("half_decay must lie in (0, 1].")
+    if np.any(fields["first_half_force_integral"] < 0.0) or np.any(
+        fields["second_half_force_integral"] < 0.0
+    ):
+        raise ValueError("weighted force integrals must be non-negative.")
     packed = np.empty(layout.parameter_size)
     for name in _PROFILE_FIELDS:
         # Explicit C order makes consecutive phase samples belong to the same
@@ -239,6 +254,7 @@ def build_rollout_objective_expressions(
 
     current = [states[3 * muscle : 3 * muscle + 3] for muscle in range(layout.muscle_count)]
     utilizations = []
+    domain_margins = []
     for _ in range(layout.horizon_cycles):
         for interval_index in range(layout.interval_count):
             for muscle_index, muscle in enumerate(muscles):
@@ -303,6 +319,18 @@ def build_rollout_objective_expressions(
                         -(muscle.pulse_width_max - muscle.pd0) / muscle.pdt
                     )
                 )
+                domain_margins.extend(
+                    (
+                        midpoint[0],
+                        midpoint[1],
+                        midpoint[2] + cn,
+                        cn,
+                        mechanical_gain,
+                        relaxation_time,
+                        required,
+                        maximum,
+                    )
+                )
                 utilizations.append(required / maximum)
 
                 second_integral = _symbolic_profile_value(
@@ -322,10 +350,12 @@ def build_rollout_objective_expressions(
         - math.log(layout.utilization_size)
     )
     final_states = ca.vertcat(*current)
+    domain_margin_vector = ca.vertcat(*domain_margins)
     return RolloutObjectiveExpressions(
         smooth_maximum_utilization=smooth_maximum,
         utilizations=utilization_vector,
         final_slow_states=final_states,
+        domain_margins=domain_margin_vector,
     )
 
 
@@ -361,7 +391,13 @@ def build_rollout_objective_function(
             expressions.smooth_maximum_utilization,
             expressions.utilizations,
             expressions.final_slow_states,
+            expressions.domain_margins,
         ],
         ["initial_slow_state", "profile"],
-        ["smooth_maximum_utilization", "utilizations", "final_slow_states"],
+        [
+            "smooth_maximum_utilization",
+            "utilizations",
+            "final_slow_states",
+            "domain_margins",
+        ],
     )

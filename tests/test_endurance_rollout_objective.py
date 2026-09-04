@@ -2,6 +2,7 @@ import math
 
 import casadi as ca
 import numpy as np
+import pytest
 
 from cocofest.optimization.ding_fatigue_rollout import DingFatigueParameters
 from cocofest.optimization.endurance_rollout import (
@@ -97,6 +98,7 @@ def test_symbolic_objective_matches_the_numerical_continuous_force_rollout():
     np.testing.assert_allclose(
         float(symbolic[0]), expected_smooth_maximum, rtol=2e-13, atol=2e-13
     )
+    assert np.min(np.asarray(symbolic[3])) > 0.0
 
 
 def test_one_graph_accepts_new_profile_parameters_and_has_finite_gradients():
@@ -137,3 +139,34 @@ def test_fixed_size_rollout_objective_generates_c_code(tmp_path, monkeypatch):
 
     assert (tmp_path / "compiled_endurance_rollout_objective.c").is_file()
     assert (tmp_path / "compiled_endurance_rollout_objective.h").is_file()
+
+
+def test_packed_profile_rejects_nonpositive_symbolic_denominators():
+    profile = _profile()
+    invalid = PeriodicRecruitmentProfile(
+        force_profile=profile.force_profile,
+        interval_count=profile.interval_count,
+        cn=np.zeros_like(profile.cn),
+        force_length_relationship=profile.force_length_relationship,
+        force_velocity_relationship=profile.force_velocity_relationship,
+        passive_force_relationship=profile.passive_force_relationship,
+    )
+    with pytest.raises(ValueError, match="cn must be strictly positive"):
+        pack_rollout_objective_parameters(
+            invalid,
+            _muscles(),
+            RolloutObjectiveLayout(2, 4, 2),
+        )
+
+
+def test_symbolic_objective_exposes_negative_recruitment_domain_margin():
+    muscles = _muscles()
+    layout = RolloutObjectiveLayout(2, 4, 1)
+    parameters = pack_rollout_objective_parameters(_profile(), muscles, layout)
+    parameters[layout.field_slice("force_derivative")] = -1e6
+    function = build_rollout_objective_function(muscles=muscles, layout=layout)
+    initial = np.array([1450.0, 0.065, 0.142, 1620.0, 0.066, 0.143])
+
+    result = function(initial, parameters)
+
+    assert np.min(np.asarray(result[3])) < 0.0
