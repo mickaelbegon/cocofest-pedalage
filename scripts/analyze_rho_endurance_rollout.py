@@ -5,15 +5,25 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import sys
+
+# Headless-safe before importing the package graph (which may import plotting
+# dependencies through Bioptim in clinical/CI environments).
+os.environ.setdefault("MPLBACKEND", "Agg")
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/cocofest-matplotlib")
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from cocofest.optimization.rho_rollout_adapter import (
+    DEFAULT_COLLOCATION_FORCE_ODE_TOLERANCE_N_PER_S,
     DEFAULT_HORIZONS,
+    DEFAULT_MIDPOINT_INVERSE_COVERAGE_MINIMUM,
+    DEFAULT_MIDPOINT_FORCE_ODE_TOLERANCE_N_PER_S,
+    DEFAULT_MIDPOINT_PULSE_WIDTH_ERROR_TOLERANCE_S,
     REPORT_SCHEMA,
     build_rho_endurance_rollout_report,
     write_rho_endurance_rollout_report,
@@ -54,6 +64,42 @@ def build_cli() -> argparse.ArgumentParser:
     parser.add_argument("--kinematic-consistency-tolerance", type=float, default=0.1)
     parser.add_argument("--negative-force-tolerance", type=float, default=1e-10)
     parser.add_argument("--pulse-width-bound-tolerance-s", type=float, default=1e-10)
+    parser.add_argument(
+        "--collocation-force-ode-tolerance-n-per-s",
+        type=float,
+        default=DEFAULT_COLLOCATION_FORCE_ODE_TOLERANCE_N_PER_S,
+        help=(
+            "Exact transcription gate: maximum force-equation defect at any "
+            "enforced collocation stage (default: 1e-4 N/s)."
+        ),
+    )
+    parser.add_argument(
+        "--midpoint-pulse-width-error-tolerance-s",
+        type=float,
+        default=DEFAULT_MIDPOINT_PULSE_WIDTH_ERROR_TOLERANCE_S,
+        help=(
+            "Compact-policy quality gate: maximum inferred-vs-exported pulse-width "
+            "error among finite midpoint inversions (default: 10 us)."
+        ),
+    )
+    parser.add_argument(
+        "--midpoint-force-ode-tolerance-n-per-s",
+        type=float,
+        default=DEFAULT_MIDPOINT_FORCE_ODE_TOLERANCE_N_PER_S,
+        help=(
+            "Compact-policy quality gate: maximum Ding ODE residual at non-enforced "
+            "interval midpoints (default: 10 N/s)."
+        ),
+    )
+    parser.add_argument(
+        "--midpoint-inverse-coverage-minimum",
+        type=float,
+        default=DEFAULT_MIDPOINT_INVERSE_COVERAGE_MINIMUM,
+        help=(
+            "Minimum fraction of finite bounded PW inversions at non-enforced "
+            "midpoints (default: 0.90; failures remain fully reported)."
+        ),
+    )
     return parser
 
 
@@ -76,6 +122,16 @@ def main(argv: list[str] | None = None) -> int:
             kinematic_consistency_tolerance=args.kinematic_consistency_tolerance,
             negative_force_tolerance=args.negative_force_tolerance,
             pulse_width_bound_tolerance_s=args.pulse_width_bound_tolerance_s,
+            collocation_force_ode_tolerance_n_per_s=(
+                args.collocation_force_ode_tolerance_n_per_s
+            ),
+            midpoint_pulse_width_error_tolerance_s=(
+                args.midpoint_pulse_width_error_tolerance_s
+            ),
+            midpoint_force_ode_tolerance_n_per_s=(
+                args.midpoint_force_ode_tolerance_n_per_s
+            ),
+            midpoint_inverse_coverage_minimum=args.midpoint_inverse_coverage_minimum,
             model_path=args.model_path,
         )
     except Exception as error:

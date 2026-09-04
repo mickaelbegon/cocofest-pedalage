@@ -5,7 +5,10 @@ import casadi as ca
 import numpy as np
 import pytest
 
+import cocofest.optimization.rho_rollout_adapter as rollout_adapter_module
 from cocofest.optimization.rho_rollout_adapter import (
+    _lagrange_derivative_weights,
+    _state_midpoints_and_derivatives_from_collocation,
     adapter_completion_status,
     build_rho_endurance_rollout_report,
     fit_nonnegative_periodic_fourier_force_profile,
@@ -13,6 +16,7 @@ from cocofest.optimization.rho_rollout_adapter import (
     square_periodic_fourier_profile,
     write_rho_endurance_rollout_report,
 )
+from cocofest.optimization.periodic_force_profile import PeriodicFourierForceProfile
 
 
 MUSCLES = ("m1", "m2")
@@ -101,6 +105,11 @@ def _write_archive(path, *, certified=True, break_periodicity=False, force_scale
 
 
 def _build(source, reduced_profile, **kwargs):
+    kwargs.setdefault("collocation_force_ode_tolerance_n_per_s", 1e6)
+    # The synthetic fixture is not a discretized Ding trajectory.  Tests that
+    # exercise a strict midpoint-quality rejection override these explicitly.
+    kwargs.setdefault("midpoint_force_ode_tolerance_n_per_s", 1e6)
+    kwargs.setdefault("midpoint_pulse_width_error_tolerance_s", 1.0)
     return build_rho_endurance_rollout_report(
         source,
         reduced_profile,
@@ -129,6 +138,46 @@ def test_last_cycle_selection_uses_declared_collocation_layout(tmp_path):
     assert selected.start_column == 24
     assert selected.end_column == 48
     assert period_basis == "metadata.cycle_duration_s"
+
+
+def test_lagrange_derivative_weights_are_exact_for_polynomial_basis():
+    nodes = np.array([0.0, 0.1, 0.4, 0.75, 1.0])
+    query = 0.37
+    weights = _lagrange_derivative_weights(nodes, query)
+
+    for power in range(nodes.size):
+        expected = 0.0 if power == 0 else power * query ** (power - 1)
+        assert nodes**power @ weights == pytest.approx(expected, abs=2e-13)
+
+
+def test_radau_midpoint_value_and_time_derivative_use_same_local_polynomial(tmp_path):
+    source = tmp_path / "rho.npz"
+    _write_archive(source)
+    with np.load(source, allow_pickle=False) as archive:
+        payload = {key: np.asarray(archive[key]).copy() for key in archive.files}
+
+    # The synthetic archive spans two seconds/cycles.  A quartic is exactly
+    # represented by every degree-3 Radau interval only up to cubic locally,
+    # so use a cubic to exercise all basis terms without interpolation error.
+    global_time = -payload["states__theta"][0] / (2.0 * np.pi)
+    payload["states__F_m1"][0] = 3.0 + 2.0 * global_time - global_time**2 + 0.25 * global_time**3
+    np.savez(source, **payload)
+
+    cycle, _ = select_last_certified_rho_cycle(source)
+    values, derivatives = _state_midpoints_and_derivatives_from_collocation(
+        cycle, "F", ("m1",)
+    )
+    midpoint_global_time = 1.0 + (np.arange(6) + 0.5) / 6.0
+    expected_values = (
+        3.0
+        + 2.0 * midpoint_global_time
+        - midpoint_global_time**2
+        + 0.25 * midpoint_global_time**3
+    )
+    expected_derivatives = 2.0 - 2.0 * midpoint_global_time + 0.75 * midpoint_global_time**2
+
+    np.testing.assert_allclose(values[0], expected_values, rtol=0.0, atol=2e-13)
+    np.testing.assert_allclose(derivatives[0], expected_derivatives, rtol=0.0, atol=2e-12)
 
 
 def test_squared_root_fourier_conversion_is_exact_and_nonnegative():
@@ -185,9 +234,17 @@ def test_adapter_builds_compact_horizons_from_a_valid_periodic_cycle(tmp_path):
     assert report["configuration"]["force_resulting_harmonics"] == 4
     assert report["audits"]["force_fourier"]["fit_space"] == "sqrt_force"
     assert report["audits"]["force_fourier"]["clipping_applied"] is False
-    assert report["reference_policy"]["evaluated"] is True
-    assert report["reference_policy"]["reproducible"] is True
-    assert report["reference_policy"]["status_counts"] == {"ok": 12}
+    fidelity = report["adapted_policy_fidelity"]
+    assert fidelity["evaluated"] is True
+    assert fidelity["passed"] is True
+    assert fidelity["status_counts"] == {"ok": 12}
+    assert fidelity["approximation_quality"]["passed"] is True
+    transcription = report["audits"]["source_transcription"]["force_ode"]
+    assert transcription["sample_count"] == 36
+    assert transcription["passed"] is True
+    assert transcription["role"] == (
+        "exact_source_NLP_transcription_gate"
+    )
     assert len(report["model_parameters"]) == 2
     alignment = report["audits"]["midpoint_alignment"]
     assert alignment["policy"] == "shared_equal_stimulation_interval_midpoints"
@@ -195,6 +252,103 @@ def test_adapter_builds_compact_horizons_from_a_valid_periodic_cycle(tmp_path):
     assert alignment["all_array_shapes"] == [2, 6]
     assert loaded == report
     assert "NaN" not in output.read_text()
+
+
+def test_adapter_rejects_force_polynomial_that_violates_ode_at_radau_stages(tmp_path):
+    source = tmp_path / "rho.npz"
+    reduced_profile = tmp_path / "reduced.npz"
+    _write_archive(source)
+    reduced_profile.write_bytes(b"test-profile")
+
+    report = _build(
+        source,
+        reduced_profile,
+        collocation_force_ode_tolerance_n_per_s=1e-8,
+    )
+
+    assert report["status"] == "rejected"
+    assert report["audits"]["source_transcription"]["force_ode"]["passed"] is False
+    assert "source_collocation_force_ode_residual_too_large" in {
+        reason["code"] for reason in report["rejection_reasons"]
+    }
+
+
+def test_midpoint_approximation_has_distinct_configurable_quality_gate(tmp_path):
+    source = tmp_path / "rho.npz"
+    reduced_profile = tmp_path / "reduced.npz"
+    _write_archive(source)
+    reduced_profile.write_bytes(b"test-profile")
+
+    report = _build(
+        source,
+        reduced_profile,
+        collocation_force_ode_tolerance_n_per_s=1e6,
+        midpoint_force_ode_tolerance_n_per_s=1e-8,
+        midpoint_pulse_width_error_tolerance_s=1.0,
+    )
+
+    assert report["status"] == "midpoint_approximation_out_of_tolerance"
+    assert report["rejection_reasons"] == []
+    assert report["audits"]["source_transcription"]["force_ode"]["passed"] is True
+    quality = report["adapted_policy_fidelity"]["approximation_quality"]
+    assert quality["passed"] is False
+    assert quality["midpoint_force_ode"]["passed"] is False
+    assert quality["inferred_vs_exported_pulse_width"]["passed"] is True
+
+    pulse_width_report = _build(
+        source,
+        reduced_profile,
+        collocation_force_ode_tolerance_n_per_s=1e6,
+        midpoint_force_ode_tolerance_n_per_s=1e6,
+        midpoint_pulse_width_error_tolerance_s=1e-12,
+    )
+    pulse_width_quality = pulse_width_report["adapted_policy_fidelity"][
+        "approximation_quality"
+    ]
+    assert pulse_width_report["status"] == "midpoint_approximation_out_of_tolerance"
+    assert pulse_width_quality["midpoint_force_ode"]["passed"] is True
+    assert pulse_width_quality["inferred_vs_exported_pulse_width"]["passed"] is False
+
+
+def test_adapted_policy_fidelity_detects_divergence_from_local_collocation(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "rho.npz"
+    reduced_profile = tmp_path / "reduced.npz"
+    _write_archive(source)
+    reduced_profile.write_bytes(b"test-profile")
+    original_fit = rollout_adapter_module.fit_nonnegative_periodic_fourier_force_profile
+
+    def distorted_fit(*args, **kwargs):
+        profile = original_fit(*args, **kwargs)
+        return PeriodicFourierForceProfile(
+            period=profile.period,
+            mean=profile.mean + 1e6,
+            cosine=profile.cosine,
+            sine=profile.sine,
+        )
+
+    monkeypatch.setattr(
+        rollout_adapter_module,
+        "fit_nonnegative_periodic_fourier_force_profile",
+        distorted_fit,
+    )
+    report = _build(
+        source,
+        reduced_profile,
+        fourier_relative_rmse_tolerance=1e9,
+        fourier_relative_maximum_tolerance=1e9,
+        midpoint_force_ode_tolerance_n_per_s=1e6,
+        midpoint_pulse_width_error_tolerance_s=1.0,
+        midpoint_inverse_coverage_minimum=0.01,
+    )
+
+    local = report["audits"]["source_midpoint_interpolation"]
+    adapted = report["adapted_policy_fidelity"]
+    assert local["approximation_quality"]["midpoint_force_ode"]["passed"] is True
+    assert adapted["approximation_quality"]["midpoint_force_ode"]["passed"] is False
+    assert local["policy_source"] != adapted["policy_source"]
+    assert report["status"] == "midpoint_approximation_out_of_tolerance"
 
 
 def test_adapter_reports_uncertified_nonperiodic_source_without_forcing_rollout(tmp_path):
@@ -208,11 +362,12 @@ def test_adapter_reports_uncertified_nonperiodic_source_without_forcing_rollout(
 
     assert report["status"] == "rejected"
     assert report["horizons"] == []
-    assert report["reference_policy"] == {
+    assert report["adapted_policy_fidelity"] == {
         "evaluated": False,
-        "reproducible": None,
+        "passed": None,
         "reason": "input_adaptation_rejected",
     }
+    assert report["reference_policy"]["deprecated_alias_of"] == "adapted_policy_fidelity"
     assert "source_not_certified" in codes
     assert "non_periodic_force" in codes
     assert "non_periodic_cn" in codes
@@ -252,14 +407,20 @@ def test_reference_gate_uses_source_cycle_collocation_states_and_keeps_horizons(
     payload["states__A_m1"][0] = 4700.0 + 7.0 * global_time + 2.0 * global_time**2
     np.savez(source, **payload)
 
-    report = _build(source, reduced_profile)
+    report = _build(
+        source,
+        reduced_profile,
+        midpoint_inverse_coverage_minimum=0.01,
+    )
 
-    reference = report["reference_policy"]
-    assert report["status"] == "reference_policy_not_reproducible"
+    reference = report["audits"]["source_midpoint_interpolation"]
+    assert report["status"] == "complete"
     assert report["rejection_reasons"] == []
     assert reference["evaluated"] is True
-    assert reference["reproducible"] is False
+    assert reference["passed"] is True
+    assert reference["approximation_quality"]["passed"] is True
     assert reference["failure_count"] > 0
+    assert reference["all_midpoint_inversions_feasible"] is False
     assert reference["first_failure"]["source_cycle_index"] == 1
     assert reference["first_failure"]["status"] in {
         "recruitment_exceeds_capacity",
@@ -277,21 +438,21 @@ def test_reference_gate_uses_source_cycle_collocation_states_and_keeps_horizons(
 
 
 def test_completion_status_does_not_depend_on_future_rollout_feasibility():
-    assert adapter_completion_status([], reference_policy_reproducible=True) == "complete"
+    assert adapter_completion_status([], midpoint_approximation_acceptable=True) == "complete"
     assert (
-        adapter_completion_status([], reference_policy_reproducible=False)
-        == "reference_policy_not_reproducible"
+        adapter_completion_status([], midpoint_approximation_acceptable=False)
+        == "midpoint_approximation_out_of_tolerance"
     )
     assert (
         adapter_completion_status(
             [{"code": "input"}],
-            reference_policy_reproducible=False,
+            midpoint_approximation_acceptable=False,
         )
         == "rejected"
     )
 
 
-def test_cli_returns_two_for_nonreproducible_reference_policy(tmp_path, monkeypatch):
+def test_cli_returns_two_for_midpoint_approximation_out_of_tolerance(tmp_path, monkeypatch):
     from scripts import analyze_rho_endurance_rollout as cli
 
     monkeypatch.setattr(
@@ -299,8 +460,8 @@ def test_cli_returns_two_for_nonreproducible_reference_policy(tmp_path, monkeypa
         "build_rho_endurance_rollout_report",
         lambda *args, **kwargs: {
             "schema": "test",
-            "status": "reference_policy_not_reproducible",
-            "reference_policy": {"evaluated": True, "reproducible": False},
+            "status": "midpoint_approximation_out_of_tolerance",
+            "adapted_policy_fidelity": {"evaluated": True, "passed": False},
             "horizons": [{"horizon_cycles": 5, "feasible": False}],
         },
     )
@@ -317,5 +478,5 @@ def test_cli_returns_two_for_nonreproducible_reference_policy(tmp_path, monkeypa
 
     assert exit_code == 2
     assert json.loads((tmp_path / "report.json").read_text())["status"] == (
-        "reference_policy_not_reproducible"
+        "midpoint_approximation_out_of_tolerance"
     )

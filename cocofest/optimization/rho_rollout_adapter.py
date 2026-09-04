@@ -9,8 +9,10 @@ midpoints.  It never treats the dense collocation columns as uniformly spaced.
 The periodic-policy assumption is a scientific gate.  A source without
 certification metadata, an invalid crank winding, non-periodic ``omega``, ``F``
 or ``Cn``, excessive Fourier residual, or negative reconstructed force produces
-a rejected report with measured reasons.  Values are not clipped to make a
-rollout run.
+a rejected report with measured reasons.  The source transcription is checked
+where Radau actually enforces the ODE.  Midpoint inversion is reported as a
+separate approximation-quality diagnostic because midpoint states are not NLP
+constraint points.  Values are not clipped to make a rollout run.
 """
 
 from __future__ import annotations
@@ -40,7 +42,7 @@ from cocofest.optimization.periodic_force_profile import PeriodicFourierForcePro
 from cocofest.optimization.recruitment_margin import ding_recruitment_margin
 
 
-REPORT_SCHEMA = "cocofest-rho-endurance-rollout-v1"
+REPORT_SCHEMA = "cocofest-rho-endurance-rollout-v2"
 DEFAULT_HORIZONS = (5, 10, 20)
 DEFAULT_FORCE_HARMONICS = 12
 DEFAULT_PERIODICITY_RELATIVE_TOLERANCE = 1e-3
@@ -51,6 +53,15 @@ DEFAULT_FOURIER_RELATIVE_MAXIMUM_TOLERANCE = 0.35
 DEFAULT_KINEMATIC_CONSISTENCY_TOLERANCE = 0.1
 DEFAULT_NEGATIVE_FORCE_TOLERANCE = 1e-10
 DEFAULT_PULSE_WIDTH_BOUND_TOLERANCE_S = 1e-10
+DEFAULT_COLLOCATION_FORCE_ODE_TOLERANCE_N_PER_S = 1e-4
+# Midpoints are interpolation points, not direct-collocation constraints.  The
+# defaults below are engineering acceptance scales for exporting the compact
+# policy: 10 us in pulse width and 10 N/s in the vector field.  They are
+# intentionally much looser than the exact stage-transcription tolerance and
+# are exposed by both the Python API and CLI.
+DEFAULT_MIDPOINT_PULSE_WIDTH_ERROR_TOLERANCE_S = 1e-5
+DEFAULT_MIDPOINT_FORCE_ODE_TOLERANCE_N_PER_S = 10.0
+DEFAULT_MIDPOINT_INVERSE_COVERAGE_MINIMUM = 0.90
 
 
 @dataclass(frozen=True)
@@ -152,12 +163,13 @@ def _control_row(values: np.ndarray, *, key: str) -> np.ndarray:
     return _state_row(values, key=key)
 
 
-def select_last_certified_rho_cycle(
+def select_certified_rho_cycle(
     source: str | Path,
     *,
+    cycle_index: int,
     cycle_period: float | None = None,
 ) -> tuple[SelectedRhoCycle, str]:
-    """Load and structurally select the final metadata-declared RHO cycle.
+    """Load and structurally select one metadata-declared RHO cycle.
 
     The returned object may have ``certified=False`` so callers can still write
     a complete rejection audit.  Malformed or ambiguous array layouts raise.
@@ -207,7 +219,19 @@ def select_last_certified_rho_cycle(
     if collocation_points.shape != (degree,) or np.any(collocation_points <= 0.0):
         raise ValueError("Collocation abscissae are inconsistent with the declared degree.")
 
-    cycle_index = cycle_count - 1
+    if isinstance(cycle_index, bool):
+        raise ValueError("cycle_index must be an integer in the declared cycle range.")
+    try:
+        integer_cycle_index = int(cycle_index)
+    except (TypeError, ValueError) as error:
+        raise ValueError("cycle_index must be an integer in the declared cycle range.") from error
+    if integer_cycle_index != cycle_index:
+        raise ValueError("cycle_index must be an integer in the declared cycle range.")
+    cycle_index = integer_cycle_index
+    if cycle_index < 0 or cycle_index >= cycle_count:
+        raise ValueError(
+            f"cycle_index={cycle_index} is outside the declared range [0, {cycle_count - 1}]."
+        )
     first_interval = cycle_index * stimulations
     start_column = first_interval * (degree + 1)
     end_column = (first_interval + stimulations) * (degree + 1)
@@ -242,6 +266,30 @@ def select_last_certified_rho_cycle(
             controls=controls,
         ),
         period_basis,
+    )
+
+
+def select_last_certified_rho_cycle(
+    source: str | Path,
+    *,
+    cycle_period: float | None = None,
+) -> tuple[SelectedRhoCycle, str]:
+    """Load the final metadata-declared RHO cycle.
+
+    This compatibility wrapper retains the original public behavior.  Use
+    :func:`select_certified_rho_cycle` for retrospective anchor selection.
+    """
+
+    source = Path(source)
+    with np.load(source, allow_pickle=False) as archive:
+        if "metadata__json" not in archive.files:
+            raise ValueError("RHO archive has no metadata__json entry.")
+        metadata = json.loads(str(archive["metadata__json"].item()))
+    _, _, cycle_count = _certification(metadata)
+    return select_certified_rho_cycle(
+        source,
+        cycle_index=cycle_count - 1,
+        cycle_period=cycle_period,
     )
 
 
@@ -334,7 +382,12 @@ def fit_nonnegative_periodic_fourier_force_profile(
 
     samples = np.asarray(samples, dtype=float)
     if np.any(samples < 0.0):
-        raise ValueError("A non-negative Fourier force fit requires non-negative source samples; no clipping is used.")
+        raise ValueError(
+            "A non-negative Fourier force fit requires non-negative source samples; "
+            f"minimum={float(np.min(samples)):.17g} N, "
+            f"negative_sample_count={int(np.count_nonzero(samples < 0.0))}; "
+            "no clipping is used."
+        )
     root_profile = _fit_periodic_at_times(
         np.sqrt(samples),
         times,
@@ -432,17 +485,35 @@ def _lagrange_weights(nodes: np.ndarray, query: float) -> np.ndarray:
     return weights
 
 
-def _state_midpoints_from_collocation(
-    cycle: SelectedRhoCycle,
-    prefix: str,
-    muscle_names: Sequence[str],
-) -> np.ndarray:
-    """Interpolate a selected cycle's state at every interval midpoint.
+def _lagrange_derivative_weights(nodes: np.ndarray, query: float) -> np.ndarray:
+    """Return derivatives of the Lagrange basis at a normalized query time.
 
-    Each interval uses its shooting node and its declared degree-specific
-    collocation stages.  In particular, dense archive columns are not treated
-    as uniformly spaced samples.
+    The implementation uses the defining polynomial products directly.  This
+    is deliberately degree agnostic: the archive's declared Radau/Legendre
+    rule and degree determine ``nodes``, rather than a hard-coded coefficient
+    table that could silently disagree with the NLP transcription.
     """
+
+    nodes = np.asarray(nodes, dtype=float)
+    if nodes.ndim != 1 or nodes.size < 2 or not np.all(np.isfinite(nodes)):
+        raise ValueError("Collocation interpolation nodes must be a finite vector.")
+    if np.unique(nodes).size != nodes.size:
+        raise ValueError("Collocation interpolation nodes must be distinct.")
+    query = float(query)
+    weights = np.zeros(nodes.size)
+    for index, node in enumerate(nodes):
+        denominator = np.prod(node - np.delete(nodes, index))
+        numerator_derivative = 0.0
+        other_indices = [other for other in range(nodes.size) if other != index]
+        for omitted in other_indices:
+            factors = [query - nodes[other] for other in other_indices if other != omitted]
+            numerator_derivative += float(np.prod(factors))
+        weights[index] = numerator_derivative / denominator
+    return weights
+
+
+def _collocation_nodes(cycle: SelectedRhoCycle) -> np.ndarray:
+    """Return the shooting node followed by the archive-declared stages."""
 
     import casadi as ca
 
@@ -456,9 +527,29 @@ def _state_midpoints_from_collocation(
             f"Unsupported collocation rule {cycle.collocation_method!r} "
             f"of degree {cycle.collocation_degree}."
         ) from error
-    nodes = np.concatenate(([0.0], stages))
-    weights = _lagrange_weights(nodes, 0.5)
+    return np.concatenate(([0.0], stages))
+
+
+def _state_midpoints_and_derivatives_from_collocation(
+    cycle: SelectedRhoCycle,
+    prefix: str,
+    muscle_names: Sequence[str],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Evaluate one state and its time derivative from each local NLP polynomial.
+
+    Both quantities use the *same* degree-specific polynomial through the
+    interval shooting node and collocation stages.  The derivative is scaled
+    from normalized interval time to seconds.  This is the only reconstruction
+    suitable for checking whether the exported pulse width reproduces the
+    source collocation equation.
+    """
+
+    nodes = _collocation_nodes(cycle)
+    value_weights = _lagrange_weights(nodes, 0.5)
+    derivative_weights = _lagrange_derivative_weights(nodes, 0.5)
+    interval_duration = cycle.period / cycle.stimulations_per_cycle
     midpoints = np.empty((len(muscle_names), cycle.stimulations_per_cycle), dtype=float)
+    derivatives = np.empty_like(midpoints)
     for muscle_index, muscle_name in enumerate(muscle_names):
         key = f"{prefix}_{muscle_name}"
         if key not in cycle.states:
@@ -467,8 +558,54 @@ def _state_midpoints_from_collocation(
         for interval_index in range(cycle.stimulations_per_cycle):
             base = cycle.start_column + interval_index * cycle.state_columns_per_interval
             columns = base + np.arange(nodes.size)
-            midpoints[muscle_index, interval_index] = float(trace[columns] @ weights)
+            local_values = trace[columns]
+            midpoints[muscle_index, interval_index] = float(local_values @ value_weights)
+            derivatives[muscle_index, interval_index] = float(
+                local_values @ derivative_weights / interval_duration
+            )
+    return midpoints, derivatives
+
+
+def _state_midpoints_from_collocation(
+    cycle: SelectedRhoCycle,
+    prefix: str,
+    muscle_names: Sequence[str],
+) -> np.ndarray:
+    """Interpolate a selected cycle's state at every interval midpoint.
+
+    Each interval uses its shooting node and its declared degree-specific
+    collocation stages.  In particular, dense archive columns are not treated
+    as uniformly spaced samples.
+    """
+
+    midpoints, _ = _state_midpoints_and_derivatives_from_collocation(
+        cycle, prefix, muscle_names
+    )
     return midpoints
+
+
+def _scalar_state_midpoints_from_collocation(
+    cycle: SelectedRhoCycle,
+    state_name: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Scalar-state counterpart of the muscle-prefixed Radau evaluator."""
+
+    nodes = _collocation_nodes(cycle)
+    value_weights = _lagrange_weights(nodes, 0.5)
+    derivative_weights = _lagrange_derivative_weights(nodes, 0.5)
+    interval_duration = cycle.period / cycle.stimulations_per_cycle
+    if state_name not in cycle.states:
+        raise ValueError(f"RHO archive is missing state {state_name!r}.")
+    trace = cycle.states[state_name]
+    values = np.empty(cycle.stimulations_per_cycle)
+    derivatives = np.empty_like(values)
+    for interval_index in range(cycle.stimulations_per_cycle):
+        base = cycle.start_column + interval_index * cycle.state_columns_per_interval
+        columns = base + np.arange(nodes.size)
+        local_values = trace[columns]
+        values[interval_index] = float(local_values @ value_weights)
+        derivatives[interval_index] = float(local_values @ derivative_weights / interval_duration)
+    return values, derivatives
 
 
 def _default_model_path() -> Path:
@@ -546,6 +683,123 @@ def _rollout_parameters(
     return parameters, report
 
 
+def _raw_effective_recruitment(capacity: float, pulse_width: float, pd0: float, pdt: float) -> float:
+    """Evaluate the NLP formula without silently projecting a near-bound control.
+
+    This private evaluator is used only for transcription-residual audits.  A
+    control outside the declared bound tolerance is rejected separately; a
+    solver-scale violation inside that tolerance retains its signed effect so
+    the audit neither clips nor hides it.
+    """
+
+    return float(capacity) * (-math.expm1(-(float(pulse_width) - float(pd0)) / float(pdt)))
+
+
+def _raw_force_derivative(
+    *,
+    cn: float,
+    force: float,
+    capacity: float,
+    tau1: float,
+    km: float,
+    tau2: float,
+    pulse_width: float,
+    pd0: float,
+    pdt: float,
+    force_length: float,
+    force_velocity: float,
+    passive_force: float,
+) -> float:
+    activation = float(cn) / (float(km) + float(cn))
+    relaxation = float(tau1) + float(tau2) * activation
+    recruitment = _raw_effective_recruitment(capacity, pulse_width, pd0, pdt)
+    gain = float(force_length) * float(force_velocity) + float(passive_force)
+    return gain * (recruitment * activation - float(force) / relaxation)
+
+
+def _collocation_force_ode_audit(
+    cycle: SelectedRhoCycle,
+    *,
+    muscle_names: Sequence[str],
+    parameters: Sequence[DingRolloutMuscleParameters],
+    reduced: Any,
+    source_pulse_widths: np.ndarray,
+    tolerance_n_per_s: float,
+) -> dict[str, Any]:
+    """Check force defects at the Radau stages where the NLP enforces dynamics."""
+
+    nodes = _collocation_nodes(cycle)
+    interval_duration = cycle.period / cycle.stimulations_per_cycle
+    residuals = np.empty(
+        (len(muscle_names), cycle.stimulations_per_cycle, cycle.collocation_degree),
+        dtype=float,
+    )
+    for interval_index in range(cycle.stimulations_per_cycle):
+        base = cycle.start_column + interval_index * cycle.state_columns_per_interval
+        columns = base + np.arange(nodes.size)
+        theta_trace = cycle.states["theta"]
+        omega_trace = cycle.states["omega"]
+        for stage_offset, normalized_time in enumerate(nodes[1:], start=1):
+            derivative_weights = (
+                _lagrange_derivative_weights(nodes, float(normalized_time)) / interval_duration
+            )
+            stage_column = base + stage_offset
+            fl, fv, fp = reduced.muscle_relationships(
+                float(theta_trace[stage_column]), float(omega_trace[stage_column])
+            )
+            fl = np.asarray(fl, dtype=float)
+            fv = np.asarray(fv, dtype=float)
+            fp = np.asarray(fp, dtype=float)
+            if not bool(cycle.metadata.get("activate_force_length_relationship", True)):
+                fl.fill(1.0)
+            if not bool(cycle.metadata.get("activate_force_velocity_relationship", True)):
+                fv.fill(1.0)
+            if not bool(cycle.metadata.get("activate_passive_force_relationship", True)):
+                fp.fill(0.0)
+            for muscle_index, (muscle_name, parameter) in enumerate(
+                zip(muscle_names, parameters, strict=True)
+            ):
+                polynomial_derivative = float(
+                    cycle.states[f"F_{muscle_name}"][columns] @ derivative_weights
+                )
+                ode_derivative = _raw_force_derivative(
+                    cn=cycle.states[f"Cn_{muscle_name}"][stage_column],
+                    force=cycle.states[f"F_{muscle_name}"][stage_column],
+                    capacity=cycle.states[f"A_{muscle_name}"][stage_column],
+                    tau1=cycle.states[f"Tau1_{muscle_name}"][stage_column],
+                    km=cycle.states[f"Km_{muscle_name}"][stage_column],
+                    tau2=parameter.tau2,
+                    pulse_width=source_pulse_widths[muscle_index, interval_index],
+                    pd0=parameter.pd0,
+                    pdt=parameter.pdt,
+                    force_length=fl[muscle_index],
+                    force_velocity=fv[muscle_index],
+                    passive_force=fp[muscle_index],
+                )
+                residuals[muscle_index, interval_index, stage_offset - 1] = (
+                    polynomial_derivative - ode_derivative
+                )
+    per_muscle = {}
+    for muscle_index, muscle_name in enumerate(muscle_names):
+        values = residuals[muscle_index]
+        per_muscle[muscle_name] = {
+            "maximum_absolute_error_n_per_s": float(np.max(np.abs(values))),
+            "rmse_n_per_s": float(np.sqrt(np.mean(values**2))),
+        }
+    maximum = float(np.max(np.abs(residuals)))
+    return {
+        "evaluation_location": "every_archive_declared_collocation_stage",
+        "role": "exact_source_NLP_transcription_gate",
+        "sample_count": int(residuals.size),
+        "maximum_absolute_error_n_per_s": maximum,
+        "rmse_n_per_s": float(np.sqrt(np.mean(residuals**2))),
+        "tolerance_n_per_s": float(tolerance_n_per_s),
+        "passed": maximum <= tolerance_n_per_s,
+        "per_muscle": per_muscle,
+        "control_bound_projection_applied": False,
+    }
+
+
 def _finite_json_number(value: float) -> float | None:
     value = float(value)
     return value if math.isfinite(value) else None
@@ -554,21 +808,22 @@ def _finite_json_number(value: float) -> float | None:
 def adapter_completion_status(
     rejection_reasons: Sequence[dict[str, Any]],
     *,
-    reference_policy_reproducible: bool | None,
+    midpoint_approximation_acceptable: bool | None,
 ) -> str:
     """Classify adaptation independently of future endurance failures.
 
-    Input adaptation failures take precedence.  Once the input is accepted,
-    the selected source cycle must itself admit the bounded pulse-width inverse
-    under its own collocation-interpolated slow states.  Feasibility loss only
-    in later rollout cycles is deliberately not an adapter failure; it is the
-    endurance result being measured.
+    Input/transcription failures take precedence.  Once they are accepted, the
+    compact midpoint policy must meet its declared numerical approximation
+    tolerances.  Individual bounded-inverse failures at non-enforced midpoints
+    remain visible diagnostics but do not, by themselves, fail the adapter.
+    Feasibility loss only in later rollout cycles is deliberately not an
+    adapter failure; it is the endurance result being measured.
     """
 
     if rejection_reasons:
         return "rejected"
-    if reference_policy_reproducible is not True:
-        return "reference_policy_not_reproducible"
+    if midpoint_approximation_acceptable is not True:
+        return "midpoint_approximation_out_of_tolerance"
     return "complete"
 
 
@@ -578,11 +833,29 @@ def _error_summary(errors: np.ndarray) -> dict[str, Any]:
     return {
         "finite_sample_count": int(values.size),
         "maximum_absolute_error": None if values.size == 0 else float(np.max(np.abs(values))),
+        "p95_absolute_error": (
+            None if values.size == 0 else float(np.percentile(np.abs(values), 95.0))
+        ),
         "rmse": None if values.size == 0 else float(np.sqrt(np.mean(values**2))),
     }
 
 
-def _reference_policy_audit(
+def _error_summary_by_muscle(
+    errors: np.ndarray, muscle_names: Sequence[str]
+) -> dict[str, Any]:
+    errors = np.asarray(errors, dtype=float)
+    if errors.ndim != 2 or errors.shape[0] != len(muscle_names):
+        raise ValueError("errors must have shape (muscles, samples).")
+    return {
+        **_error_summary(errors),
+        "per_muscle": {
+            muscle_name: _error_summary(errors[muscle_index])
+            for muscle_index, muscle_name in enumerate(muscle_names)
+        },
+    }
+
+
+def _midpoint_policy_fidelity_audit(
     *,
     source_cycle_index: int,
     midpoint_times: np.ndarray,
@@ -597,8 +870,20 @@ def _reference_policy_audit(
     source_pulse_widths: np.ndarray,
     parameters: Sequence[DingRolloutMuscleParameters],
     pulse_width_tolerance_s: float,
+    midpoint_pulse_width_error_tolerance_s: float,
+    midpoint_force_ode_tolerance_n_per_s: float,
+    midpoint_inverse_coverage_minimum: float,
+    policy_source: str,
+    used_for_global_acceptance: bool,
 ) -> dict[str, Any]:
-    """Invert the adapted policy on the selected RHO cycle's own slow state."""
+    """Audit the source policy at non-enforced interval midpoints.
+
+    The raw exported-control ODE residual is defined for every midpoint.  The
+    inverse pulse-width error is defined only where the bounded inverse exists;
+    its finite coverage and every failure status are retained.  Approximation
+    acceptance uses the two declared numerical error tolerances, never a
+    requirement that all midpoint inversions be feasible.
+    """
 
     muscle_count = len(muscle_names)
     interval_count = midpoint_times.size
@@ -628,6 +913,8 @@ def _reference_policy_audit(
     utilization = np.full(expected_phase_shape, np.nan)
     derivative_error = np.full(expected_phase_shape, np.nan)
     pulse_width_error = np.full(expected_phase_shape, np.nan)
+    normalized_pulse_width_error = np.full(expected_phase_shape, np.nan)
+    exported_policy_derivative_error = np.full(expected_phase_shape, np.nan)
     first_failure: dict[str, Any] | None = None
 
     for interval_index in range(interval_count):
@@ -665,6 +952,27 @@ def _reference_policy_audit(
                     diagnostic.required_pulse_width
                     - source_pulse_widths[muscle_index, interval_index]
                 )
+                normalized_pulse_width_error[muscle_index, interval_index] = (
+                    pulse_width_error[muscle_index, interval_index]
+                    / (parameter.pulse_width_max - parameter.pd0)
+                )
+            exported_derivative = _raw_force_derivative(
+                cn=cn[muscle_index, interval_index],
+                force=force[muscle_index, interval_index],
+                capacity=capacity,
+                tau1=tau1,
+                km=km,
+                tau2=parameter.tau2,
+                pulse_width=source_pulse_widths[muscle_index, interval_index],
+                pd0=parameter.pd0,
+                pdt=parameter.pdt,
+                force_length=force_length[muscle_index, interval_index],
+                force_velocity=force_velocity[muscle_index, interval_index],
+                passive_force=passive_force[muscle_index, interval_index],
+            )
+            exported_policy_derivative_error[muscle_index, interval_index] = (
+                exported_derivative - force_derivative[muscle_index, interval_index]
+            )
             if first_failure is None and not diagnostic.feasible:
                 first_failure = {
                     "source_cycle_index": int(source_cycle_index),
@@ -680,6 +988,35 @@ def _reference_policy_audit(
                 }
 
     finite_utilization = utilization[np.isfinite(utilization)]
+    force_ode_summary = _error_summary_by_muscle(
+        exported_policy_derivative_error, muscle_names
+    )
+    pulse_width_summary = _error_summary_by_muscle(pulse_width_error, muscle_names)
+    normalized_pulse_width_summary = _error_summary_by_muscle(
+        normalized_pulse_width_error, muscle_names
+    )
+    force_ode_maximum = force_ode_summary["maximum_absolute_error"]
+    pulse_width_maximum = pulse_width_summary["maximum_absolute_error"]
+    force_ode_passed = (
+        force_ode_summary["finite_sample_count"] == muscle_count * interval_count
+        and force_ode_maximum is not None
+        and force_ode_maximum <= midpoint_force_ode_tolerance_n_per_s
+    )
+    inverse_coverage = pulse_width_summary["finite_sample_count"] / (
+        muscle_count * interval_count
+    )
+    inverse_coverage_passed = inverse_coverage >= midpoint_inverse_coverage_minimum
+    pulse_width_passed = (
+        inverse_coverage_passed
+        and pulse_width_maximum is not None
+        and pulse_width_maximum <= midpoint_pulse_width_error_tolerance_s
+    )
+    approximation_passed = force_ode_passed and pulse_width_passed
+    interval_duration = (
+        float(midpoint_times[1] - midpoint_times[0])
+        if interval_count > 1
+        else 2.0 * float(midpoint_times[0])
+    )
     slow_state_ranges = {}
     for state_index, state_name in enumerate(("A", "Tau1", "Km")):
         values = source_slow_states[:, :, state_index]
@@ -689,10 +1026,18 @@ def _reference_policy_audit(
         }
     return {
         "evaluated": True,
-        "reproducible": first_failure is None,
+        "passed": approximation_passed,
+        "policy_source": policy_source,
+        "acceptance_semantics": (
+            "force_ode_error_and_pulse_width_error_and_minimum_inverse_coverage; "
+            "not_all_midpoint_inversions_feasible"
+        ),
         "source_cycle_index": int(source_cycle_index),
         "sample_count": int(muscle_count * interval_count),
         "failure_count": int(sum(count for status, count in status_counts.items() if status != "ok")),
+        "feasible_inversion_count": int(status_counts.get("ok", 0)),
+        "all_midpoint_inversions_feasible": first_failure is None,
+        "bounded_midpoint_inversion_is_acceptance_gate": False,
         "status_counts": dict(sorted(status_counts.items())),
         "status_counts_by_muscle": {
             name: dict(sorted(counts.items())) for name, counts in per_muscle_counts.items()
@@ -702,10 +1047,70 @@ def _reference_policy_audit(
             None if finite_utilization.size == 0 else float(np.max(finite_utilization))
         ),
         "force_derivative_reconstruction_error_n_per_s": _error_summary(derivative_error),
-        "inferred_vs_exported_pulse_width_error_s": _error_summary(pulse_width_error),
+        "exported_policy_force_ode_residual_n_per_s": {
+            **force_ode_summary,
+            "evaluation_location": "interval_midpoints_not_enforced_by_Radau_NLP",
+            "interpretation": (
+                "difference_between_local_polynomial_derivative_and_Ding_vector_field; "
+                "the separately reported collocation-stage residual is the transcription gate"
+            ),
+            "control_bound_projection_applied": False,
+        },
+        "inferred_vs_exported_pulse_width_error_s": {
+            **pulse_width_summary,
+            "population": "finite_bounded_inverse_results_only",
+            "unavailable_sample_count": int(
+                muscle_count * interval_count - pulse_width_summary["finite_sample_count"]
+            ),
+        },
+        "inferred_vs_exported_pulse_width_error_normalized_by_available_range": {
+            **normalized_pulse_width_summary,
+            "normalization": "abs(error)/(pulse_width_max-pd0)_per_muscle",
+        },
+        "approximation_quality": {
+            "passed": approximation_passed,
+            "role": (
+                "adapted_rollout_policy_export_gate_not_NLP_transcription_gate"
+                if used_for_global_acceptance
+                else "source_local_midpoint_diagnostic_not_global_acceptance_gate"
+            ),
+            "used_for_global_acceptance": used_for_global_acceptance,
+            "midpoint_force_ode": {
+                "maximum_absolute_error_n_per_s": force_ode_maximum,
+                "tolerance_n_per_s": float(midpoint_force_ode_tolerance_n_per_s),
+                "passed": force_ode_passed,
+                "equivalent_one_interval_force_error_tolerance_n": float(
+                    midpoint_force_ode_tolerance_n_per_s * interval_duration
+                ),
+            },
+            "inferred_vs_exported_pulse_width": {
+                "maximum_absolute_error_s": pulse_width_maximum,
+                "tolerance_s": float(midpoint_pulse_width_error_tolerance_s),
+                "passed": pulse_width_passed,
+                "finite_sample_count": pulse_width_summary["finite_sample_count"],
+                "unavailable_sample_count": int(
+                    muscle_count * interval_count - pulse_width_summary["finite_sample_count"]
+                ),
+                "coverage_semantics": (
+                    "only_midpoints_with_a_finite_bounded_inverse; "
+                    "all_other_statuses_are_retained"
+                ),
+            },
+            "bounded_inverse_coverage": {
+                "fraction": float(inverse_coverage),
+                "minimum_fraction": float(midpoint_inverse_coverage_minimum),
+                "passed": inverse_coverage_passed,
+                "ambiguous_sample_count": int(
+                    muscle_count * interval_count - pulse_width_summary["finite_sample_count"]
+                ),
+                "interpretation": (
+                    "nonfinite_inverse_samples_are_an_explicit_ambiguity_zone_not_clipped_values"
+                ),
+            },
+        },
         "source_slow_state_ranges": slow_state_ranges,
         "slow_state_source": "degree-specific_piecewise_collocation_polynomial_at_shared_midpoints",
-        "force_derivative_source": "analytical_derivative_of_adapted_periodic_fourier_force_profile",
+        "force_derivative_source": policy_source,
     }
 
 
@@ -720,7 +1125,51 @@ def _location_payload(location, muscle_names: Sequence[str]) -> dict[str, Any] |
     }
 
 
-def _horizon_payload(result, horizon: int, muscle_names: Sequence[str], parameters) -> dict[str, Any]:
+def _cycle_utilization_payload(
+    utilization: np.ndarray,
+    muscle_names: Sequence[str],
+    *,
+    saturation_threshold: float = 0.95,
+) -> dict[str, Any]:
+    """Summarize one ``(phase, muscle)`` utilization matrix without clipping."""
+
+    values = np.asarray(utilization, dtype=float)
+    if values.ndim != 2 or values.shape[1] != len(muscle_names):
+        raise ValueError("Cycle utilization must have shape (intervals, muscles).")
+    finite = np.isfinite(values)
+    finite_values = values[finite]
+    location = None
+    maximum = None
+    if finite_values.size:
+        masked = np.where(finite, values, -math.inf)
+        interval_index, muscle_index = np.unravel_index(np.argmax(masked), values.shape)
+        maximum = float(masked[interval_index, muscle_index])
+        location = {
+            "interval_index": int(interval_index),
+            "muscle_index": int(muscle_index),
+            "muscle": muscle_names[muscle_index],
+        }
+    saturated = finite & (values >= saturation_threshold)
+    return {
+        "maximum_finite_utilization": maximum,
+        "critical_location": location,
+        "finite_sample_count": int(finite_values.size),
+        "saturation_threshold": float(saturation_threshold),
+        "saturated_sample_count": int(np.count_nonzero(saturated)),
+        "saturated_sample_fraction": (
+            None if finite_values.size == 0 else float(np.count_nonzero(saturated) / finite_values.size)
+        ),
+    }
+
+
+def _horizon_payload(
+    result,
+    horizon: int,
+    muscle_names: Sequence[str],
+    parameters,
+    *,
+    saturation_threshold: float = 0.95,
+) -> dict[str, Any]:
     final_states = result.cycle_boundary_states[-1]
     capacity_ratios = np.asarray(
         [final_states[index, 0] / parameter.fatigue.a_rest for index, parameter in enumerate(parameters)]
@@ -748,6 +1197,9 @@ def _horizon_payload(result, horizon: int, muscle_names: Sequence[str], paramete
             }
         ),
         "status_counts": dict(sorted(statuses.items())),
+        "last_cycle_recruitment": _cycle_utilization_payload(
+            result.utilization[-1], muscle_names, saturation_threshold=saturation_threshold
+        ),
         "final_slow_states": final_states.tolist(),
         "final_capacity_ratios": capacity_ratios.tolist(),
         "minimum_final_capacity_ratio": float(np.min(capacity_ratios)),
@@ -760,6 +1212,7 @@ def build_rho_endurance_rollout_report(
     reduced_profile: str | Path,
     *,
     horizons: Sequence[int] = DEFAULT_HORIZONS,
+    source_cycle_index: int | None = None,
     cycle_period: float | None = None,
     force_harmonics: int = DEFAULT_FORCE_HARMONICS,
     cn_harmonics: int | None = None,
@@ -772,6 +1225,11 @@ def build_rho_endurance_rollout_report(
     kinematic_consistency_tolerance: float = DEFAULT_KINEMATIC_CONSISTENCY_TOLERANCE,
     negative_force_tolerance: float = DEFAULT_NEGATIVE_FORCE_TOLERANCE,
     pulse_width_bound_tolerance_s: float = DEFAULT_PULSE_WIDTH_BOUND_TOLERANCE_S,
+    collocation_force_ode_tolerance_n_per_s: float = DEFAULT_COLLOCATION_FORCE_ODE_TOLERANCE_N_PER_S,
+    midpoint_pulse_width_error_tolerance_s: float = DEFAULT_MIDPOINT_PULSE_WIDTH_ERROR_TOLERANCE_S,
+    midpoint_force_ode_tolerance_n_per_s: float = DEFAULT_MIDPOINT_FORCE_ODE_TOLERANCE_N_PER_S,
+    midpoint_inverse_coverage_minimum: float = DEFAULT_MIDPOINT_INVERSE_COVERAGE_MINIMUM,
+    saturation_utilization_threshold: float = 0.95,
     model_path: str | Path | None = None,
     muscle_models: Sequence[Any] | None = None,
     reduced_dynamics: Any | None = None,
@@ -816,8 +1274,38 @@ def build_rho_endurance_rollout_report(
         "pulse_width_bound_tolerance_s": _positive_float(
             pulse_width_bound_tolerance_s, name="pulse_width_bound_tolerance_s"
         ),
+        "collocation_force_ode_n_per_s": _positive_float(
+            collocation_force_ode_tolerance_n_per_s,
+            name="collocation_force_ode_tolerance_n_per_s",
+        ),
+        "midpoint_pulse_width_error_s": _positive_float(
+            midpoint_pulse_width_error_tolerance_s,
+            name="midpoint_pulse_width_error_tolerance_s",
+        ),
+        "midpoint_force_ode_n_per_s": _positive_float(
+            midpoint_force_ode_tolerance_n_per_s,
+            name="midpoint_force_ode_tolerance_n_per_s",
+        ),
     }
-    cycle, period_basis = select_last_certified_rho_cycle(source, cycle_period=cycle_period)
+    midpoint_inverse_coverage_minimum = float(midpoint_inverse_coverage_minimum)
+    if not math.isfinite(midpoint_inverse_coverage_minimum) or not (
+        0.0 < midpoint_inverse_coverage_minimum <= 1.0
+    ):
+        raise ValueError("midpoint_inverse_coverage_minimum must be in (0, 1].")
+    thresholds["midpoint_inverse_coverage_minimum"] = midpoint_inverse_coverage_minimum
+    saturation_utilization_threshold = float(saturation_utilization_threshold)
+    if not math.isfinite(saturation_utilization_threshold) or not (
+        0.0 < saturation_utilization_threshold <= 1.0
+    ):
+        raise ValueError("saturation_utilization_threshold must be in (0, 1].")
+    if source_cycle_index is None:
+        cycle, period_basis = select_last_certified_rho_cycle(source, cycle_period=cycle_period)
+    else:
+        cycle, period_basis = select_certified_rho_cycle(
+            source,
+            cycle_index=source_cycle_index,
+            cycle_period=cycle_period,
+        )
     model_path = _default_model_path() if model_path is None else Path(model_path)
     reduced = ReducedCyclingDynamics.load(reduced_profile) if reduced_dynamics is None else reduced_dynamics
     if reduced_dynamics is None:
@@ -985,9 +1473,20 @@ def build_rho_endurance_rollout_report(
     midpoint_times = (np.arange(cycle.stimulations_per_cycle) + 0.5) * (
         cycle.period / cycle.stimulations_per_cycle
     )
+    # Future rollouts use the explicitly audited periodic profiles below.  The
+    # source-policy gate must instead interrogate exactly the local state
+    # polynomial used by the direct-collocation NLP.
     force_midpoints = force_profile.evaluate(midpoint_times)
     force_derivative_midpoints = force_profile.derivative(midpoint_times)
     cn_midpoints = cn_profile.evaluate(midpoint_times)
+    source_force_midpoints, source_force_derivative_midpoints = (
+        _state_midpoints_and_derivatives_from_collocation(cycle, "F", muscle_names)
+    )
+    source_cn_midpoints = _state_midpoints_from_collocation(cycle, "Cn", muscle_names)
+    source_theta_midpoints, source_theta_derivative_midpoints = (
+        _scalar_state_midpoints_from_collocation(cycle, "theta")
+    )
+    source_omega_midpoints, _ = _scalar_state_midpoints_from_collocation(cycle, "omega")
     theta_midpoints = (
         expected_shift * midpoint_times / cycle.period + theta_residual_profile.evaluate(midpoint_times)[0]
     )
@@ -1004,6 +1503,11 @@ def build_rho_endurance_rollout_report(
             maximum_absolute_error_rad_s=maximum_kinematic_error,
             tolerance_rad_s=thresholds["kinematic_consistency_rad_s"],
         )
+    source_theta_omega_error = source_theta_derivative_midpoints - source_omega_midpoints
+    source_maximum_kinematic_error = float(np.max(np.abs(source_theta_omega_error)))
+    source_midpoint_kinematic_diagnostic_passed = (
+        source_maximum_kinematic_error <= thresholds["kinematic_consistency_rad_s"]
+    )
 
     force_length = np.empty((len(muscle_names), cycle.stimulations_per_cycle))
     force_velocity = np.empty_like(force_length)
@@ -1024,6 +1528,22 @@ def build_rho_endurance_rollout_report(
         force_velocity.fill(1.0)
     if not bool(cycle.metadata.get("activate_passive_force_relationship", True)):
         passive_force.fill(0.0)
+    source_force_length = np.empty_like(force_length)
+    source_force_velocity = np.empty_like(force_velocity)
+    source_passive_force = np.empty_like(passive_force)
+    for index, (theta_value, omega_value) in enumerate(
+        zip(source_theta_midpoints, source_omega_midpoints, strict=True)
+    ):
+        fl, fv, fp = reduced.muscle_relationships(float(theta_value), float(omega_value))
+        source_force_length[:, index] = np.asarray(fl, dtype=float)
+        source_force_velocity[:, index] = np.asarray(fv, dtype=float)
+        source_passive_force[:, index] = np.asarray(fp, dtype=float)
+    if not bool(cycle.metadata.get("activate_force_length_relationship", True)):
+        source_force_length.fill(1.0)
+    if not bool(cycle.metadata.get("activate_force_velocity_relationship", True)):
+        source_force_velocity.fill(1.0)
+    if not bool(cycle.metadata.get("activate_passive_force_relationship", True)):
+        source_passive_force.fill(0.0)
     expected_midpoint_shape = (len(muscle_names), cycle.stimulations_per_cycle)
     for name, values in (
         ("force", force_midpoints),
@@ -1078,8 +1598,23 @@ def build_rho_endurance_rollout_report(
         last = first + cycle.stimulations_per_cycle
         values = cycle.controls[key][first:last]
         source_pulse_widths[index] = values
-        control_audit[name] = {"minimum_s": float(np.min(values)), "maximum_s": float(np.max(values))}
         pw_tolerance = thresholds["pulse_width_bound_tolerance_s"]
+        below_minimum = values < parameter.pd0
+        above_maximum = values > parameter.pulse_width_max
+        control_audit[name] = {
+            "minimum_s": float(np.min(values)),
+            "maximum_s": float(np.max(values)),
+            "nominal_below_pd0_count": int(np.count_nonzero(below_minimum)),
+            "nominal_above_maximum_count": int(np.count_nonzero(above_maximum)),
+            "maximum_lower_bound_violation_s": float(
+                max(0.0, parameter.pd0 - float(np.min(values)))
+            ),
+            "maximum_upper_bound_violation_s": float(
+                max(0.0, float(np.max(values)) - parameter.pulse_width_max)
+            ),
+            "bound_tolerance_s": pw_tolerance,
+            "bound_projection_applied": False,
+        }
         if np.min(values) < parameter.pd0 - pw_tolerance or np.max(values) > parameter.pulse_width_max + pw_tolerance:
             reject(
                 "pulse_width_control_out_of_domain",
@@ -1092,16 +1627,34 @@ def build_rho_endurance_rollout_report(
                 tolerance_s=pw_tolerance,
             )
 
-    reference_policy: dict[str, Any] = {
+    collocation_force_ode_audit = _collocation_force_ode_audit(
+        cycle,
+        muscle_names=muscle_names,
+        parameters=parameters,
+        reduced=reduced,
+        source_pulse_widths=source_pulse_widths,
+        tolerance_n_per_s=thresholds["collocation_force_ode_n_per_s"],
+    )
+    if not collocation_force_ode_audit["passed"]:
+        reject(
+            "source_collocation_force_ode_residual_too_large",
+            "The exported force polynomial does not reproduce the Ding ODE at its enforced collocation stages.",
+            maximum_absolute_error_n_per_s=collocation_force_ode_audit[
+                "maximum_absolute_error_n_per_s"
+            ],
+            tolerance_n_per_s=thresholds["collocation_force_ode_n_per_s"],
+        )
+
+    adapted_policy_fidelity: dict[str, Any] = {
         "evaluated": False,
-        "reproducible": None,
+        "passed": None,
         "reason": "input_adaptation_rejected",
     }
     report = {
         "schema": REPORT_SCHEMA,
         "status": adapter_completion_status(
             reasons,
-            reference_policy_reproducible=reference_policy["reproducible"],
+            midpoint_approximation_acceptable=adapted_policy_fidelity["passed"],
         ),
         "source": _file_stamp(source),
         "reduced_profile": _file_stamp(reduced_profile),
@@ -1125,6 +1678,7 @@ def build_rho_endurance_rollout_report(
             "cn_harmonics": cn_harmonics,
             "kinematic_harmonics": kinematic_harmonics,
             "thresholds": thresholds,
+            "saturation_utilization_threshold": saturation_utilization_threshold,
         },
         "muscle_names": list(muscle_names),
         "model_parameters": parameter_report,
@@ -1144,6 +1698,13 @@ def build_rho_endurance_rollout_report(
                 "maximum_absolute_error_rad_s": maximum_kinematic_error,
                 "rmse_rad_s": float(np.sqrt(np.mean(theta_omega_error**2))),
             },
+            "source_collocation_theta_dot_vs_omega_midpoints": {
+                "maximum_absolute_error_rad_s": source_maximum_kinematic_error,
+                "rmse_rad_s": float(np.sqrt(np.mean(source_theta_omega_error**2))),
+                "tolerance_rad_s": thresholds["kinematic_consistency_rad_s"],
+                "passed": source_midpoint_kinematic_diagnostic_passed,
+                "role": "diagnostic_at_non_enforced_midpoints_not_transcription_gate",
+            },
             "midpoint_alignment": {
                 "policy": "shared_equal_stimulation_interval_midpoints",
                 "times_s": midpoint_times.tolist(),
@@ -1154,6 +1715,10 @@ def build_rho_endurance_rollout_report(
                 "muscle_relationship_source": "ReducedCyclingDynamics.muscle_relationships(theta,omega)",
                 "source_slow_state_source": (
                     "degree-specific_piecewise_collocation_polynomial_at_shared_midpoints"
+                ),
+                "reference_policy_source": (
+                    "adapted_periodic_Fourier_F,F_dot,Cn_and_geometry; "
+                    "source_A,Tau1,Km_from_local_collocation_polynomials"
                 ),
                 "all_array_shapes": list(expected_midpoint_shape),
                 "source_slow_state_shape": list(source_slow_states.shape),
@@ -1166,15 +1731,52 @@ def build_rho_endurance_rollout_report(
                 for name, values in raw_gains.items()
             },
             "pulse_width_controls": control_audit,
+            "source_transcription": {
+                "passed": collocation_force_ode_audit["passed"],
+                "role": "exact_gate_at_NLP_enforced_Radau_stages",
+                "force_ode": collocation_force_ode_audit,
+            },
         },
-        "reference_policy": reference_policy,
+        "adapted_policy_fidelity": adapted_policy_fidelity,
+        "reference_policy": {
+            "deprecated_alias_of": "adapted_policy_fidelity",
+            "schema_note": "use adapted_policy_fidelity in schema v2",
+        },
         "rejection_reasons": reasons,
         "horizons": [],
     }
     if reasons:
         return report
 
-    reference_policy = _reference_policy_audit(
+    source_midpoint_interpolation = _midpoint_policy_fidelity_audit(
+        source_cycle_index=cycle.cycle_index,
+        midpoint_times=midpoint_times,
+        muscle_names=muscle_names,
+        force=source_force_midpoints,
+        force_derivative=source_force_derivative_midpoints,
+        cn=source_cn_midpoints,
+        source_slow_states=source_slow_states,
+        force_length=source_force_length,
+        force_velocity=source_force_velocity,
+        passive_force=source_passive_force,
+        source_pulse_widths=source_pulse_widths,
+        parameters=parameters,
+        pulse_width_tolerance_s=thresholds["pulse_width_bound_tolerance_s"],
+        midpoint_pulse_width_error_tolerance_s=thresholds[
+            "midpoint_pulse_width_error_s"
+        ],
+        midpoint_force_ode_tolerance_n_per_s=thresholds[
+            "midpoint_force_ode_n_per_s"
+        ],
+        midpoint_inverse_coverage_minimum=thresholds[
+            "midpoint_inverse_coverage_minimum"
+        ],
+        policy_source="degree-specific_local_collocation_polynomial_at_midpoints",
+        used_for_global_acceptance=False,
+    )
+    report["audits"]["source_midpoint_interpolation"] = source_midpoint_interpolation
+
+    adapted_policy_fidelity = _midpoint_policy_fidelity_audit(
         source_cycle_index=cycle.cycle_index,
         midpoint_times=midpoint_times,
         muscle_names=muscle_names,
@@ -1188,11 +1790,22 @@ def build_rho_endurance_rollout_report(
         source_pulse_widths=source_pulse_widths,
         parameters=parameters,
         pulse_width_tolerance_s=thresholds["pulse_width_bound_tolerance_s"],
+        midpoint_pulse_width_error_tolerance_s=thresholds[
+            "midpoint_pulse_width_error_s"
+        ],
+        midpoint_force_ode_tolerance_n_per_s=thresholds[
+            "midpoint_force_ode_n_per_s"
+        ],
+        midpoint_inverse_coverage_minimum=thresholds[
+            "midpoint_inverse_coverage_minimum"
+        ],
+        policy_source="periodic_Fourier_policy_used_by_endurance_rollout",
+        used_for_global_acceptance=True,
     )
-    report["reference_policy"] = reference_policy
+    report["adapted_policy_fidelity"] = adapted_policy_fidelity
     report["status"] = adapter_completion_status(
         reasons,
-        reference_policy_reproducible=reference_policy["reproducible"],
+        midpoint_approximation_acceptable=adapted_policy_fidelity["passed"],
     )
 
     recruitment_profile = PeriodicRecruitmentProfile(
@@ -1214,6 +1827,7 @@ def build_rho_endurance_rollout_report(
             horizon,
             muscle_names,
             parameters,
+            saturation_threshold=saturation_utilization_threshold,
         )
         for horizon in horizons
     ]
