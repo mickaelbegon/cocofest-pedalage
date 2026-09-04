@@ -90,6 +90,11 @@ print(default_worker_threads())
   if [[ "$flavour" == rho32 ]]; then
     export CASADI_CXX_ABI=0
     libdirs="$CONDA_PREFIX/lib"
+    # Keep an explicitly selected library for comparisons. Otherwise a
+    # licensed CoinHSL provisioned in this target environment is the default.
+    if [[ -z "${IPOPT_HSL_LIBRARY:-}" && -f "$CONDA_PREFIX/lib/libhsl.so" ]]; then
+      export IPOPT_HSL_LIBRARY="$CONDA_PREFIX/lib/libhsl.so"
+    fi
   else
     export CASADI_CXX_ABI=1
     export CASADI_VERSION=3.7.2

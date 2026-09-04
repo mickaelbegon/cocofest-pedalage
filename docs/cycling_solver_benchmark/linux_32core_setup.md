@@ -306,6 +306,68 @@ python -m pytest -q \
   tests/test_benchmark_readme.py
 ```
 
+### 7.4 Ajouter CoinHSL / MA57 (Ubuntu 26.04)
+
+MA57 est une bibliothèque sous licence séparée : l'utilisateur doit obtenir
+CoinHSL auprès de son détenteur de licence. Ne pas la télécharger depuis une
+source non vérifiée ni la versionner dans ce dépôt.
+
+Sur Ubuntu 26.04, construire CoinHSL avec le compilateur Fortran et les BLAS /
+LAPACK de l'environnement Conda cible est la solution recommandée. Installer
+une vieille `libhsl.so` précompilée peut échouer même si le fichier est présent :
+son `SONAME` peut réclamer, par exemple, `libgfortran.so.4`, alors que l'hôte et
+Conda ne fournissent que `.so.5`. **Ne jamais créer un lien symbolique de `.4`
+vers `.5`** : les ABI et les symboles versionnés ne sont pas interchangeables.
+
+Après avoir construit ou obtenu une bibliothèque autorisée, l'installer dans
+le seul environnement qui exécute IPOPT/ACADOS, puis vérifier ses dépendances :
+
+```bash
+source .github/scripts/benchmark_env.sh rho32
+install -m 0644 /chemin/licencie/libhsl.so "$CONDA_PREFIX/lib/libhsl.so"
+
+ldd -r "$CONDA_PREFIX/lib/libhsl.so"
+readelf -d "$CONDA_PREFIX/lib/libhsl.so" | grep NEEDED
+readelf --version-info "$CONDA_PREFIX/lib/libhsl.so" | grep GFORTRAN_ | sort -u
+```
+
+`ldd -r` ne doit signaler ni `not found` ni `undefined symbol`. Si une HSL
+historique impose un runtime Fortran absent, ne pas remplacer le runtime de
+l'environnement : reconstruire HSL est préférable. À titre transitoire et
+seulement si la licence et la provenance le permettent, ajouter le fichier
+versionné requis (par exemple `libgfortran.so.4.0.0` et son lien `.4`) à côté de
+la HSL, en préservant `libgfortran.so` et `.so.5` existants.
+
+Le script `benchmark_env.sh rho32` exporte automatiquement
+`IPOPT_HSL_LIBRARY=$CONDA_PREFIX/lib/libhsl.so` lorsqu'il existe; une variable
+déjà exportée reste prioritaire. Le pilote IDE détecte également ce même
+emplacement. Valider enfin MA57 par un solveur réel avant toute campagne :
+
+```bash
+python - <<'PY'
+import os
+import casadi as ca
+
+x = ca.MX.sym("x", 2)
+problem = {"x": x, "f": (x[0] - 1)**2 + (x[1] - 1)**2, "g": x[0] + x[1] - 2}
+solver = ca.nlpsol("ma57_probe", "ipopt", problem, {
+    "ipopt.linear_solver": "ma57", "ipopt.hsllib": os.environ["IPOPT_HSL_LIBRARY"],
+    "ipopt.print_level": 0, "print_time": 0,
+})
+result = solver(x0=[0, 0], lbg=0, ubg=0)
+assert solver.stats()["return_status"] == "Solve_Succeeded"
+assert max(abs(float(v) - 1) for v in result["x"].full().ravel()) < 1e-8
+print("IPOPT/MA57 probe passed")
+PY
+```
+
+Ensuite, le smoke test fonctionnel est :
+
+```bash
+python .github/scripts/run_benchmarks.py \
+  --formulation isokinetic --cases acados-irk --cycles 1 --no-summary
+```
+
 ## 8. Environnement MadNLP/MUMPS
 
 ### 8.1 Installer Julia 1.12.6

@@ -59,6 +59,7 @@ def test_isokinetic_cli_rejects_nonphysical_numeric_values(arguments):
 
 
 def test_isokinetic_environment_and_all_backend_commands_share_the_same_options(tmp_path):
+    (tmp_path / "libhsl.so").write_bytes(b"test HSL library")
     args = driver.parse_arguments(
         [
             "--formulation", "isokinetic",
@@ -130,6 +131,58 @@ def test_isokinetic_environment_and_all_backend_commands_share_the_same_options(
         "ipopt-reduced-isokinetic-torque-0.25-omega--5.5-load--0.8-to-0.9"
     )
     assert driver.case_result_dir_name(ipopt, driver.parse_arguments([])) == "ipopt-reduced"
+
+
+def test_hsl_library_is_validated_before_launching_benchmarks(tmp_path, capsys):
+    missing_library = tmp_path / "missing-libhsl.so"
+    with pytest.raises(SystemExit, match="2"):
+        driver.main([
+            "--formulation", "isokinetic", "--cases", "acados-irk",
+            "--ipopt-hsl-library", str(missing_library),
+        ])
+    error = capsys.readouterr().err
+    assert str(missing_library) in error
+    assert "--ipopt-hsl-library: file not found" in error
+    assert "ACADOS case also uses IPOPT/MA57" in error
+    assert "Traceback" not in error
+
+
+def test_isokinetic_uses_hsl_installed_in_the_target_rho_environment(tmp_path):
+    args = driver.parse_arguments(["--formulation", "isokinetic"])
+    ipopt = next(case for case in driver.CASES if case.key == "ipopt")
+    rho_prefix = tmp_path / "rho32"
+    installed_hsl = rho_prefix / "lib" / "libhsl.so"
+    installed_hsl.parent.mkdir(parents=True)
+    installed_hsl.write_bytes(b"test HSL library")
+
+    environment = driver.build_case_environment(ipopt, rho_prefix, args)
+
+    assert environment["IPOPT_HSL_LIBRARY"] == str(installed_hsl)
+
+
+def test_hsl_library_rejects_directories(tmp_path):
+    with pytest.raises(SystemExit, match="2"):
+        driver.parse_arguments(["--ipopt-hsl-library", str(tmp_path)])
+
+
+def test_hsl_library_relative_path_survives_acados_codegen_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    library = tmp_path / "libhsl.so"
+    library.write_bytes(b"test HSL library")
+    args = driver.parse_arguments(["--ipopt-hsl-library", "libhsl.so"])
+    acados = next(case for case in driver.CASES if case.key == "acados-irk")
+    args.output_root = str(tmp_path / "results")
+    command, cwd = driver.build_command(acados, tmp_path / "rho32", args)
+    assert cwd != tmp_path
+    assert command[command.index("--ipopt-hsl-library") + 1] == str(library)
+
+
+@pytest.mark.parametrize("mode", ["--list", "--report-only"])
+def test_read_only_modes_do_not_require_hsl_library(tmp_path, mode):
+    args = driver.parse_arguments([
+        mode, "--ipopt-hsl-library", str(tmp_path / "missing.so"),
+    ])
+    assert args.ipopt_hsl_library == tmp_path / "missing.so"
 
 
 def test_shell_runner_reads_isokinetic_options_from_environment_and_suffixes_results(tmp_path):

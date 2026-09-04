@@ -404,12 +404,18 @@ def build_case_environment(case: Case, prefix: Path, args: argparse.Namespace) -
     env["BENCHMARK_LOAD_TORQUE_MAX"] = str(args.load_torque_max)
     if args.formulation == "isokinetic":
         # The isokinetic reference is IPOPT/MA57.  A deployment may have MA57
-        # linked directly into IPOPT; otherwise IPOPT_HSL_LIBRARY supplies the
-        # CoinHSL shared object through the shell runner.
+        # linked directly into IPOPT; otherwise use an explicitly supplied
+        # CoinHSL library.  The supported rho32 provisioning also installs it
+        # in the environment's lib directory, which makes IDE launches work
+        # without requiring its activation hook to have run first.
         env["IPOPT_LINEAR_SOLVER"] = "ma57"
         env["WARMUP_IPOPT_LINEAR_SOLVER"] = "ma57"
-        if args.ipopt_hsl_library is not None:
-            env["IPOPT_HSL_LIBRARY"] = str(args.ipopt_hsl_library)
+        installed_hsl_library = prefix / "lib" / "libhsl.so"
+        hsl_library = args.ipopt_hsl_library
+        if hsl_library is None and installed_hsl_library.is_file():
+            hsl_library = installed_hsl_library
+        if hsl_library is not None:
+            env["IPOPT_HSL_LIBRARY"] = str(hsl_library)
     return env
 
 
@@ -806,6 +812,22 @@ def parse_arguments(argv: list[str] | None) -> argparse.Namespace:
                         help="build benchmark-seed/ and stop, running no solver case")
     parser.add_argument("--list", action="store_true", help="list the cases and exit")
     args = parser.parse_args(argv)
+    if args.ipopt_hsl_library is not None and not (args.list or args.report_only):
+        # Solver subprocesses run from different directories (notably ACADOS
+        # codegen), so resolve relative paths in the caller's directory.
+        args.ipopt_hsl_library = args.ipopt_hsl_library.expanduser().resolve()
+        if not args.ipopt_hsl_library.is_file():
+            parser.error(
+                f"--ipopt-hsl-library: file not found: {args.ipopt_hsl_library}. "
+                "Supply the actual CoinHSL shared library path, or omit this "
+                "option if MA57 is already available to IPOPT. The isokinetic "
+                "ACADOS case also uses IPOPT/MA57 for its refinement."
+            )
+        try:
+            with args.ipopt_hsl_library.open("rb"):
+                pass
+        except OSError as exc:
+            parser.error(f"--ipopt-hsl-library: cannot read {args.ipopt_hsl_library}: {exc}")
     if not args.load_torque_min < 0.0 < args.load_torque_max:
         parser.error(
             "--load-torque-min/--load-torque-max must allow assistance and "
