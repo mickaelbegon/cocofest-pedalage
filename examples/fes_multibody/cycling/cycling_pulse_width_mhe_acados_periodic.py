@@ -16031,10 +16031,12 @@ def run_periodic_ipopt_refinement(
     cache_path: Path | None = None,
     provisional_feasibility_tolerance: float = 1e-4,
     echo: bool = False,
+    hsl_library: str | Path | None = None,
 ):
     solver = configure_ipopt_solver(
         max_iterations=max_iterations,
         linear_solver=linear_solver,
+        hsl_library=hsl_library,
     )
     try:
         refinement_sol = super(RecedingHorizonOptimization, refinement_nmpc).solve(
@@ -19804,6 +19806,7 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                 linear_solver=_warmup_ipopt_linear_solver(args),
                 cache_path=refinement_cache_path,
                 echo=echo,
+                hsl_library=getattr(args, "ipopt_hsl_library", None),
             )
             if refinement_candidate is not None and getattr(
                 refinement_candidate,
@@ -21214,6 +21217,7 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                     linear_solver=_warmup_ipopt_linear_solver(args),
                     cache_path=window_refinement_cache_path,
                     echo=echo,
+                    hsl_library=getattr(args, "ipopt_hsl_library", None),
                 )
                 refinement_success = bool(
                     refinement_solution is not None

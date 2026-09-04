@@ -36,6 +36,11 @@ import numpy as np
 from bioptim import SolutionMerge
 
 from cocofest.optimization.muscle_reserve import DEFAULT_SMOOTH_MIN_TEMPERATURE
+from cocofest.optimization.solver_backends import (
+    effective_ipopt_options,
+    file_provenance,
+    ipopt_hsl_diagnostics,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
@@ -48,6 +53,7 @@ try:
         NLP_SOLVER_NAMES,
         build_argument_parser,
         default_worker_threads,
+        _ipopt_advanced_options,
         parse_control_homotopy_radii,
         parse_crank_assistance,
         parse_proximal_control_weights,
@@ -64,6 +70,7 @@ except ImportError:
         NLP_SOLVER_NAMES,
         build_argument_parser,
         default_worker_threads,
+        _ipopt_advanced_options,
         parse_control_homotopy_radii,
         parse_crank_assistance,
         parse_proximal_control_weights,
@@ -3006,6 +3013,70 @@ def _prefix_fatigue_checkpoints(result: dict, validated_cycles: int) -> dict:
     return checkpoints
 
 
+def _ipopt_kkt_diagnostics(result: dict) -> dict:
+    """Expose the compact IPOPT residual history already returned by CasADi."""
+
+    windows = []
+    for stats in result.get("nlp_solver_stats") or []:
+        iterations = stats.get("iteration_diagnostics") or {}
+        row = {
+            "window": stats.get("window"),
+            "primal_infeasibility": (iterations.get("inf_pr") or {}).get("final"),
+            "dual_infeasibility": (iterations.get("inf_du") or {}).get("final"),
+            "barrier_parameter": (iterations.get("mu") or {}).get("final"),
+        }
+        if any(value is not None for key, value in row.items() if key != "window"):
+            windows.append(row)
+    return {
+        "available": bool(windows),
+        "source": "casadi_ipopt_iteration_statistics",
+        "windows": windows,
+        "note": (
+            "inf_pr and inf_du are IPOPT's reported primal and dual residuals; "
+            "mu is the barrier parameter, not an independently recomputed "
+            "complementarity residual."
+        ),
+    }
+
+
+def _ipopt_runtime_provenance(args: argparse.Namespace, result: dict) -> dict | None:
+    """Return the effective IPOPT/MA57 contract associated with one result."""
+
+    if getattr(args, "solver", None) != "ipopt":
+        return None
+    environment_hsl_library = os.environ.get("IPOPT_HSL_LIBRARY")
+    hsl_library = (
+        getattr(args, "ipopt_hsl_library", None) or environment_hsl_library
+    )
+    diagnostic_hsl_argument = hsl_library
+    if (
+        hsl_library is not None
+        and environment_hsl_library is not None
+        and os.fspath(hsl_library) == environment_hsl_library
+    ):
+        diagnostic_hsl_argument = None
+    return {
+        # These values are the exact contract submitted through Bioptim's
+        # setters. IPOPT does not expose a portable post-construction option
+        # query, so do not overstate them as independently confirmed values.
+        "submitted_options": effective_ipopt_options(
+            max_iterations=getattr(args, "max_ipopt_iterations", 1000),
+            tolerance=getattr(args, "nlp_tolerance", 1e-6),
+            print_level=getattr(args, "ipopt_print_level", 0),
+            linear_solver=getattr(args, "ipopt_linear_solver", "ma57"),
+            hsl_library=hsl_library,
+            advanced_options=_ipopt_advanced_options(args),
+        ),
+        "c_compile": bool(getattr(args, "ipopt_c_compile", False)),
+        "hsl": ipopt_hsl_diagnostics(
+            getattr(args, "ipopt_linear_solver", "ma57"),
+            diagnostic_hsl_argument,
+            probe_loadability=True,
+        ),
+        "kkt_diagnostics": _ipopt_kkt_diagnostics(result),
+    }
+
+
 def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
     """Build JSON-safe fatigue and timing outcomes for every selected backend."""
 
@@ -3236,6 +3307,14 @@ def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
         rows.append(
             {
                 "solver": solver_name,
+                "input_provenance": {
+                    "common_initial_solution": file_provenance(
+                        getattr(result.get("args"), "common_initial_solution", None)
+                    )
+                },
+                "ipopt_runtime": _ipopt_runtime_provenance(
+                    result.get("args"), result
+                ),
                 "mode": result.get("mode"),
                 "success": bool(result.get("success")),
                 "solver_success": bool(result.get("solver_success")),

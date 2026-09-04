@@ -6449,6 +6449,33 @@ def test_standard_warmup_forwards_the_configured_hsl_library():
     assert 'hsl_library=getattr(args, "ipopt_hsl_library", None)' in source
 
 
+@pytest.mark.parametrize("library", [None, Path("/opt/coinhsl/libhsl.so")])
+def test_periodic_refinement_forwards_hsl_library_to_solver(monkeypatch, library):
+    class ConfigurationCaptured(Exception):
+        pass
+
+    captured = {}
+
+    def capture_configuration(**kwargs):
+        captured.update(kwargs)
+        raise ConfigurationCaptured
+
+    monkeypatch.setattr(periodic_example, "configure_ipopt_solver", capture_configuration)
+    with pytest.raises(ConfigurationCaptured):
+        periodic_example.run_periodic_ipopt_refinement(
+            refinement_nmpc=None,
+            target_nmpc=None,
+            max_iterations=12,
+            linear_solver="ma57",
+            hsl_library=library,
+        )
+    assert captured == {
+        "max_iterations": 12,
+        "linear_solver": "ma57",
+        "hsl_library": library,
+    }
+
+
 def test_warmup_cache_signature_ignores_reduced_runtime_dynamics(tmp_path):
     model_path = tmp_path / "model.bioMod"
     model_path.write_text("version 4\n")
@@ -6858,6 +6885,53 @@ def test_nlp_solver_stats_snapshot_keeps_timing_and_compact_iteration_diagnostic
     assert "unrelated" not in snapshot
 
 
+def test_ipopt_runtime_provenance_exposes_submitted_options_and_kkt_residuals(
+    tmp_path,
+):
+    hsl = tmp_path / "libcoinhsl.so"
+    hsl.write_bytes(b"not loaded by this reporting unit test")
+    args = SimpleNamespace(
+        solver="ipopt",
+        max_ipopt_iterations=2000,
+        nlp_tolerance=1e-8,
+        ipopt_print_level=0,
+        ipopt_linear_solver="ma57",
+        ipopt_hsl_library=hsl,
+        ipopt_c_compile=True,
+        ipopt_print_timing_statistics=True,
+    )
+    result = {
+        "nlp_solver_stats": [
+            {
+                "window": 4,
+                "iteration_diagnostics": {
+                    "inf_pr": {"final": 1e-9},
+                    "inf_du": {"final": 2e-9},
+                    "mu": {"final": 1e-11},
+                },
+            }
+        ]
+    }
+
+    provenance = comparison_example._ipopt_runtime_provenance(args, result)
+
+    assert provenance["submitted_options"]["linear_solver"] == "ma57"
+    assert provenance["submitted_options"]["max_iter"] == 2000
+    assert provenance["submitted_options"]["print_timing_statistics"] == "yes"
+    assert provenance["submitted_options"]["hsllib"] == str(hsl)
+    assert provenance["kkt_diagnostics"]["windows"] == [
+        {
+            "window": 4,
+            "primal_infeasibility": 1e-9,
+            "dual_infeasibility": 2e-9,
+            "barrier_parameter": 1e-11,
+        }
+    ]
+    assert "not an independently recomputed" in provenance["kkt_diagnostics"][
+        "note"
+    ]
+
+
 def test_standard_warmup_seed_resolves_repository_relative_path(tmp_path, monkeypatch):
     repository_root = tmp_path / "repository"
     example_root = repository_root / "examples" / "fes_multibody" / "cycling"
@@ -6923,6 +6997,8 @@ def test_fatigue_only_objective_disables_terminal_wheel_regularization(
 
 def test_benchmark_json_summary_contains_comparable_fatigue_metrics(tmp_path):
     result = _benchmark_result([0, 0], solver_success=True, success=True)
+    common_seed = tmp_path / "common-seed.npz"
+    common_seed.write_bytes(b"common seed bytes")
     result.update(
         physical_success=True,
         status=0,
@@ -6979,6 +7055,7 @@ def test_benchmark_json_summary_contains_comparable_fatigue_metrics(tmp_path):
     result["args"].activate_passive_force_relationship = True
     result["args"].enforce_start_constraints = True
     result["args"].validate_integrator_maps = True
+    result["args"].common_initial_solution = common_seed
     result["args"].acados_transfer_phase_one_mode = "mechanical"
     result["args"].acados_transfer_phase_one_screen_threshold = 1e-2
     result["integrator_map_initial_guess"] = [
@@ -7070,6 +7147,14 @@ def test_benchmark_json_summary_contains_comparable_fatigue_metrics(tmp_path):
         "completed_windows": 98,
     }
     row = payload["results"][0]
+    assert row["input_provenance"]["common_initial_solution"] == {
+        "requested_path": str(common_seed),
+        "resolved_path": str(common_seed.resolve()),
+        "exists": True,
+        "is_file": True,
+        "sha256": "8ec17acfd0833cad2fbd2effca9c06d7d458747d43204a973aa25ae7ed9edf58",
+        "size_bytes": 17,
+    }
     assert row["solver"] == "madnlp"
     assert row["success"] is True
     assert row["validated_cycles"] == 3

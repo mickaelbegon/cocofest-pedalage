@@ -7,6 +7,11 @@ continue to work with a standard Bioptim/CasADi installation.
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
+import hashlib
+import os
+from pathlib import Path
 from typing import Any
 
 NLP_SOLVER_NAMES = ("ipopt", "fatrop", "madnlp", "alpaqa")
@@ -37,6 +42,145 @@ MADNLP_QUIET_PRINT_LEVEL = 6
 
 class SolverBackendUnavailable(RuntimeError):
     """Raised when an optional Bioptim solver or CasADi plugin is unavailable."""
+
+
+_IPOPT_HSL_LINEAR_SOLVERS = frozenset({"ma27", "ma57", "ma77", "ma86", "ma97"})
+_MA57_SYMBOL_NAMES = ("ma57id_", "ma57id", "MA57ID")
+
+
+def file_provenance(path: str | os.PathLike[str] | None) -> dict[str, Any] | None:
+    """Return stable, JSON-safe provenance for an input file.
+
+    Missing inputs are described instead of raising so failed benchmark setup
+    still leaves actionable evidence in ``result.json``.
+    """
+
+    if path is None:
+        return None
+    requested = os.fspath(path)
+    resolved = Path(path).expanduser().resolve()
+    provenance: dict[str, Any] = {
+        "requested_path": requested,
+        "resolved_path": str(resolved),
+        "exists": resolved.exists(),
+        "is_file": resolved.is_file(),
+        "sha256": None,
+        "size_bytes": None,
+    }
+    if not resolved.is_file():
+        return provenance
+    digest = hashlib.sha256()
+    try:
+        with resolved.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        provenance["sha256"] = digest.hexdigest()
+        provenance["size_bytes"] = resolved.stat().st_size
+    except OSError as error:
+        provenance["read_error"] = f"{type(error).__name__}: {error}"
+    return provenance
+
+
+def ipopt_hsl_diagnostics(
+    linear_solver: str,
+    hsl_library: str | os.PathLike[str] | None = None,
+    *,
+    probe_loadability: bool = False,
+) -> dict[str, Any]:
+    """Describe how an IPOPT HSL dependency is supplied and whether it loads.
+
+    A concrete path is never guessed from a workstation layout. Callers may
+    provide one directly or through ``IPOPT_HSL_LIBRARY``. When neither is
+    set, the platform dynamic-loader lookup is reported as evidence, but IPOPT
+    remains free to use an HSL implementation linked into its own binary.
+    """
+
+    linear_solver = str(linear_solver).lower()
+    explicit_library = hsl_library is not None
+    if hsl_library is None:
+        hsl_library = os.environ.get("IPOPT_HSL_LIBRARY")
+    source = "argument" if explicit_library else (
+        "IPOPT_HSL_LIBRARY" if hsl_library is not None else None
+    )
+    discovered = None
+    if hsl_library is None:
+        for library_name in ("coinhsl", "hsl"):
+            discovered = ctypes.util.find_library(library_name)
+            if discovered:
+                source = f"dynamic_loader_lookup:{library_name}"
+                break
+
+    requested = None if hsl_library is None else os.fspath(hsl_library)
+    load_target = requested or discovered
+    concrete_path = None
+    if requested is not None:
+        candidate = Path(requested).expanduser()
+        if candidate.is_absolute() or os.sep in requested or candidate.exists():
+            concrete_path = candidate.resolve()
+
+    diagnostics: dict[str, Any] = {
+        "linear_solver": linear_solver,
+        "hsl_required": linear_solver in _IPOPT_HSL_LINEAR_SOLVERS,
+        "library_source": source,
+        "requested_library": requested,
+        "dynamic_loader_candidate": discovered,
+        "load_target": load_target,
+        "file": file_provenance(concrete_path),
+        "load_probe_attempted": False,
+        "loadable": None,
+        "ma57_symbol_detected": None,
+        "load_error": None,
+        "abi_note": (
+            "A successful dlopen/symbol probe checks immediate loader dependencies "
+            "only; IPOPT, integer-width, BLAS and Fortran-runtime ABI compatibility "
+            "is established only by an actual MA57 solve."
+        ),
+    }
+    if not probe_loadability or load_target is None:
+        return diagnostics
+
+    diagnostics["load_probe_attempted"] = True
+    try:
+        library = ctypes.CDLL(os.fspath(load_target))
+    except OSError as error:
+        diagnostics["loadable"] = False
+        diagnostics["ma57_symbol_detected"] = False
+        diagnostics["load_error"] = f"{type(error).__name__}: {error}"
+        return diagnostics
+    diagnostics["loadable"] = True
+    diagnostics["ma57_symbol_detected"] = any(
+        hasattr(library, symbol) for symbol in _MA57_SYMBOL_NAMES
+    )
+    return diagnostics
+
+
+def effective_ipopt_options(
+    *,
+    max_iterations: int,
+    tolerance: float,
+    print_level: int,
+    linear_solver: str,
+    hsl_library: str | os.PathLike[str] | None,
+    advanced_options: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return the final IPOPT option values submitted by Cocofest."""
+
+    options: dict[str, Any] = {
+        "max_iter": int(max_iterations),
+        "warm_start_init_point": "yes",
+        "mu_init": 1e-2,
+        "tol": float(tolerance),
+        "dual_inf_tol": float(tolerance),
+        "constr_viol_tol": float(tolerance),
+        "linear_solver": str(linear_solver),
+        "print_level": int(print_level),
+    }
+    if hsl_library is not None:
+        options["hsllib"] = os.fspath(hsl_library)
+    # Unsafe options are applied last by configure_nlp_solver and therefore
+    # intentionally win if an advanced caller overrides a common setting.
+    options.update(advanced_options or {})
+    return options
 
 
 def nlp_solver_availability(
@@ -175,6 +319,38 @@ def configure_nlp_solver(
         )
 
     if solver_name == "ipopt":
+        configured_hsl_library = ipopt_hsl_library
+        if configured_hsl_library is None:
+            configured_hsl_library = os.environ.get("IPOPT_HSL_LIBRARY")
+        hsl_diagnostics = ipopt_hsl_diagnostics(
+            ipopt_linear_solver,
+            ipopt_hsl_library,
+            probe_loadability=(
+                bool(check_availability)
+                and str(ipopt_linear_solver).lower() in _IPOPT_HSL_LINEAR_SOLVERS
+            ),
+        )
+        hsl_file = hsl_diagnostics.get("file") or {}
+        if (
+            check_availability
+            and hsl_diagnostics["hsl_required"]
+            and configured_hsl_library is not None
+            and not hsl_file.get("exists", True)
+        ):
+            raise SolverBackendUnavailable(
+                "The configured IPOPT HSL library does not exist: "
+                f"{hsl_file.get('resolved_path')}. Set IPOPT_HSL_LIBRARY to the "
+                "CoinHSL shared library built for this environment."
+            )
+        if (
+            hsl_diagnostics["hsl_required"]
+            and hsl_diagnostics.get("loadable") is False
+        ):
+            raise SolverBackendUnavailable(
+                "The configured IPOPT HSL library could not be loaded before "
+                f"constructing the NLP: {hsl_diagnostics['load_error']}. Rebuild "
+                "CoinHSL against this environment's Fortran/BLAS runtime."
+            )
         solver = factory(
             show_online_optim=False,
             _max_iter=max_iterations,
@@ -187,14 +363,18 @@ def configure_nlp_solver(
         solver.set_constr_viol_tol(tolerance)
         solver.set_linear_solver(ipopt_linear_solver)
         solver.set_print_level(print_level)
-        if ipopt_hsl_library is not None:
+        if configured_hsl_library is not None:
             # The comparison front-end resolves invocation paths to ``Path``
             # objects. CasADi accepts only scalar option values, so pass the
             # HSL shared-library location as a string.
-            solver.set_option_unsafe(str(ipopt_hsl_library), "hsllib")
+            solver.set_option_unsafe(str(configured_hsl_library), "hsllib")
         for name, value in (ipopt_options or {}).items():
             solver.set_option_unsafe(value, name)
         solver.set_c_compile(ipopt_c_compile)
+        # Do not attach diagnostic attributes to Bioptim's solver wrapper.
+        # Its attribute forwarding treats unknown attributes as IPOPT options,
+        # so Python-only diagnostic names are later submitted to CasADi and
+        # make IPOPT fail during setup.
         return solver
 
     if solver_name == "fatrop":

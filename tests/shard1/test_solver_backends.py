@@ -7,6 +7,9 @@ from cocofest.optimization.solver_backends import (
     MADNLP_QUIET_PRINT_LEVEL,
     SolverBackendUnavailable,
     configure_nlp_solver,
+    effective_ipopt_options,
+    file_provenance,
+    ipopt_hsl_diagnostics,
     nlp_solver_availability,
 )
 
@@ -257,6 +260,70 @@ def test_configure_ipopt_serializes_an_hsl_path_for_casadi():
         "/opt/coinhsl/libhsl.so",
         "hsllib",
     ) in solver.calls
+
+
+def test_file_provenance_records_resolved_path_size_and_sha256(tmp_path):
+    seed = tmp_path / "common-seed.npz"
+    seed.write_bytes(b"shared deterministic seed")
+
+    provenance = file_provenance(seed)
+
+    assert provenance == {
+        "requested_path": str(seed),
+        "resolved_path": str(seed.resolve()),
+        "exists": True,
+        "is_file": True,
+        "sha256": "a0a48e306bc09bc7c29df91c7c8fd97fe06a06b1ac520a57bcba84e9d209e6d8",
+        "size_bytes": 25,
+    }
+
+
+def test_hsl_diagnostics_report_missing_explicit_library(tmp_path):
+    missing = tmp_path / "libcoinhsl.so"
+
+    diagnostics = ipopt_hsl_diagnostics(
+        "ma57", missing, probe_loadability=True
+    )
+
+    assert diagnostics["hsl_required"] is True
+    assert diagnostics["library_source"] == "argument"
+    assert diagnostics["file"]["resolved_path"] == str(missing)
+    assert diagnostics["file"]["exists"] is False
+    assert diagnostics["load_probe_attempted"] is True
+    assert diagnostics["loadable"] is False
+    assert "No such file" in diagnostics["load_error"]
+    assert "actual MA57 solve" in diagnostics["abi_note"]
+
+
+def test_configure_ipopt_uses_environment_hsl_and_keeps_effective_options(
+    tmp_path, monkeypatch
+):
+    library = tmp_path / "libcoinhsl.so"
+    library.touch()
+    monkeypatch.setenv("IPOPT_HSL_LIBRARY", str(library))
+
+    solver = configure_nlp_solver(
+        "ipopt",
+        max_iterations=17,
+        tolerance=2e-7,
+        print_level=3,
+        ipopt_linear_solver="ma57",
+        ipopt_options={"ma57_pivtol": 1e-8},
+        solver_namespace=_solver_namespace("IPOPT"),
+        check_availability=False,
+    )
+
+    assert ("set_option_unsafe", str(library), "hsllib") in solver.calls
+    diagnostics = ipopt_hsl_diagnostics("ma57")
+    assert diagnostics["library_source"] == "IPOPT_HSL_LIBRARY"
+    assert effective_ipopt_options(
+        max_iterations=17,
+        tolerance=2e-7,
+        print_level=3,
+        linear_solver="ma57",
+        hsl_library=str(library),
+        advanced_options={"ma57_pivtol": 1e-8},
+    )["ma57_pivtol"] == 1e-8
 
 
 @pytest.mark.parametrize(
