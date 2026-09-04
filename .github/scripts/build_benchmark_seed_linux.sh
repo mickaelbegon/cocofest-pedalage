@@ -44,6 +44,14 @@ command -v jq >/dev/null || { echo "jq is required." >&2; exit 1; }
 
 mkdir -p benchmark-seed-result benchmark-seed
 
+# A common seed is deliberately write-once inside the solver: this prevents a
+# later failed window from replacing a certified initial solution.  This build
+# script, however, is an explicit regeneration entry point.  Remove only its
+# own previous common-seed outputs so a schema or model update cannot silently
+# leave an obsolete artefact in place.
+rm -f benchmark-seed-result/common-reduced.npz \
+  benchmark-seed-result/common-full.npz
+
 prepare_seed() {
   local mechanics="$1"
   local mechanics_options=()
@@ -52,6 +60,7 @@ prepare_seed() {
   else
     mechanics_options+=(
       --common-initial-solution "$workspace/benchmark-seed-result/common-reduced.npz"
+      --adopt-common-initial-solution-warmup-cycles
     )
   fi
 

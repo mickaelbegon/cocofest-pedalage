@@ -943,6 +943,7 @@ def _rho_command(
             "--common-initial-solution",
             str(common_initial_solution),
             "--common-initial-solution-recenter-first-node-bounds",
+            "--adopt-common-initial-solution-warmup-cycles",
             "--receding-horizon-solution-output",
             str(seed_path),
             "--allow-partial-receding-horizon-solution-output",
@@ -979,10 +980,12 @@ def _full_horizon_command(
         "--ipopt-max-iter",
         str(args.max_iterations),
     ]
-    if cycles >= 3:
-        # The historical bridge has 60 controls and can initialize at most two
-        # 30-stimulation cycles. Larger horizons consume the certified RHO
-        # chronology directly instead of loading an incompatible warmup.
+    if cycles >= 2:
+        # Every full-horizon attempt consumes a prefix from the certified RHO
+        # reference. That prefix has already consumed the one-cycle warmup, so
+        # it must supply the solver chronology itself. This includes FHO_2:
+        # loading the standard warmup there would conflict with the prefix
+        # metadata before IPOPT starts.
         command.extend(
             [
                 "--ipopt-disable-standard-warmup",
@@ -1215,6 +1218,24 @@ def _parse_memory_limit(raw: str, total_memory: int) -> float:
     return value
 
 
+def _parse_attempt_timeout(raw: str) -> float | None:
+    """Parse a positive timeout, or the explicit unlimited ``none`` value."""
+
+    if raw.strip().lower() == "none":
+        return None
+    try:
+        value = float(raw)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "must be a strictly positive number or 'none'"
+        ) from error
+    if not math.isfinite(value) or value <= 0:
+        raise argparse.ArgumentTypeError(
+            "must be a strictly positive finite number or 'none'"
+        )
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", type=Path, required=True)
@@ -1270,9 +1291,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--poll-interval-s", type=float, default=0.5)
     parser.add_argument(
         "--attempt-timeout-s",
-        type=float,
-        default=1800.0,
-        help="Wall-time cap for each independent solver attempt.",
+        type=_parse_attempt_timeout,
+        default=None,
+        metavar="SECONDS|none",
+        help="Wall-time cap per solver attempt; 'none' disables it (default).",
     )
     return parser
 
@@ -1929,7 +1951,7 @@ def run(args: argparse.Namespace) -> int:
         )
     if args.poll_interval_s <= 0:
         raise ValueError("--poll-interval-s must be strictly positive.")
-    if args.attempt_timeout_s <= 0:
+    if args.attempt_timeout_s is not None and args.attempt_timeout_s <= 0:
         raise ValueError("--attempt-timeout-s must be strictly positive.")
 
     total_memory = available_memory_bytes()

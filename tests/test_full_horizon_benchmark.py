@@ -70,6 +70,29 @@ def test_rho_only_is_an_explicit_benchmark_mode(tmp_path):
     assert args.rho_only is True
 
 
+def test_full_horizon_cli_accepts_an_unlimited_attempt_timeout(tmp_path):
+    arguments = [
+        "--workspace",
+        str(tmp_path),
+        "--seed-dir",
+        str(tmp_path / "seed"),
+        "--output-dir",
+        str(tmp_path / "output"),
+        "--max-cycles",
+        "200",
+        "--n-threads",
+        "4",
+    ]
+
+    assert full_horizon.build_parser().parse_args(arguments).attempt_timeout_s is None
+    assert (
+        full_horizon.build_parser().parse_args(
+            [*arguments, "--attempt-timeout-s", "none"]
+        ).attempt_timeout_s
+        is None
+    )
+
+
 def test_rho_only_writes_a_complete_report_and_skips_full_horizon(
     tmp_path, monkeypatch
 ):
@@ -910,6 +933,8 @@ def test_rho_and_full_horizon_use_the_intended_solver_contract(tmp_path):
     assert "--ipopt-no-use-sx" in full
     assert "--ipopt-disable-standard-warmup" in full
     assert "--adopt-common-initial-solution-warmup-cycles" in full
+    assert "--ipopt-disable-standard-warmup" in paired_reduced
+    assert "--adopt-common-initial-solution-warmup-cycles" in paired_reduced
     assert "--ipopt-disable-standard-warmup" not in one_cycle_full
     assert "--adopt-common-initial-solution-warmup-cycles" not in one_cycle_full
     assert "--optional-nlp-periodic-ipopt-hot-start" in full
