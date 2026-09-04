@@ -51,6 +51,16 @@ from cocofest import (
     OcpFesMsk,
     FesNmpcMsk,
 )
+from cocofest.optimization.isokinetic_cycling import (
+    IsokineticCyclingConfig,
+    validate_external_torque_effectiveness,
+)
+from cocofest.optimization.muscle_reserve import DEFAULT_SMOOTH_MIN_TEMPERATURE
+
+
+# ACADOS rejects infinite x bounds. This value is deliberately many orders of
+# magnitude beyond every physical state scale while remaining finite.
+ISOKINETIC_FREE_BOUND = 1e6
 
 
 def project_full_first_node_initial_guess_to_contact(
@@ -374,6 +384,40 @@ class MyCyclicNMPC(FesNmpcMsk):
 
         # --- States are bounded to match the last node of the cycle to ensure continuity between window --- #
         for key in states_keys:
+            isokinetic_config = getattr(self, "isokinetic_config", None)
+            if key == "E_prod" and isokinetic_config is not None:
+                energy_target = isokinetic_config.energy_target_j
+                self.nlp[0].x_bounds[key].min[0, :] = [
+                    0.0,
+                    -ISOKINETIC_FREE_BOUND,
+                    energy_target,
+                ]
+                self.nlp[0].x_bounds[key].max[0, :] = [
+                    0.0,
+                    ISOKINETIC_FREE_BOUND,
+                    energy_target,
+                ]
+                continue
+            if (
+                key == position_state_key
+                and isokinetic_config is not None
+            ):
+                # The next absolute angle is continuous at START. Its path
+                # and END values follow from dot(theta)=omega_target and the
+                # fixed horizon, so keep those bounds free after every RHO
+                # advance just as they are in the first window.
+                center = float(states[key][wheel_state_index][self.nodes_per_cycle])
+                self.nlp[0].x_bounds[key].min[wheel_state_index, :] = [
+                    center,
+                    -ISOKINETIC_FREE_BOUND,
+                    -ISOKINETIC_FREE_BOUND,
+                ]
+                self.nlp[0].x_bounds[key].max[wheel_state_index, :] = [
+                    center,
+                    ISOKINETIC_FREE_BOUND,
+                    ISOKINETIC_FREE_BOUND,
+                ]
+                continue
             for i in range(states[key].shape[0]):
                 # --- Only doing wheel to prevent over constraining the system --- #
                 if key in (position_state_key, velocity_state_key):
@@ -562,6 +606,16 @@ class MyCyclicNMPC(FesNmpcMsk):
         ]
         # --- Set initial guesses for cyclical and continuous states --- #
         for key in states_keys:
+            isokinetic_config = getattr(self, "isokinetic_config", None)
+            if key == "E_prod" and isokinetic_config is not None:
+                energy_guess = self.nlp[0].x_init[key].init
+                fractions = getattr(
+                    self,
+                    "_isokinetic_energy_seed_fraction",
+                    np.linspace(0.0, 1.0, energy_guess.shape[1]),
+                )
+                energy_guess[0, :] = isokinetic_config.energy_target_j * fractions
+                continue
             for i in range(states[key].shape[0]):
                 if key in cyclical_keys:
                     if (
@@ -1062,6 +1116,12 @@ def prepare_nmpc(
     minimize_control = simulation_conditions["minimize_control"]
     cost_fun_weight = simulation_conditions["cost_fun_weight"]
     objective_shape = simulation_conditions.get("objective_shape", "quadratic")
+    terminal_reserve_weight = simulation_conditions.get(
+        "terminal_reserve_weight", 0.0
+    )
+    terminal_reserve_temperature = simulation_conditions.get(
+        "terminal_reserve_temperature", DEFAULT_SMOOTH_MIN_TEMPERATURE
+    )
     control_regularization_weight = simulation_conditions.get(
         "control_regularization_weight", 0.0
     )
@@ -1120,6 +1180,36 @@ def prepare_nmpc(
     reduced_dynamics = simulation_conditions.get("reduced_cycling_dynamics")
     if isinstance(reduced_dynamics, (str, os.PathLike)):
         reduced_dynamics = ReducedCyclingDynamics.load(reduced_dynamics)
+    formulation = simulation_conditions.get("formulation", "dynamic")
+    if formulation not in ("dynamic", "isokinetic"):
+        raise ValueError("formulation must be 'dynamic' or 'isokinetic'.")
+    isokinetic_config = None
+    if formulation == "isokinetic":
+        if mechanical_formulation != "reduced":
+            raise ValueError(
+                "The isokinetic formulation currently requires reduced mechanics."
+            )
+        isokinetic_config = IsokineticCyclingConfig(
+            omega_target_rad_s=simulation_conditions.get(
+                "isokinetic_omega", -float(2 * np.pi)
+            ),
+            energy_equivalent_torque_nm=simulation_conditions.get(
+                "energy_equivalent_torque", 0.2
+            ),
+            load_torque_min_nm=simulation_conditions.get("load_torque_min", -3.0),
+            load_torque_max_nm=simulation_conditions.get("load_torque_max", 3.0),
+            number_of_turns=n_cycles_simultaneous,
+        )
+        if not np.isclose(
+            window_cycle_duration,
+            isokinetic_config.duration_s,
+            atol=1e-12,
+            rtol=0.0,
+        ):
+            raise ValueError(
+                "The RHO duration is inconsistent with isokinetic omega and "
+                "the requested number of turns."
+            )
     # --- Pickle file info --- #
     initial_guess_path = simulation_conditions["init_guess_file_path"]
 
@@ -1157,6 +1247,7 @@ def prepare_nmpc(
         turn_number=turn_number,
         ode_solver=ode_solver,
         init_file_path=initial_guess_path,
+        window_duration_s=window_cycle_duration,
     )
 
     # --- Set bounds and FES initial guesses --- #
@@ -1185,6 +1276,7 @@ def prepare_nmpc(
                 n_shooting=window_n_shooting,
                 turn_number=turn_number,
                 ode_solver=ode_solver,
+                window_duration_s=window_cycle_duration,
             ),
         )
         if recenter_audit["maximum_theta_change_rad"] > 1e-4:
@@ -1219,7 +1311,17 @@ def prepare_nmpc(
         model = ReducedFesCyclingModel(
             reduced_dynamics=reduced_dynamics,
             muscles_model=model.muscles_dynamics_model,
-            external_crank_torque=float(constant_crank_torque or 0.0),
+            external_crank_torque=(
+                0.0
+                if isokinetic_config is not None
+                else float(constant_crank_torque or 0.0)
+            ),
+            isokinetic=isokinetic_config is not None,
+            isokinetic_omega=(
+                isokinetic_config.omega_target_rad_s
+                if isokinetic_config is not None
+                else -float(2 * np.pi)
+            ),
             activate_force_length_relationship=model.activate_force_length_relationship,
             activate_force_velocity_relationship=model.activate_force_velocity_relationship,
             activate_passive_force_relationship=model.activate_passive_force_relationship,
@@ -1233,6 +1335,7 @@ def prepare_nmpc(
             omega_fast_bound_margin=wheel_qdot_fast_bound_margin,
             omega_slow_bound_margin=wheel_qdot_slow_bound_margin,
             terminal_omega_bound_margin=terminal_wheel_qdot_bound_margin,
+            isokinetic_config=isokinetic_config,
         )
     else:
         x_init = full_mechanical_init
@@ -1308,6 +1411,8 @@ def prepare_nmpc(
         physical_crank_terminal_angle=cycling_info.get(
             "physical_crank_terminal_angle"
         ),
+        enforce_isokinetic_equilibrium=isokinetic_config is not None,
+        isokinetic_config=isokinetic_config,
     )
 
     # --- Set objective --- #
@@ -1323,6 +1428,8 @@ def prepare_nmpc(
             else x_init["q"].init[2][-1]
         ),
         objective_shape=objective_shape,
+        terminal_reserve_weight=terminal_reserve_weight,
+        terminal_reserve_temperature=terminal_reserve_temperature,
         control_regularization_weight=control_regularization_weight,
         control_regularization_target=control_regularization_target,
         wheel_qdot_regularization_weight=wheel_qdot_regularization_weight,
@@ -1377,7 +1484,20 @@ def prepare_nmpc(
     )
     if "ordering_strategy" in mhe_info:
         nmpc_options["ordering_strategy"] = mhe_info["ordering_strategy"]
-    return MyCyclicNMPC(**nmpc_options)
+    nmpc = MyCyclicNMPC(**nmpc_options)
+    nmpc.isokinetic_config = isokinetic_config
+    if isokinetic_config is not None:
+        nmpc._isokinetic_energy_seed_fraction = (
+            np.asarray(nmpc.nlp[0].x_init["E_prod"].init, dtype=float)[0]
+            / isokinetic_config.energy_target_j
+            if isokinetic_config.energy_target_j > 0.0
+            else np.linspace(
+                0.0,
+                1.0,
+                nmpc.nlp[0].x_init["E_prod"].init.shape[1],
+            )
+        )
+    return nmpc
 
 
 def set_external_forces(n_shooting, external_force_dict, force_name):
@@ -1408,6 +1528,7 @@ def set_q_qdot_init(
     turn_number: int,
     ode_solver: OdeSolver,
     init_file_path: str,
+    window_duration_s: float | None = None,
 ) -> InitialGuessList:
     x_init = InitialGuessList()
     if init_file_path:
@@ -1427,6 +1548,7 @@ def set_q_qdot_init(
             n_shooting=n_shooting,
             turn_number=turn_number,
             ode_solver=ode_solver,
+            window_duration_s=window_duration_s,
         )
         initial_guess_intervals = sample_times.size - 1
         # --- Run inverse kinematics --- #
@@ -1460,13 +1582,17 @@ def state_initial_guess_time_grid(
     n_shooting: int,
     turn_number: int,
     ode_solver: OdeSolver,
+    window_duration_s: float | None = None,
 ) -> np.ndarray:
     """Return the physical time of every state in an ALL_POINTS warm-start."""
 
     if n_shooting < 1 or turn_number < 1:
         raise ValueError("n_shooting and turn_number must be strictly positive.")
+    duration = float(turn_number) if window_duration_s is None else float(window_duration_s)
+    if not np.isfinite(duration) or duration <= 0.0:
+        raise ValueError("window_duration_s must be finite and strictly positive.")
     if not ode_solver.is_direct_collocation:
-        return np.linspace(0.0, float(turn_number), n_shooting + 1)
+        return np.linspace(0.0, duration, n_shooting + 1)
 
     from casadi import collocation_points
 
@@ -1475,13 +1601,13 @@ def state_initial_guess_time_grid(
     local_nodes = np.concatenate(
         ([0.0], np.asarray(collocation_points(degree, method), dtype=float))
     )
-    interval_duration = float(turn_number) / n_shooting
+    interval_duration = duration / n_shooting
     grid = np.concatenate(
         [
             (interval + local_nodes) * interval_duration
             for interval in range(n_shooting)
         ]
-        + [np.array([float(turn_number)])]
+        + [np.array([duration])]
     )
     return grid
 
@@ -1684,8 +1810,9 @@ def set_reduced_x_bounds(
     omega_fast_bound_margin: float | None = None,
     omega_slow_bound_margin: float | None = None,
     terminal_omega_bound_margin: float | None = None,
+    isokinetic_config: IsokineticCyclingConfig | None = None,
 ) -> tuple[BoundsList, InitialGuessList]:
-    """Set bounds for 20 Ding states and the reduced ``theta, omega`` pair."""
+    """Set reduced-state bounds, including isokinetic work when requested."""
 
     if omega_bound_margin <= 0:
         raise ValueError("omega_bound_margin must be strictly positive.")
@@ -1740,29 +1867,54 @@ def set_reduced_x_bounds(
 
     theta_values = np.asarray(x_init["theta"].init, dtype=float)
     theta_start = float(theta_values[0, 0])
+    if isokinetic_config is not None:
+        time_grid = state_initial_guess_time_grid(
+            n_shooting=n_shooting,
+            turn_number=isokinetic_config.number_of_turns,
+            ode_solver=ode_solver,
+            window_duration_s=isokinetic_config.duration_s,
+        )
+        theta_values = (
+            theta_start
+            + isokinetic_config.omega_target_rad_s * time_grid[np.newaxis, :]
+        )
+        x_init["theta"].init[:, :] = theta_values
+        x_init["omega"].init[:, :] = isokinetic_config.omega_target_rad_s
     theta_end = float(theta_values[0, -1])
-    theta_slack = 0.05
+    theta_slack = 0.0 if isokinetic_config is not None else 0.05
+    theta_min = np.array(
+        [[
+            theta_start,
+            min(theta_start, theta_end) - 2.0,
+            theta_end - theta_slack,
+        ]]
+    )
+    theta_max = np.array(
+        [[
+            theta_start,
+            max(theta_start, theta_end) + 2.0,
+            theta_end + theta_slack,
+        ]]
+    )
+    if isokinetic_config is not None:
+        # Fix theta once. Its terminal value follows from the fixed horizon
+        # and dot(theta)=omega_target; fixing it again adds a redundant scalar
+        # equality to the NLP.
+        theta_min[0, 1:] = -ISOKINETIC_FREE_BOUND
+        theta_max[0, 1:] = ISOKINETIC_FREE_BOUND
     x_bounds.add(
         "theta",
-        min_bound=np.array(
-            [[
-                theta_start,
-                min(theta_start, theta_end) - 2.0,
-                theta_end - theta_slack,
-            ]]
-        ),
-        max_bound=np.array(
-            [[
-                theta_start,
-                max(theta_start, theta_end) + 2.0,
-                theta_end + theta_slack,
-            ]]
-        ),
+        min_bound=theta_min,
+        max_bound=theta_max,
         interpolation=InterpolationType.CONSTANT_WITH_FIRST_AND_LAST_DIFFERENT,
     )
     # Match the full formulation exactly. The warm-start omega remains
     # variable, but it must not silently recenter the physical OCP bounds.
-    expected_omega = -2.0 * np.pi
+    expected_omega = (
+        isokinetic_config.omega_target_rad_s
+        if isokinetic_config is not None
+        else -2.0 * np.pi
+    )
     omega_min = np.array(
         [[expected_omega - omega_fast_bound_margin] * 3], dtype=float
     )
@@ -1772,12 +1924,44 @@ def set_reduced_x_bounds(
     if terminal_omega_bound_margin is not None:
         omega_min[0, -1] = expected_omega - terminal_omega_bound_margin
         omega_max[0, -1] = expected_omega + terminal_omega_bound_margin
+    if isokinetic_config is not None:
+        # Fix omega once; dot(omega)=0 then enforces the exact value at every
+        # shooting and integrator node without adding rank-deficient duplicate
+        # equalities to the NLP.
+        omega_min[0, 0] = expected_omega
+        omega_max[0, 0] = expected_omega
+        omega_min[0, 1:] = -ISOKINETIC_FREE_BOUND
+        omega_max[0, 1:] = ISOKINETIC_FREE_BOUND
     x_bounds.add(
         "omega",
         min_bound=omega_min,
         max_bound=omega_max,
         interpolation=InterpolationType.CONSTANT_WITH_FIRST_AND_LAST_DIFFERENT,
     )
+    if isokinetic_config is not None:
+        validate_external_torque_effectiveness(
+            model.reduced_dynamics, theta_values[0]
+        )
+        energy_target = isokinetic_config.energy_target_j
+        energy_init = (
+            energy_target
+            * (time_grid / isokinetic_config.duration_s)[np.newaxis, :]
+        )
+        x_init.add(
+            "E_prod",
+            energy_init,
+            interpolation=(
+                InterpolationType.ALL_POINTS
+                if ode_solver.is_direct_collocation
+                else InterpolationType.EACH_FRAME
+            ),
+        )
+        x_bounds.add(
+            "E_prod",
+            min_bound=np.array([[0.0, -ISOKINETIC_FREE_BOUND, energy_target]]),
+            max_bound=np.array([[0.0, ISOKINETIC_FREE_BOUND, energy_target]]),
+            interpolation=InterpolationType.CONSTANT_WITH_FIRST_AND_LAST_DIFFERENT,
+        )
     return x_bounds, x_init
 
 
@@ -1793,6 +1977,8 @@ def set_x_scaling(bio_model, mode: str = "none") -> VariableScalingList | None:
         if isinstance(bio_model, ReducedFesCyclingModel):
             x_scaling.add(key="theta", scaling=[2 * np.pi])
             x_scaling.add(key="omega", scaling=[2 * np.pi])
+            if bio_model.isokinetic:
+                x_scaling.add(key="E_prod", scaling=[1.0])
         else:
             x_scaling.add(key="q", scaling=[2.0, 2.0, 2 * np.pi])
             x_scaling.add(key="qdot", scaling=[10.0, 14.0, 2 * np.pi])
@@ -2184,6 +2370,31 @@ def reduced_internal_crank_velocity_constraint(
     return omega + 0.5 * float(shooting_interval_duration) * omega_dot
 
 
+def reduced_isokinetic_load_torque_constraint(controller):
+    """Return the analytically eliminated isokinetic load torque."""
+
+    from casadi import vertcat
+
+    reduced_model = getattr(controller.model, "bio_model", controller.model)
+    if not isinstance(reduced_model, ReducedFesCyclingModel):
+        raise TypeError(
+            "The isokinetic equilibrium requires ReducedFesCyclingModel."
+        )
+    if not reduced_model.isokinetic:
+        raise ValueError("The reduced model is not configured as isokinetic.")
+    muscle_forces = vertcat(
+        *[
+            controller.states[f"F_{muscle_model.muscle_name}"].cx
+            for muscle_model in reduced_model.muscles_dynamics_model
+        ]
+    )
+    return reduced_model.required_load_torque(
+        controller.states["theta"].cx,
+        reduced_model.isokinetic_omega,
+        muscle_forces,
+    )
+
+
 def physical_crank_velocity_all_collocation_points_constraint(
     controller,
     hand_marker: str = "hand",
@@ -2261,6 +2472,8 @@ def set_constraints(
     enforce_reduced_internal_crank_velocity_guard: bool = False,
     shooting_interval_duration: float | None = None,
     physical_crank_terminal_angle: float | None = None,
+    enforce_isokinetic_equilibrium: bool = False,
+    isokinetic_config: IsokineticCyclingConfig | None = None,
 ):
     constraints = ConstraintList()
     if not np.isfinite(contact_position_tolerance_m) or contact_position_tolerance_m < 0.0:
@@ -2268,6 +2481,41 @@ def set_constraints(
             "contact_position_tolerance_m must be finite and non-negative."
         )
     is_reduced = isinstance(bio_model, ReducedFesCyclingModel)
+    if enforce_isokinetic_equilibrium:
+        if not is_reduced or not bio_model.isokinetic:
+            raise ValueError(
+                "Isokinetic equilibrium requires an isokinetic reduced model."
+            )
+        if isokinetic_config is None:
+            raise ValueError("The isokinetic torque bounds require a configuration.")
+        # Bioptim custom constraints expose shooting states but not the SX
+        # collocation intermediates. Keep a small interior guard at shooting
+        # nodes, then certify all Radau/DOP853 samples after the solve.
+        torque_span = (
+            isokinetic_config.load_torque_max_nm
+            - isokinetic_config.load_torque_min_nm
+        )
+        shooting_guard = min(0.05, 0.01 * torque_span)
+        guarded_minimum = (
+            isokinetic_config.load_torque_min_nm + shooting_guard
+        )
+        guarded_maximum = (
+            isokinetic_config.load_torque_max_nm - shooting_guard
+        )
+        constraints.add(
+            reduced_isokinetic_load_torque_constraint,
+            node=Node.ALL_SHOOTING,
+            min_bound=guarded_minimum,
+            max_bound=guarded_maximum,
+        )
+        # ``ALL_SHOOTING`` excludes the terminal state. The inverse load can
+        # peak at the RHO seam, so certify that last state explicitly.
+        constraints.add(
+            reduced_isokinetic_load_torque_constraint,
+            node=Node.END,
+            min_bound=guarded_minimum,
+            max_bound=guarded_maximum,
+        )
     if (
         enforce_contact_constraints_terminal
         or enforce_contact_position_terminal
@@ -2477,6 +2725,8 @@ def set_objective_functions(
     cost_fun_weight,
     target,
     objective_shape: str = "quadratic",
+    terminal_reserve_weight: float = 0.0,
+    terminal_reserve_temperature: float = DEFAULT_SMOOTH_MIN_TEMPERATURE,
     control_regularization_weight: float = 0.0,
     control_regularization_target: float | None = None,
     wheel_qdot_regularization_weight: float = 0.0,
@@ -2489,6 +2739,22 @@ def set_objective_functions(
     velocity_state_key: str = "qdot",
     velocity_state_index: int = 2,
 ):
+    try:
+        terminal_reserve_weight = float(terminal_reserve_weight)
+        terminal_reserve_temperature = float(terminal_reserve_temperature)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "terminal_reserve_weight and terminal_reserve_temperature must be "
+            "finite real numbers."
+        ) from exc
+    if not np.isfinite(terminal_reserve_weight) or terminal_reserve_weight < 0.0:
+        raise ValueError("terminal_reserve_weight must be finite and non-negative.")
+    if (
+        not np.isfinite(terminal_reserve_temperature)
+        or terminal_reserve_temperature <= 0.0
+    ):
+        raise ValueError("terminal_reserve_temperature must be finite and positive.")
+
     objective_functions = ObjectiveList()
     is_quadratic = objective_shape == "quadratic"
     # --- Set main cost function --- #
@@ -2515,6 +2781,16 @@ def set_objective_functions(
             node=Node.ALL,
             weight=10000 * cost_fun_weight[2],
             quadratic=is_quadratic,
+        )
+
+    if terminal_reserve_weight > 0.0:
+        objective_functions.add(
+            CustomObjective.minimize_terminal_muscle_reserve,
+            custom_type=ObjectiveFcn.Mayer,
+            node=Node.END,
+            weight=10000 * terminal_reserve_weight,
+            quadratic=False,
+            temperature=terminal_reserve_temperature,
         )
 
     # --- Numerical regularization for ACADOS-compatible solves --- #

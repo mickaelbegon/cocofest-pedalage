@@ -2,11 +2,17 @@
 This custom objective class regroups all the custom objectives that are used in the optimization problem.
 """
 
+import math
+
 from casadi import MX, vertcat
 from bioptim import PenaltyController
 from .models.fes_model import FesModel
 from .models.ding2007.ding2007 import DingModelPulseWidthFrequency
 from .models.hmed2018.hmed2018 import DingModelPulseIntensityFrequency
+from .optimization.muscle_reserve import (
+    DEFAULT_SMOOTH_MIN_TEMPERATURE,
+    smooth_minimum_capacity_penalty_casadi,
+)
 
 
 class CustomObjective:
@@ -42,6 +48,40 @@ class CustomObjective:
             ]
         )
         return muscle_fatigue
+
+    @staticmethod
+    def minimize_terminal_muscle_reserve(
+        controller: PenaltyController,
+        temperature: float = DEFAULT_SMOOTH_MIN_TEMPERATURE,
+    ) -> MX:
+        """Penalize a smooth approximation of terminal minimum ``A/A_scale``.
+
+        This dimensionless Mayer-compatible expression treats every muscle
+        symmetrically and requires no full-horizon data or hand-tuned
+        per-muscle weight. It remains a reserve proxy; a future force/PW
+        rollout is required before interpreting it as predicted endurance.
+        """
+        muscle_models = controller.model.muscles_dynamics_model
+        capacities = vertcat(
+            *[
+                controller.states[f"A_{muscle_model.muscle_name}"].cx
+                for muscle_model in muscle_models
+            ]
+        )
+        capacity_scales = []
+        for muscle_model in muscle_models:
+            try:
+                scale = float(muscle_model.a_scale)
+            except (TypeError, ValueError) as error:
+                raise ValueError("Every muscle a_scale must be a numeric constant.") from error
+            if not math.isfinite(scale) or scale <= 0.0:
+                raise ValueError("Every muscle a_scale must be finite and strictly positive.")
+            capacity_scales.append(scale)
+        return smooth_minimum_capacity_penalty_casadi(
+            capacities,
+            capacity_scales,
+            temperature=temperature,
+        )
 
     @staticmethod
     def minimize_overall_muscle_force_production(controller: PenaltyController) -> MX:
