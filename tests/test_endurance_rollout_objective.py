@@ -159,6 +159,38 @@ def test_packed_profile_rejects_nonpositive_symbolic_denominators():
         )
 
 
+def test_packed_profile_rejects_force_negative_between_positive_midpoints():
+    interval_count = 4
+    cosine = np.zeros((2, 4))
+    cosine[:, 3] = -1.0
+    profile = PeriodicRecruitmentProfile(
+        force_profile=PeriodicFourierForceProfile(
+            period=0.8,
+            mean=np.full(2, 0.5),
+            cosine=cosine,
+            sine=np.zeros_like(cosine),
+        ),
+        interval_count=interval_count,
+        cn=np.full((2, interval_count), 0.42),
+        force_length_relationship=np.full((2, interval_count), 0.95),
+        force_velocity_relationship=np.full((2, interval_count), 0.98),
+        passive_force_relationship=np.full((2, interval_count), 0.02),
+    )
+
+    # F(t) = 0.5 - cos(8*pi*t/T) equals 1.5 at all four interval
+    # midpoints, but reaches -0.5 between them.
+    assert np.all(profile.force_profile.evaluate(profile.midpoint_times) > 0.0)
+    assert not np.all(
+        profile.force_profile.force_positivity_certificate().certified_nonnegative
+    )
+    with pytest.raises(ValueError, match="not certified non-negative over the full period"):
+        pack_rollout_objective_parameters(
+            profile,
+            _muscles(),
+            RolloutObjectiveLayout(2, interval_count, 2),
+        )
+
+
 def test_symbolic_objective_exposes_negative_recruitment_domain_margin():
     muscles = _muscles()
     layout = RolloutObjectiveLayout(2, 4, 1)
@@ -170,3 +202,38 @@ def test_symbolic_objective_exposes_negative_recruitment_domain_margin():
     result = function(initial, parameters)
 
     assert np.min(np.asarray(result[3])) < 0.0
+
+
+def test_symbolic_objective_exposes_negative_terminal_capacity_margin():
+    muscle = _muscles()[0]
+    layout = RolloutObjectiveLayout(1, 1, 1)
+    profile = PeriodicRecruitmentProfile(
+        force_profile=PeriodicFourierForceProfile(
+            period=0.8,
+            mean=np.array([12.0]),
+            cosine=np.array([[0.1]]),
+            sine=np.array([[0.0]]),
+        ),
+        interval_count=1,
+        cn=np.array([[0.42]]),
+        force_length_relationship=np.array([[0.95]]),
+        force_velocity_relationship=np.array([[0.98]]),
+        passive_force_relationship=np.array([[0.02]]),
+    )
+    parameters = pack_rollout_objective_parameters(profile, [muscle], layout)
+    function = build_rollout_objective_function(muscles=[muscle], layout=layout)
+    initial = np.array([1450.0, 0.065, 0.142])
+    baseline = function(initial, parameters)
+
+    adversarial = parameters.copy()
+    adversarial[layout.field_slice("second_half_force_integral")] = 10_000.0
+    result = function(initial, adversarial)
+    margins = np.asarray(result[3]).ravel()
+
+    # Changing only the last half-step integral cannot affect the midpoint
+    # recruitment calculation: every pre-existing domain margin remains
+    # positive, while the propagated terminal A becomes non-physiological.
+    np.testing.assert_allclose(np.asarray(result[1]), np.asarray(baseline[1]))
+    assert np.all(margins[:-4] > 0.0)
+    assert float(result[2][0]) < 0.0
+    assert np.min(margins[-4:]) < 0.0

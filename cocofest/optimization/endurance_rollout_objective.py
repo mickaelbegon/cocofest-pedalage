@@ -154,6 +154,14 @@ def pack_rollout_objective_parameters(
     ):
         raise ValueError("muscles must match the rollout objective muscle count.")
 
+    force_positivity = profile.force_profile.force_positivity_certificate()
+    if not np.all(force_positivity.certified_nonnegative):
+        negative = np.flatnonzero(~force_positivity.certified_nonnegative).tolist()
+        raise ValueError(
+            "force_profile is not certified non-negative over the full period "
+            f"for signal(s) {negative}; midpoint samples are insufficient and no clipping is applied."
+        )
+
     midpoint_times = profile.midpoint_times
     force = profile.force_profile.evaluate(midpoint_times)
     force_derivative = profile.force_profile.derivative(midpoint_times)
@@ -219,6 +227,17 @@ def pack_rollout_objective_parameters(
 def _symbolic_profile_value(parameters, layout: RolloutObjectiveLayout, name: str, muscle: int, interval: int):
     offset = layout.field_slice(name).start
     return parameters[offset + muscle * layout.interval_count + interval]
+
+
+def _physiological_state_margins(state, rest) -> tuple[Any, Any, Any, Any]:
+    """Return Ding-domain margins for one ``(A, Tau1, Km)`` slow state."""
+
+    return (
+        state[0],
+        rest[0] - state[0],
+        state[1] - rest[1],
+        state[2] - rest[2],
+    )
 
 
 def build_rollout_objective_expressions(
@@ -319,9 +338,9 @@ def build_rollout_objective_expressions(
                         -(muscle.pulse_width_max - muscle.pd0) / muscle.pdt
                     )
                 )
+                domain_margins.extend(_physiological_state_margins(midpoint, rest))
                 domain_margins.extend(
                     (
-                        midpoint[0],
                         midpoint[1],
                         midpoint[2] + cn,
                         cn,
@@ -342,6 +361,9 @@ def build_rollout_objective_expressions(
                 )
                 current[muscle_index] = (
                     rest + decay * (midpoint - rest) + alpha * second_integral
+                )
+                domain_margins.extend(
+                    _physiological_state_margins(current[muscle_index], rest)
                 )
 
     utilization_vector = ca.vertcat(*utilizations)
