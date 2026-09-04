@@ -321,6 +321,14 @@ peut résoudre le cycle initial, construire puis compiler une seule fois le RHO
 anticipatif pour tous les cycles suivants : deux compilations par séance, puis
 aucune recompilation.
 
+La primitive `cocofest/optimization/endurance_rollout_objective.py` implémente
+désormais ce contrat sans encore modifier Bioptim. L’état lent initial est une
+entrée symbolique et `F`, `F_dot`, `Cn`, les gains mécaniques, les décroissances
+et les intégrales de force sont regroupés dans un vecteur de paramètres de taille
+fixe. Un même `casadi.Function` accepte ainsi plusieurs profils, reproduit le
+rollout NumPy et génère du C sans reconstruction du graphe. Son raccordement au
+RHO demeure désactivé jusqu’à ce que le gate du cycle source soit franchi.
+
 La carte exacte NumPy/CasADi est disponible dans
 `cocofest/optimization/ding_fatigue_rollout.py`. Une représentation de Fourier
 dans `cocofest/optimization/periodic_force_profile.py` rend explicites la
