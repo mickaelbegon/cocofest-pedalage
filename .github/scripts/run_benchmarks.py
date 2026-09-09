@@ -345,6 +345,16 @@ def conda_env_prefix(suite: str) -> Path | None:
     return None
 
 
+def installed_hsl_library(prefix: Path) -> Path | None:
+    """Locate CoinHSL in either supported Conda installation layout."""
+
+    direct_library = prefix / "lib" / "libhsl.so"
+    if direct_library.is_file():
+        return direct_library
+    versioned_libraries = sorted(prefix.glob("opt/libhsl/*/lib/libhsl.so"))
+    return versioned_libraries[-1] if versioned_libraries else None
+
+
 def base_environment(prefix: Path, suite: str, threads: int,
                      numeric_threads: int = 1) -> dict[str, str]:
     """Everything an IDE-launched benchmark process needs but does not inherit.
@@ -460,10 +470,10 @@ def build_case_environment(case: Case, prefix: Path, args: argparse.Namespace) -
         # without requiring its activation hook to have run first.
         env["IPOPT_LINEAR_SOLVER"] = "ma57"
         env["WARMUP_IPOPT_LINEAR_SOLVER"] = "ma57"
-        installed_hsl_library = prefix / "lib" / "libhsl.so"
+        environment_hsl_library = installed_hsl_library(prefix)
         hsl_library = args.ipopt_hsl_library
-        if hsl_library is None and installed_hsl_library.is_file():
-            hsl_library = installed_hsl_library
+        if hsl_library is None:
+            hsl_library = environment_hsl_library
         if hsl_library is not None:
             env["IPOPT_HSL_LIBRARY"] = str(hsl_library)
     return env
@@ -577,14 +587,13 @@ def build_command(case: Case, prefix: Path, args: argparse.Namespace) -> tuple[l
         "--acados-sim-steps", "5",
         "--acados-newton-iter", "5",
         "--acados-stationarity-tolerance", "5e-3",
+        # IPOPT is a conditional recovery backend, not a per-window warm-start
+        # producer. The direct cyclic shift preserves the isokinetic energy
+        # accumulator; the generic IRK transfer currently does not.
+        "--acados-ipopt-recovery",
         *(
             ["--acados-control-homotopy-release-final-radius"]
             if args.formulation == "dynamic"
-            else []
-        ),
-        *(
-            ["--periodic-ipopt-refinement-each-window"]
-            if args.formulation == "isokinetic"
             else []
         ),
         *(

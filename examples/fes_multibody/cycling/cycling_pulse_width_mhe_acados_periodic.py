@@ -16853,6 +16853,7 @@ def apply_pulse_width_control_trust_region(
 
     periodic_nmpc._cocofest_nodewise_control_bounds = nodewise_bounds
     periodic_nmpc._cocofest_control_trust_centers = trust_centers
+    periodic_nmpc._cocofest_control_trust_radius = float(radius)
     return summary
 
 
@@ -20727,6 +20728,16 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                     recovery_summary["acados_failed_status"] = int(solution.status)
                     recovery_summary["acados_failed_feasibility"] = dict(feasibility)
                 if recovery_summary["seed_injected"]:
+                    if args.solver == "acados":
+                        recovery_trust_radius = getattr(
+                            self, "_cocofest_control_trust_radius", None
+                        )
+                        if recovery_trust_radius is not None:
+                            recovery_summary[
+                                "acados_control_trust_region_recenter"
+                            ] = apply_pulse_width_control_trust_region(
+                                self, recovery_trust_radius
+                            )
                     if (
                         args.solver == "acados"
                         and getattr(

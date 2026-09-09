@@ -1467,6 +1467,7 @@ def test_pulse_width_trust_region_keeps_nodewise_centers():
 
     periodic_example.apply_pulse_width_control_trust_region(nmpc, radius=0.01)
     lower, upper = nmpc._cocofest_nodewise_control_bounds["last_pulse_width_Biceps"]
+    assert nmpc._cocofest_control_trust_radius == 0.01
 
     np.testing.assert_allclose(lower, np.array([[0.19, 0.39, 0.49]]))
     np.testing.assert_allclose(upper, np.array([[0.21, 0.41, 0.51]]))

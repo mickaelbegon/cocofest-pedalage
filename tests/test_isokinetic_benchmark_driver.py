@@ -119,7 +119,9 @@ def test_isokinetic_environment_and_all_backend_commands_share_the_same_options(
         acados_command.index("--acados-search-direction-mode") + 1
     ] == "BYRD_OMOJOKUN"
     assert "--acados-control-homotopy-release-final-radius" not in acados_command
-    assert "--periodic-ipopt-refinement-each-window" in acados_command
+    assert "--periodic-ipopt-refinement-each-window" not in acados_command
+    assert "--acados-transfer-irk-rollout" not in acados_command
+    assert "--acados-ipopt-recovery" in acados_command
     assert acados_command[acados_command.index("--ipopt-linear-solver") + 1] == "ma57"
     assert acados_command[acados_command.index("--warmup-ipopt-linear-solver") + 1] == "ma57"
     assert acados_command[acados_command.index("--ipopt-hsl-library") + 1] == str(
@@ -155,6 +157,19 @@ def test_isokinetic_uses_hsl_installed_in_the_target_rho_environment(tmp_path):
     ipopt = next(case for case in driver.CASES if case.key == "ipopt")
     rho_prefix = tmp_path / "rho32"
     installed_hsl = rho_prefix / "lib" / "libhsl.so"
+    installed_hsl.parent.mkdir(parents=True)
+    installed_hsl.write_bytes(b"test HSL library")
+
+    environment = driver.build_case_environment(ipopt, rho_prefix, args)
+
+    assert environment["IPOPT_HSL_LIBRARY"] == str(installed_hsl)
+
+
+def test_isokinetic_finds_versioned_hsl_installation_in_target_environment(tmp_path):
+    args = driver.parse_arguments(["--formulation", "isokinetic"])
+    ipopt = next(case for case in driver.CASES if case.key == "ipopt")
+    rho_prefix = tmp_path / "rho32"
+    installed_hsl = rho_prefix / "opt" / "libhsl" / "v2025.7.21" / "lib" / "libhsl.so"
     installed_hsl.parent.mkdir(parents=True)
     installed_hsl.write_bytes(b"test HSL library")
 
