@@ -12,6 +12,7 @@ from cocofest.optimization.adaptive_moment_rollout import (
     periodic_calcium_state,
     propagate_ding_pulse_width_interval,
     rollout_adaptive_moment_policy,
+    rollout_bounded_total_moment_reference_policy,
     rollout_fixed_pulse_width_policy,
     solve_pulse_width_for_target_moment,
 )
@@ -255,3 +256,55 @@ def test_rollout_stops_at_first_infeasible_target_without_advancing_partial_inte
     assert result.first_failure["status"] == "target_force_above_pw_max_response"
     assert np.isnan(result.pulse_widths).all()
     np.testing.assert_array_equal(result.state_history[0], initial)
+
+
+def test_total_moment_reference_redistributes_an_infeasible_individual_allocation():
+    parameters = (_parameters(), _parameters(capacity=4200.0))
+    initial = np.vstack((_initial(parameters[0]), _initial(parameters[1])))
+    duration = 1.0 / 30.0
+    amplitude = 1.0597355478114694
+    gains = (0.96, 0.90)
+    coefficients = (0.05, 0.05)
+    bounds = np.empty((2, 2))
+    for muscle_index, muscle_parameters in enumerate(parameters):
+        endpoints = []
+        for pulse_width in (muscle_parameters.pd0, muscle_parameters.pulse_width_max):
+            state = propagate_ding_pulse_width_interval(
+                initial[muscle_index],
+                pulse_width=pulse_width,
+                duration=duration,
+                calcium_amplitude=amplitude,
+                mechanical_gain=gains[muscle_index],
+                parameters=muscle_parameters,
+                integration_substeps=16,
+            )
+            endpoints.append(coefficients[muscle_index] * state[1])
+        bounds[muscle_index] = sorted(endpoints)
+    required_total = float(np.sum(np.mean(bounds, axis=1)))
+    reference = (
+        bounds[0, 1] + 0.01,
+        required_total - bounds[0, 1] - 0.01,
+    )
+    assert reference[0] > bounds[0, 1]
+    interval = MomentTrackingInterval(
+        duration=duration,
+        calcium_amplitudes=(amplitude, amplitude),
+        mechanical_gains=gains,
+        moment_coefficients=coefficients,
+        target_moments=reference,
+    )
+
+    result = rollout_bounded_total_moment_reference_policy(
+        initial,
+        intervals=(interval,),
+        parameters=parameters,
+        horizon_cycles=1,
+        integration_substeps=16,
+    )
+
+    assert result.status == "complete"
+    assert result.allocated_moments[0, 0, 0] <= bounds[0, 1]
+    assert not np.allclose(result.allocated_moments[0, :, 0], reference)
+    assert np.sum(result.achieved_moments[0, :, 0]) == pytest.approx(
+        required_total, abs=1e-8
+    )

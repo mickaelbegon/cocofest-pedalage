@@ -576,9 +576,29 @@ dissipation. Avec le cycle 112 comme ancre, le biceps est déjà proche de
 `PW_max` et le même profil devient également impossible au cycle suivant. Ce
 résultat ne signifie pas que le pédalage total est impossible : il montre que
 conserver exactement la contribution de chaque muscle est trop restrictif.
-La prochaine généralisation doit donc préserver le **moment total** tout en
-autorisant une redistribution musculaire à bas coût, avec pénalisation de la
-variation par rapport à l'allocation RHO et de la proximité de `PW_max`.
+
+La généralisation au **moment total** possède maintenant deux implémentations
+séparées afin de ne pas confondre validation et production :
+
+- `smooth_muscle_moment_allocation.py` construit les termes CasADi SX/MX du
+  NLP. Les moments futurs sont des variables externes ; la somme des moments
+  est une contrainte d'égalité exacte et leurs marges inférieure/supérieure
+  sont des contraintes explicites. Le coût quadratique diagonal utilise une
+  flexibilité lisse calculée à partir des réserves, sans poids propre à un
+  muscle. Aucun QP n'est appelé dans la fonction objectif ;
+- `solve_bounded_moment_qp_reference` résout le petit QP borné par phase comme
+  oracle hors ligne. Sa solution est dérivable par morceaux et n'est donc
+  jamais insérée dans IPOPT. Elle sert à vérifier que la redistribution est
+  physiquement possible avant d'agrandir le NLP.
+
+Les Jacobiennes CasADi SX et MX de l'allocateur lisse concordent avec les
+différences finies centrales (`rtol=2e-6`, `atol=2e-8`). Les Jacobiennes des
+contraintes sont exactement `[1,1,1,1]`, `I` et `-I`. Sur l'ancre réelle du
+cycle 0, l'oracle borné conserve le moment total pendant 10 cycles, alors que
+le suivi de chaque moment individuel échoue au cycle 2. Ce résultat est un
+gate de faisabilité du concept, pas encore un gain d'endurance du RHO : le
+raccordement des variables futures au NLP Bioptim et la comparaison
+prospective restent à faire.
 
 Exemple reproductible :
 
@@ -588,7 +608,8 @@ conda run -n cocofest-rho32 python scripts/analyze_adaptive_moment_policy.py \
   benchmark-seed/reduced-cycling-fourier12.npz \
   adaptive-moment-cycle0-150 \
   --cycles 150 --source-cycle-index 0 --cycle-period 1.0 \
-  --integration-substeps 8 --moment-tolerance 1e-4
+  --integration-substeps 8 --moment-tolerance 1e-4 \
+  --allocation-mode total-moment
 ```
 
 ### Étape D — Validation scientifique prospective sans FHO

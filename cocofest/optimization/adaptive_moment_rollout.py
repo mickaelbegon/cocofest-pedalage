@@ -28,6 +28,10 @@ from .ding_fatigue_rollout import (
     DingFatigueParameters,
     ding_fatigue_parameters_from_model,
 )
+from .smooth_muscle_moment_allocation import (
+    SmoothMomentAllocationOptions,
+    solve_bounded_moment_qp_reference,
+)
 
 
 FULL_DING_STATE_NAMES = ("Cn", "F", "A", "Tau1", "Km")
@@ -166,6 +170,22 @@ class FixedPulseWidthRolloutResult:
     pulse_widths: np.ndarray
     achieved_moments: np.ndarray
     state_history: np.ndarray
+
+
+@dataclass(frozen=True)
+class TotalMomentReferenceRolloutResult:
+    """Offline oracle for validating total-moment redistribution."""
+
+    status: str
+    requested_cycles: int
+    completed_cycles: int
+    completed_intervals: int
+    pulse_widths: np.ndarray
+    allocated_moments: np.ndarray
+    achieved_moments: np.ndarray
+    state_history: np.ndarray
+    first_failure: dict[str, Any] | None
+    scalar_function_evaluations: int
 
 
 def effective_recruitment(capacity: float, pulse_width: float, parameters: DingPulseWidthParameters) -> float:
@@ -566,4 +586,168 @@ def rollout_fixed_pulse_width_policy(
         ).copy(),
         achieved_moments=moments,
         state_history=history,
+    )
+
+
+def rollout_bounded_total_moment_reference_policy(
+    initial_states: Sequence[Sequence[float]] | np.ndarray,
+    *,
+    intervals: Sequence[MomentTrackingInterval],
+    parameters: Sequence[DingPulseWidthParameters],
+    horizon_cycles: int,
+    integration_substeps: int = 8,
+    moment_tolerance: float = 1e-8,
+    allocation_options: SmoothMomentAllocationOptions = SmoothMomentAllocationOptions(),
+) -> TotalMomentReferenceRolloutResult:
+    """Validate redistribution with a hard-bounded phase QP outside the NLP.
+
+    This active-set oracle is intentionally separate from the differentiable
+    objective.  It establishes whether preserving the total moment can remain
+    feasible before adding future moment variables and smooth constraints to
+    the RHO graph.
+    """
+
+    initial_states = np.asarray(initial_states, dtype=float)
+    muscle_count = len(parameters)
+    intervals = tuple(intervals)
+    if initial_states.shape != (muscle_count, 5) or not np.all(np.isfinite(initial_states)):
+        raise ValueError("initial_states must have shape (muscle_count, 5).")
+    if not intervals or any(len(item.target_moments) != muscle_count for item in intervals):
+        raise ValueError("intervals must be non-empty and match the parameter muscle count.")
+    if isinstance(horizon_cycles, bool) or int(horizon_cycles) != horizon_cycles or horizon_cycles < 1:
+        raise ValueError("horizon_cycles must be a positive integer.")
+    horizon_cycles = int(horizon_cycles)
+    interval_count = len(intervals)
+    pulse_widths = np.full((horizon_cycles, muscle_count, interval_count), np.nan)
+    allocated_moments = np.full_like(pulse_widths, np.nan)
+    achieved_moments = np.full_like(pulse_widths, np.nan)
+    state_history = np.full((horizon_cycles * interval_count + 1, muscle_count, 5), np.nan)
+    current = initial_states.copy()
+    state_history[0] = current
+    completed_intervals = 0
+    evaluations = 0
+
+    def failed(payload: dict[str, Any]) -> TotalMomentReferenceRolloutResult:
+        return TotalMomentReferenceRolloutResult(
+            status="infeasible",
+            requested_cycles=horizon_cycles,
+            completed_cycles=completed_intervals // interval_count,
+            completed_intervals=completed_intervals,
+            pulse_widths=pulse_widths,
+            allocated_moments=allocated_moments,
+            achieved_moments=achieved_moments,
+            state_history=state_history,
+            first_failure=payload,
+            scalar_function_evaluations=evaluations,
+        )
+
+    for cycle_index in range(horizon_cycles):
+        for interval_index, interval in enumerate(intervals):
+            lower_bounds = np.empty(muscle_count)
+            upper_bounds = np.empty(muscle_count)
+            for muscle_index, muscle_parameters in enumerate(parameters):
+                try:
+                    state_at_pd0 = propagate_ding_pulse_width_interval(
+                        current[muscle_index],
+                        pulse_width=muscle_parameters.pd0,
+                        duration=interval.duration,
+                        calcium_amplitude=interval.calcium_amplitudes[muscle_index],
+                        mechanical_gain=interval.mechanical_gains[muscle_index],
+                        parameters=muscle_parameters,
+                        integration_substeps=integration_substeps,
+                    )
+                    state_at_maximum = propagate_ding_pulse_width_interval(
+                        current[muscle_index],
+                        pulse_width=muscle_parameters.pulse_width_max,
+                        duration=interval.duration,
+                        calcium_amplitude=interval.calcium_amplitudes[muscle_index],
+                        mechanical_gain=interval.mechanical_gains[muscle_index],
+                        parameters=muscle_parameters,
+                        integration_substeps=integration_substeps,
+                    )
+                except (DingDomainError, ValueError) as error:
+                    return failed(
+                        {
+                            "cycle_index": cycle_index,
+                            "interval_index": interval_index,
+                            "muscle_index": muscle_index,
+                            "status": "ding_domain_error",
+                            "message": str(error),
+                        }
+                    )
+                boundary_moments = interval.moment_coefficients[muscle_index] * np.asarray(
+                    [state_at_pd0[1], state_at_maximum[1]]
+                )
+                lower_bounds[muscle_index] = float(np.min(boundary_moments))
+                upper_bounds[muscle_index] = float(np.max(boundary_moments))
+
+            reference = np.asarray(interval.target_moments)
+            required_total = float(np.sum(reference))
+            allocation = solve_bounded_moment_qp_reference(
+                reference,
+                required_total_moment=required_total,
+                lower_bounds=lower_bounds,
+                upper_bounds=upper_bounds,
+                options=allocation_options,
+                feasibility_tolerance=moment_tolerance,
+            )
+            if allocation.status != "ok":
+                return failed(
+                    {
+                        "cycle_index": cycle_index,
+                        "interval_index": interval_index,
+                        "status": allocation.status,
+                        "required_total_moment": required_total,
+                        "minimum_total_moment": float(np.sum(lower_bounds)),
+                        "maximum_total_moment": float(np.sum(upper_bounds)),
+                        "message": allocation.message,
+                    }
+                )
+
+            candidates = []
+            for muscle_index, muscle_parameters in enumerate(parameters):
+                result = solve_pulse_width_for_target_moment(
+                    current[muscle_index],
+                    target_moment=allocation.allocated_moments[muscle_index],
+                    moment_coefficient=interval.moment_coefficients[muscle_index],
+                    duration=interval.duration,
+                    calcium_amplitude=interval.calcium_amplitudes[muscle_index],
+                    mechanical_gain=interval.mechanical_gains[muscle_index],
+                    parameters=muscle_parameters,
+                    integration_substeps=integration_substeps,
+                    moment_tolerance=moment_tolerance,
+                )
+                evaluations += result.function_evaluations
+                if not result.feasible:
+                    return failed(
+                        {
+                            "cycle_index": cycle_index,
+                            "interval_index": interval_index,
+                            "muscle_index": muscle_index,
+                            "status": result.status.value,
+                            "message": result.message,
+                        }
+                    )
+                candidates.append(result)
+            for muscle_index, result in enumerate(candidates):
+                pulse_widths[cycle_index, muscle_index, interval_index] = result.pulse_width
+                allocated_moments[cycle_index, muscle_index, interval_index] = (
+                    allocation.allocated_moments[muscle_index]
+                )
+                achieved_moments[cycle_index, muscle_index, interval_index] = result.achieved_moment
+                current[muscle_index] = result.next_state
+            completed_intervals += 1
+            state_history[completed_intervals] = current
+
+    return TotalMomentReferenceRolloutResult(
+        status="complete",
+        requested_cycles=horizon_cycles,
+        completed_cycles=horizon_cycles,
+        completed_intervals=completed_intervals,
+        pulse_widths=pulse_widths,
+        allocated_moments=allocated_moments,
+        achieved_moments=achieved_moments,
+        state_history=state_history,
+        first_failure=None,
+        scalar_function_evaluations=evaluations,
     )

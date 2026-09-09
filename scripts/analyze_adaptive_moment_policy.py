@@ -22,6 +22,7 @@ import numpy as np
 
 from cocofest.optimization.adaptive_moment_rollout import (
     rollout_adaptive_moment_policy,
+    rollout_bounded_total_moment_reference_policy,
     rollout_fixed_pulse_width_policy,
 )
 from cocofest.optimization.rho_adaptive_moment_policy import (
@@ -49,12 +50,29 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--integration-substeps", type=int, default=8)
     parser.add_argument("--moment-tolerance", type=float, default=1e-4)
+    parser.add_argument(
+        "--allocation-mode",
+        choices=("total-moment", "individual-moments"),
+        default="total-moment",
+        help=(
+            "total-moment uses the hard-bounded offline QP validation oracle; "
+            "individual-moments retains every source muscle contribution."
+        ),
+    )
     parser.add_argument("--model-path", type=Path, default=None)
     return parser
 
 
 def _cycle_rmse(values: np.ndarray, targets: np.ndarray) -> list[float | None]:
     errors = values - targets[None, :, :]
+    return [
+        None if not np.any(np.isfinite(cycle)) else float(np.sqrt(np.nanmean(cycle**2)))
+        for cycle in errors
+    ]
+
+
+def _total_cycle_rmse(values: np.ndarray, targets: np.ndarray) -> list[float | None]:
+    errors = np.sum(values, axis=1) - np.sum(targets, axis=0)[None, :]
     return [
         None if not np.any(np.isfinite(cycle)) else float(np.sqrt(np.nanmean(cycle**2)))
         for cycle in errors
@@ -91,14 +109,14 @@ def _plot_pulse_widths(output: Path, names: tuple[str, ...], adaptive, source) -
 
 def _plot_tracking_error(output: Path, targets: np.ndarray, adaptive, fixed) -> None:
     adaptive_rmse = np.asarray(
-        [np.nan if value is None else value for value in _cycle_rmse(adaptive, targets)]
+        [np.nan if value is None else value for value in _total_cycle_rmse(adaptive, targets)]
     )
-    fixed_rmse = np.sqrt(np.mean((fixed - targets[None, :, :]) ** 2, axis=(1, 2)))
+    fixed_rmse = np.asarray(_total_cycle_rmse(fixed, targets), dtype=float)
     cycles = np.arange(1, fixed.shape[0] + 1)
     figure, axis = plt.subplots(figsize=(10, 4.5))
     axis.semilogy(cycles, np.maximum(adaptive_rmse, 1e-15), label="PW adaptatives")
     axis.semilogy(cycles, np.maximum(fixed_rmse, 1e-15), label="PW RHO répétées")
-    axis.set(xlabel="Cycle prédit", ylabel="RMSE du moment musculaire (N·m)")
+    axis.set(xlabel="Cycle prédit", ylabel="RMSE du moment musculaire total (N·m)")
     axis.grid(alpha=0.25, which="both")
     axis.legend()
     figure.tight_layout()
@@ -137,14 +155,26 @@ def main() -> int:
     )
 
     started = perf_counter()
-    adaptive = rollout_adaptive_moment_policy(
-        policy.initial_states,
-        intervals=policy.intervals,
-        parameters=policy.parameters,
-        horizon_cycles=arguments.cycles,
-        integration_substeps=arguments.integration_substeps,
-        moment_tolerance=arguments.moment_tolerance,
-    )
+    if arguments.allocation_mode == "total-moment":
+        adaptive = rollout_bounded_total_moment_reference_policy(
+            policy.initial_states,
+            intervals=policy.intervals,
+            parameters=policy.parameters,
+            horizon_cycles=arguments.cycles,
+            integration_substeps=arguments.integration_substeps,
+            moment_tolerance=arguments.moment_tolerance,
+        )
+        allocated_moments = adaptive.allocated_moments
+    else:
+        adaptive = rollout_adaptive_moment_policy(
+            policy.initial_states,
+            intervals=policy.intervals,
+            parameters=policy.parameters,
+            horizon_cycles=arguments.cycles,
+            integration_substeps=arguments.integration_substeps,
+            moment_tolerance=arguments.moment_tolerance,
+        )
+        allocated_moments = adaptive.achieved_moments
     adaptive_seconds = perf_counter() - started
     started = perf_counter()
     bounded_source_pulse_widths = policy.source_pulse_widths.copy()
@@ -172,8 +202,21 @@ def main() -> int:
     first_cycle_error_us = (adaptive.pulse_widths[0] - policy.source_pulse_widths) * 1e6
     finite_first_cycle = np.isfinite(first_cycle_error_us)
     report = {
-        "schema": "cocofest-adaptive-muscle-moment-policy-v1",
-        "method": "bounded_scalar_pw_inverse_full_ding_periodic_node",
+        "schema": "cocofest-adaptive-muscle-moment-policy-v2",
+        "method": (
+            "hard_bounded_total_moment_qp_validation_oracle"
+            if arguments.allocation_mode == "total-moment"
+            else "individual_moment_bounded_scalar_inverse"
+        ),
+        "allocation_mode": arguments.allocation_mode,
+        "qp_role": (
+            "offline_piecewise_differentiable_validation_oracle_not_embedded_in_objective"
+            if arguments.allocation_mode == "total-moment"
+            else None
+        ),
+        "production_objective_formulation": (
+            "outer_NLP_moment_variables_with_smooth_CasADi_cost_and_explicit_constraints"
+        ),
         "uses_fho_data": False,
         "clips_infeasible_pw": False,
         "fixed_baseline_source_bound_projection_count": int(
@@ -216,7 +259,16 @@ def main() -> int:
         "adaptive_moment_rmse_nm_by_cycle": _cycle_rmse(
             adaptive.achieved_moments, policy.target_moments
         ),
+        "adaptive_total_moment_rmse_nm_by_cycle": _total_cycle_rmse(
+            adaptive.achieved_moments, policy.target_moments
+        ),
+        "allocation_change_rmse_nm_by_cycle": _cycle_rmse(
+            allocated_moments, policy.target_moments
+        ),
         "fixed_pw_moment_rmse_nm_by_cycle": _cycle_rmse(
+            fixed.achieved_moments, policy.target_moments
+        ),
+        "fixed_pw_total_moment_rmse_nm_by_cycle": _total_cycle_rmse(
             fixed.achieved_moments, policy.target_moments
         ),
     }
@@ -231,6 +283,7 @@ def main() -> int:
         fixed_bounded_source_pulse_widths=bounded_source_pulse_widths,
         target_moments=policy.target_moments,
         adaptive_pulse_widths=adaptive.pulse_widths,
+        adaptive_allocated_moments=allocated_moments,
         adaptive_achieved_moments=adaptive.achieved_moments,
         adaptive_state_history=adaptive.state_history,
         fixed_pulse_widths=fixed.pulse_widths,
