@@ -353,6 +353,56 @@ def test_hsl_preflight_uses_static_symbol_inspection(tmp_path, monkeypatch):
     assert result["ma57_symbol"] == "ma57id_"
 
 
+def test_hsl_preflight_records_the_fortran_soname_without_loading_hsl(tmp_path, monkeypatch):
+    hsl = tmp_path / "libhsl.so"
+    hsl.write_bytes(b"hsl")
+
+    def completed(command, **kwargs):
+        if command[:2] == ["nm", "-D"]:
+            return SimpleNamespace(returncode=0, stdout="000 T ma57id_\n")
+        assert command[:2] == ["readelf", "-d"]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=(
+                " 0x0000000000000001 (NEEDED) Shared library: [liblapack.so.3]\n"
+                " 0x0000000000000001 (NEEDED) Shared library: [libgfortran.so.5]\n"
+            ),
+        )
+
+    monkeypatch.setattr(sweep.subprocess, "run", completed)
+
+    result = sweep.hsl_preflight(hsl)
+
+    assert result["dynamic_dependencies"] == {
+        "inspection_success": True,
+        "needed_libraries": ["libgfortran.so.5", "liblapack.so.3"],
+        "fortran_abi_majors_required": ["5"],
+        "warning": None,
+    }
+
+
+def test_runtime_probe_labels_a_metis_configuration_error_as_non_production_ready():
+    report = {
+        "functional_success": True,
+        "success": True,
+        "production_ready": True,
+        "production_readiness_reasons": [],
+        "abi_audit": {},
+    }
+
+    result = sweep._finalize_runtime_probe(
+        report,
+        "METIS_CTYPE_RM\nInput Error: Incorrect objective type.\n",
+    )
+
+    assert result["functional_success"] is True
+    assert result["production_ready"] is False
+    assert result["metis_runtime_error_markers"] == [
+        "input error: incorrect objective type"
+    ]
+    assert "metis_runtime_configuration_error" in result["production_readiness_reasons"]
+
+
 def test_runtime_probe_requires_a_successful_subprocess_report(tmp_path, monkeypatch):
     python = tmp_path / "python"
     hsl = tmp_path / "libhsl.so"

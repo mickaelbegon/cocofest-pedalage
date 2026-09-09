@@ -17,6 +17,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 import sys
@@ -141,6 +142,12 @@ def hsl_preflight(path: Path) -> dict:
         "loadable": None,
         "static_inspection_success": False,
         "ma57_symbol": None,
+        "dynamic_dependencies": {
+            "inspection_success": False,
+            "needed_libraries": [],
+            "fortran_abi_majors_required": [],
+            "warning": None,
+        },
         "error": None,
         "abi_scope": (
             "static dynamic-symbol inspection only; loading and solving happen "
@@ -167,6 +174,41 @@ def hsl_preflight(path: Path) -> dict:
         if any(line.split()[-1] == symbol for line in completed.stdout.splitlines() if line.split()):
             result["ma57_symbol"] = symbol
             break
+    # ``nm`` proves that MA57 is present but not which Fortran SONAME the
+    # selected artifact requires.  Inspecting the dynamic section is safe and
+    # makes an old libgfortran.so.4 dependency visible before the disposable
+    # process loads native code.  Do not turn a missing readelf into a false
+    # positive: the functional isolated probe remains mandatory.
+    try:
+        dynamic = subprocess.run(
+            ["readelf", "-d", str(path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=10.0,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        result["dynamic_dependencies"]["warning"] = (
+            f"{type(error).__name__}: {error}"
+        )
+        return result
+    if dynamic.returncode != 0:
+        result["dynamic_dependencies"]["warning"] = dynamic.stdout[-2000:]
+        return result
+    needed = sorted(set(re.findall(r"Shared library: \[([^\]]+)\]", dynamic.stdout)))
+    result["dynamic_dependencies"] = {
+        "inspection_success": True,
+        "needed_libraries": needed,
+        "fortran_abi_majors_required": sorted(
+            {
+                match.group(1)
+                for name in needed
+                if (match := re.search(r"libgfortran\.so\.(\d+)", name))
+            }
+        ),
+        "warning": None,
+    }
     return result
 
 
@@ -176,6 +218,12 @@ _CRITICAL_NATIVE_OUTPUT_MARKERS = (
     "undefined symbol",
     "segmentation fault",
     "fatal error",
+)
+
+_METIS_RUNTIME_ERROR_MARKERS = (
+    "input error: incorrect objective type",
+    "metis requested but not available",
+    "metis ordering requested but not linked",
 )
 
 
@@ -191,6 +239,12 @@ def _finalize_runtime_probe(report: dict, process_output: str) -> dict:
     reasons = list(report.get("production_readiness_reasons") or [])
     if native_errors:
         reasons.append("critical_native_runtime_output")
+    metis_errors = [
+        marker for marker in _METIS_RUNTIME_ERROR_MARKERS if marker in lowered
+    ]
+    report["metis_runtime_error_markers"] = metis_errors
+    if metis_errors:
+        reasons.append("metis_runtime_configuration_error")
     report["production_readiness_reasons"] = sorted(set(reasons))
     report["production_ready"] = bool(
         report.get("functional_success") is True
@@ -216,6 +270,7 @@ def stable_runtime_probe_identity(report: dict) -> dict:
         "production_ready": report.get("production_ready"),
         "production_readiness_reasons": report.get("production_readiness_reasons"),
         "native_runtime_error_markers": report.get("native_runtime_error_markers"),
+        "metis_runtime_error_markers": report.get("metis_runtime_error_markers"),
         "hsl_library": report.get("hsl_library"),
         "process_runtime": report.get("process_runtime"),
         "casadi": report.get("casadi"),

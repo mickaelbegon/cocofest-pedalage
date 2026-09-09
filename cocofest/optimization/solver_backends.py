@@ -147,6 +147,18 @@ def _runtime_abi_audit(report: dict[str, Any]) -> dict[str, Any]:
             if ".so." in name
         }
     )
+    # CasADi's IPOPT wheel carries its own ``libcoinmetis`` while a legacy
+    # CoinHSL can load an external ``libmetis`` at run time.  They export some
+    # of the same unversioned symbols.  Keep that fact in the probe evidence:
+    # it explains otherwise cryptic METIS diagnostics without claiming that a
+    # small MA57 solve necessarily exercised a conflicting METIS call.
+    metis_provider_names = sorted(
+        {
+            Path(record.get("resolved_path", "")).name
+            for record in libraries
+            if "metis" in Path(record.get("resolved_path", "")).name.lower()
+        }
+    )
     hsl_elf = (report.get("hsl_library") or {}).get("elf") or {}
     process = report.get("process_runtime") or {}
     class_matches = hsl_elf.get("class_bits") == process.get("pointer_bits")
@@ -157,6 +169,11 @@ def _runtime_abi_audit(report: dict[str, Any]) -> dict[str, Any]:
             "Multiple libgfortran ABI majors are mapped in the successful probe; "
             "rebuilding CoinHSL against the active environment remains recommended."
         )
+    if len(metis_provider_names) > 1:
+        warnings.append(
+            "Multiple METIS providers are mapped; a CoinHSL rebuild must not emit "
+            "a METIS runtime diagnostic in the isolated MA57 probe."
+        )
     if not class_matches or not endian_matches:
         warnings.append("The HSL ELF class or endianness differs from the Python process ABI.")
     return {
@@ -165,6 +182,8 @@ def _runtime_abi_audit(report: dict[str, Any]) -> dict[str, Any]:
         "loaded_fortran_runtime_names": fortran_names,
         "loaded_fortran_abi_majors": fortran_majors,
         "multiple_fortran_abi_majors": len(fortran_majors) > 1,
+        "loaded_metis_provider_names": metis_provider_names,
+        "multiple_metis_providers": len(metis_provider_names) > 1,
         "warnings": warnings,
     }
 

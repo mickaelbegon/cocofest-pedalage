@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import cocofest.optimization.solver_backends as solver_backends
 from cocofest.optimization.solver_backends import (
     MADNLP_QUIET_PRINT_LEVEL,
     SolverBackendUnavailable,
@@ -340,6 +341,26 @@ def test_actual_ma57_probe_submits_hsl_and_validates_the_solution(tmp_path, monk
     assert report["solution_error_inf"] == 0.0
     assert submitted["ipopt.linear_solver"] == "ma57"
     assert submitted["ipopt.hsllib"] == str(library)
+
+
+def test_runtime_abi_audit_exposes_multiple_metis_providers():
+    report = solver_backends._runtime_abi_audit(
+        {
+            "loaded_solver_libraries": [
+                {"resolved_path": "/env/lib/libcoinmetis.so.2"},
+                {"resolved_path": "/env/lib/libmetis.so"},
+            ],
+            "hsl_library": {"elf": {"class_bits": 64, "endianness": "little"}},
+            "process_runtime": {"pointer_bits": 64, "byteorder": "little"},
+        }
+    )
+
+    assert report["loaded_metis_provider_names"] == [
+        "libcoinmetis.so.2",
+        "libmetis.so",
+    ]
+    assert report["multiple_metis_providers"] is True
+    assert any("Multiple METIS providers" in warning for warning in report["warnings"])
 
 
 def test_hsl_diagnostics_report_missing_explicit_library(tmp_path):

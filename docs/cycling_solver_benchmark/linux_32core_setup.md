@@ -313,53 +313,79 @@ CoinHSL auprès de son détenteur de licence. Ne pas la télécharger depuis une
 source non vérifiée ni la versionner dans ce dépôt.
 
 Sur Ubuntu 26.04, construire CoinHSL avec le compilateur Fortran et les BLAS /
-LAPACK de l'environnement Conda cible est la solution recommandée. Installer
-une vieille `libhsl.so` précompilée peut échouer même si le fichier est présent :
-son `SONAME` peut réclamer, par exemple, `libgfortran.so.4`, alors que l'hôte et
-Conda ne fournissent que `.so.5`. **Ne jamais créer un lien symbolique de `.4`
-vers `.5`** : les ABI et les symboles versionnés ne sont pas interchangeables.
+LAPACK de **l'environnement Conda cible** est obligatoire pour une campagne de
+production. Une HSL précompilée historique qui déclare `libgfortran.so.4` ne
+peut pas devenir compatible avec un runtime `.so.5` par lien symbolique,
+`LD_PRELOAD`, ou copie latérale. **Ne jamais créer un lien `.4` vers `.5` et ne
+pas conserver deux ABI Fortran chargées dans le processus de calcul.**
 
-Après avoir construit ou obtenu une bibliothèque autorisée, l'installer dans
-le seul environnement qui exécute IPOPT/ACADOS, puis vérifier ses dépendances :
+Le dépôt ne contient ni les sources CoinHSL ni une chaîne de compilation C/Fortran. Le
+titulaire de la licence doit d'abord fournir les sources autorisées puis
+installer la chaîne C/Fortran dans le Conda qui exécutera IPOPT. Le contrôle
+suivant est volontairement sans effet de bord : il n'exécute ni téléchargement,
+ni `configure`, ni `make`, ni installation. Il échoue avant toute mutation si
+la source, le compilateur ou le runtime Conda cible manque.
 
 ```bash
 source .github/scripts/benchmark_env.sh rho32
-install -m 0644 /chemin/licencie/libhsl.so "$CONDA_PREFIX/lib/libhsl.so"
-
-ldd -r "$CONDA_PREFIX/lib/libhsl.so"
-readelf -d "$CONDA_PREFIX/lib/libhsl.so" | grep NEEDED
-readelf --version-info "$CONDA_PREFIX/lib/libhsl.so" | grep GFORTRAN_ | sort -u
+.github/scripts/prepare_coinhsl_conda_rebuild.sh /chemin/absolu/CoinHSL-licencie
 ```
 
-`ldd -r` ne doit signaler ni `not found` ni `undefined symbol`. Si une HSL
-historique impose un runtime Fortran absent, ne pas remplacer le runtime de
-l'environnement : reconstruire HSL est préférable. À titre transitoire et
-seulement si la licence et la provenance le permettent, ajouter le fichier
-versionné requis (par exemple `libgfortran.so.4.0.0` et son lien `.4`) à côté de
-la HSL, en préservant `libgfortran.so` et `.so.5` existants.
+Après ce contrôle, suivre la procédure de construction du fournisseur avec les
+valeurs `FC`, `F77`, `LDFLAGS` et `LIBS` affichées par le script. Construire une
+bibliothèque partagée contre le LAPACK/BLAS du même `$CONDA_PREFIX`; ne pas
+réutiliser des objets, un cache de configuration ou une bibliothèque issus d'un
+autre environnement. Les options exactes d'activation/désactivation de METIS
+dépendent de la distribution CoinHSL licenciée : si MA57 n'en a pas besoin,
+désactiver ce chemin optionnel; sinon, le construire contre l'API METIS exacte
+du Conda cible.
+
+Avant d'écraser la HSL installée, vérifier le candidat construit dans un chemin
+de staging. Il doit réclamer un unique SONAME Fortran correspondant au runtime
+actif (normalement `.so.5`) et ne doit avoir aucun symbole non résolu :
+
+```bash
+candidate=/chemin/absolu/staging/libhsl.so
+readelf -d "$candidate" | grep NEEDED
+readelf --version-info "$candidate" | grep GFORTRAN_ | sort -u
+ldd -r "$candidate"
+```
+
+`ldd -r` ne doit signaler ni `not found` ni `undefined symbol`; la sortie
+`NEEDED` ne doit pas contenir `libgfortran.so.4`. Installer ensuite le candidat
+autorisé dans **ce seul** environnement (action explicite de l'opérateur), puis
+valider le chargement réel dans un processus jetable :
+
+```bash
+install -m 0644 "$candidate" "$CONDA_PREFIX/lib/libhsl.so"
+python .github/scripts/probe_ipopt_ma57.py \
+  --hsl-library "$CONDA_PREFIX/lib/libhsl.so" \
+  --output /tmp/cocofest-ma57-probe.json
+python - <<'PY'
+import json
+
+report = json.load(open("/tmp/cocofest-ma57-probe.json"))
+assert report["functional_success"] is True, report
+assert report["production_ready"] is True, report
+assert report["abi_audit"]["loaded_fortran_abi_majors"] == ["5"], report
+print("IPOPT/MA57 production-ready probe passed")
+PY
+```
+
+Le probe journalise les bibliothèques effectivement mappées. Une ancienne HSL
+peut charger `libgfortran.so.4` pendant que CasADi/IPOPT charge `.so.5`; ce
+mélange explique le statut `multiple_libgfortran_abi_majors`. Sur cette pile,
+IPOPT apporte aussi `libcoinmetis` alors que HSL peut charger le `libmetis` du
+Conda. Le message `Input Error: Incorrect objective type` avec des paramètres
+METIS absurdes signale une incompatibilité de cette interface native, même si
+le petit solve aboutit. Le probe le classe explicitement
+`metis_runtime_configuration_error` et refuse `production_ready`; il faut
+reconstruire/configurer CoinHSL, jamais contourner le gate expérimental.
 
 Le script `benchmark_env.sh rho32` exporte automatiquement
 `IPOPT_HSL_LIBRARY=$CONDA_PREFIX/lib/libhsl.so` lorsqu'il existe; une variable
 déjà exportée reste prioritaire. Le pilote IDE détecte également ce même
-emplacement. Valider enfin MA57 par un solveur réel avant toute campagne :
-
-```bash
-python - <<'PY'
-import os
-import casadi as ca
-
-x = ca.MX.sym("x", 2)
-problem = {"x": x, "f": (x[0] - 1)**2 + (x[1] - 1)**2, "g": x[0] + x[1] - 2}
-solver = ca.nlpsol("ma57_probe", "ipopt", problem, {
-    "ipopt.linear_solver": "ma57", "ipopt.hsllib": os.environ["IPOPT_HSL_LIBRARY"],
-    "ipopt.print_level": 0, "print_time": 0,
-})
-result = solver(x0=[0, 0], lbg=0, ubg=0)
-assert solver.stats()["return_status"] == "Solve_Succeeded"
-assert max(abs(float(v) - 1) for v in result["x"].full().ravel()) < 1e-8
-print("IPOPT/MA57 probe passed")
-PY
-```
+emplacement.
 
 Ensuite, le smoke test fonctionnel est :
 
