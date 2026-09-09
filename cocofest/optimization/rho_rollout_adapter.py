@@ -1717,6 +1717,13 @@ def build_rho_endurance_rollout_report(
             midpoint_approximation_acceptable=adapted_policy_fidelity["passed"],
         ),
         "source": _file_stamp(source),
+        "source_ocp_context": {
+            "signed_crank_torque_nm": cycle.metadata.get(
+                "signed_crank_torque_nm", cycle.metadata.get("constant_crank_torque")
+            ),
+            "mechanical_formulation": cycle.metadata.get("mechanical_formulation"),
+            "formulation": cycle.metadata.get("formulation"),
+        },
         "reduced_profile": _file_stamp(reduced_profile),
         "selection": {
             "certified": cycle.certified,

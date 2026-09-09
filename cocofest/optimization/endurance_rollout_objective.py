@@ -9,9 +9,9 @@ with a different certified profile without rebuilding its graph.
 The objective is the normalized smooth maximum of recruitment utilization
 over future cycles, muscles and phase intervals.  It uses no muscle-specific
 weight and no FHO datum.  The function also returns every symbolic domain
-margin used by the rollout.  A future OCP integration must constrain these
-margins to be strictly positive; exposing them prevents an optimizer from
-silently exploiting negative recruitment or a singular denominator.
+margin used by the rollout. The OCP binding keeps closed physiological domains
+nonnegative and enforces a positive epsilon on strictly positive quantities;
+this permits rest and zero recruitment while excluding singular denominators.
 """
 
 from __future__ import annotations
@@ -39,6 +39,16 @@ _PROFILE_FIELDS = (
     "first_half_force_integral",
     "second_half_force_integral",
 )
+
+# Exact order emitted for each (cycle, interval, muscle) below. Closed Ding
+# domains include rest and zero recruitment; denominator domains are strict.
+ROLLOUT_DOMAIN_MARGIN_NAMES = (
+    "midpoint_A", "midpoint_rest_minus_A", "midpoint_Tau1_minus_rest", "midpoint_Km_minus_rest",
+    "midpoint_Tau1", "midpoint_Km_plus_Cn", "Cn", "mechanical_gain", "relaxation_time",
+    "required_recruitment", "maximum_recruitment", "endpoint_A", "endpoint_rest_minus_A",
+    "endpoint_Tau1_minus_rest", "endpoint_Km_minus_rest",
+)
+_STRICT_DOMAIN_MARGIN_INDICES = (0, 4, 5, 6, 7, 8, 10, 11)
 
 
 def _positive_integer(value: int, *, name: str) -> int:
@@ -104,6 +114,10 @@ class RolloutObjectiveLayout:
     def utilization_size(self) -> int:
         return self.horizon_cycles * self.field_size
 
+    @property
+    def domain_margin_size(self) -> int:
+        return len(ROLLOUT_DOMAIN_MARGIN_NAMES) * self.utilization_size
+
     def field_slice(self, name: str) -> slice:
         """Return the slice of a field in the flat, row-major parameter vector."""
 
@@ -123,6 +137,14 @@ class RolloutObjectiveExpressions:
     utilizations: Any
     final_slow_states: Any
     domain_margins: Any
+
+
+def rollout_domain_lower_bounds(layout: RolloutObjectiveLayout, epsilon: float) -> np.ndarray:
+    """Match every emitted margin: zero for closed domains, epsilon for strict ones."""
+    epsilon = _positive_finite(epsilon, name="domain_epsilon")
+    per_sample = np.zeros(len(ROLLOUT_DOMAIN_MARGIN_NAMES))
+    per_sample[list(_STRICT_DOMAIN_MARGIN_INDICES)] = epsilon
+    return np.tile(per_sample, layout.utilization_size)
 
 
 def _profile_matrix(values, *, name: str, layout: RolloutObjectiveLayout) -> np.ndarray:
@@ -373,6 +395,8 @@ def build_rollout_objective_expressions(
     )
     final_states = ca.vertcat(*current)
     domain_margin_vector = ca.vertcat(*domain_margins)
+    if domain_margin_vector.numel() != layout.domain_margin_size:
+        raise RuntimeError("The rollout domain-margin packing contract is inconsistent.")
     return RolloutObjectiveExpressions(
         smooth_maximum_utilization=smooth_maximum,
         utilizations=utilization_vector,

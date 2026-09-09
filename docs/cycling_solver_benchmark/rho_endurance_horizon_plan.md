@@ -186,13 +186,15 @@ initiales et terminales se déplacent entre RHO ; le second RHO pouvait alors
 rester primalement faisable tout en atteignant la limite d’itérations sur les
 conditions KKT. Le warm-start primal reste actif.
 
-Sur la machine de validation, `libhsl.so` dépend encore de `libgfortran.so.4`.
-Le runtime est chargé depuis le paquet Conda local `libgfortran4-7.5.0`; il doit
-être présent dans `LD_LIBRARY_PATH` avec le répertoire `lib` de l’environnement
-RHO. Ce montage est suffisant pour les essais reproductibles, mais une CoinHSL
-recompilée avec le compilateur Fortran courant est requise avant déploiement
-clinique afin de supprimer cette dépendance ancienne et l’avertissement ABI
-METIS de la bibliothèque HSL disponible.
+La bibliothèque historique de validation dépendait de `libgfortran.so.4` et
+restait limitée aux diagnostics. Elle est remplacée dans l'environnement
+`cocofest-rho32` par HSL v2025.7.21, installée sous le préfixe versionné
+`opt/libhsl`. Le probe IPOPT/MA57 contraint retourne `Solve_Succeeded`, ne
+charge que l'ABI Fortran 5, n'émet aucun diagnostic METIS et classe ce runtime
+`production_ready=true`. `benchmark_env.sh rho32` et les runners découvrent
+automatiquement cet unique chemin durable ; plusieurs versions exigent un
+choix explicite. Le chemin et le SHA-256 restent figés dans le contrat de
+campagne.
 
 L’ablation prospective utilisera deux états initiaux, deux charges fixées avant
 calcul, \(\lambda_R\in\{0,0.1,1\}\) et une sensibilité
@@ -336,22 +338,25 @@ anticipatif pour tous les cycles suivants : deux compilations par séance, puis
 aucune recompilation.
 
 La primitive `cocofest/optimization/endurance_rollout_objective.py` implémente
-désormais ce contrat sans encore modifier Bioptim. L’état lent initial est une
+ce contrat symbolique. L’état lent initial est une
 entrée symbolique et `F`, `F_dot`, `Cn`, les gains mécaniques, les décroissances
 et les intégrales de force sont regroupés dans un vecteur de paramètres de taille
 fixe. Un même `casadi.Function` accepte ainsi plusieurs profils, reproduit le
-rollout NumPy et génère du C sans reconstruction du graphe. Son raccordement au
-RHO demeure désactivé jusqu’à ce que le gate du cycle source soit franchi.
+rollout NumPy et génère du C sans reconstruction du graphe. Le raccordement
+structurel au RHO est maintenant disponible sous option expérimentale,
+désactivée par défaut, et exige que le gate du cycle source soit franchi.
 
 La carte exacte NumPy/CasADi est disponible dans
 `cocofest/optimization/ding_fatigue_rollout.py`. Une représentation de Fourier
 dans `cocofest/optimization/periodic_force_profile.py` rend explicites la
 périodicité et la dérivée du profil de force ; ses extrema continus et son audit
 rapportent toute oscillation négative sans la masquer par clipping. Pour les
-exports réels, `cocofest/optimization/rho_rollout_adapter.py` ajuste une série
-sur `sqrt(F)`, puis la met exactement au carré par convolution des coefficients.
-Le profil de force obtenu est non négatif par construction et sa dérivée reste
-analytique.
+exports réels, `cocofest/optimization/rho_rollout_adapter.py` conserve désormais
+par défaut le polynôme de collocation de chaque intervalle
+(`policy_representation=collocation`). Le mode Fourier reste une alternative
+explicite : il ajuste une série sur `sqrt(F)` puis la met au carré par
+convolution des coefficients. Chaque représentation possède sa dérivée et son
+audit de positivité continue ; aucun clipping n'est appliqué.
 
 Le CLI `scripts/analyze_rho_endurance_rollout.py` sélectionne explicitement le
 dernier cycle certifié, reconstruit les temps Radau déclarés, aligne `F`, `Cn`,
@@ -364,7 +369,7 @@ de rapport v2 :
   défaut) ;
 - le diagnostic local interpole le polynôme de collocation aux midpoints, qui
   ne sont pas des points contraints ;
-- le gate `adapted_policy_fidelity` évalue la politique Fourier effectivement
+- le gate `adapted_policy_fidelity` évalue la politique adaptée effectivement
   fournie au rollout : résidu de l’ODE (`10 N/s`), écart entre PW inférée et
   exportée sur les inversions finies (`10 us`) et couverture minimale de ces
   inversions (`90 %`).
@@ -375,9 +380,9 @@ transcription Radau. Les quatre seuils sont configurables dans le CLI. Un défau
 Radau excessif donne `rejected`; une approximation midpoint hors tolérance donne
 `midpoint_approximation_out_of_tolerance`.
 
-Sur l’export certifié IPOPT/MA57 Radau-5 de 150 RHO à `+0.10 N.m`, le fit positif
-passe les audits d’entrée (`RMSE` relative maximale `0.0350`, erreur relative
-maximale `0.1901`). Le défaut exact aux 600 stages vaut au plus
+Sur l’export certifié IPOPT/MA57 Radau-5 de 150 RHO à `+0.10 N.m`, le fit
+Fourier positif passe les audits d’entrée (`RMSE` relative maximale `0.0350`,
+erreur relative maximale `0.1901`). Le défaut exact aux 600 stages vaut au plus
 `7.57e-7 N/s`. Le diagnostic midpoint local passe : 111 inversions sur 120,
 soit `94.2 %`, un résidu maximal de `5.45 N/s` et un écart PW maximal de
 `6.70 us`. Cela explique correctement pourquoi les 9 inversions locales
@@ -386,6 +391,15 @@ réellement roulée ne passe pas : couverture `60 %`, résidu maximal
 `324.96 N/s` et écart PW maximal `32.75 us`. Son statut reste donc
 `midpoint_approximation_out_of_tolerance`; les horizons calculés ne sont pas
 validés scientifiquement tant que cette fidélité n’est pas améliorée.
+
+La représentation `collocation`, maintenant utilisée par défaut, passe ce même
+gate sans relâcher les seuils : couverture d'inversion finie `113/120`
+(`94.17 %`), résidu maximal `5.445 N/s`, écart PW maximal `6.705 us` et statut
+`complete`. Elle exporte `rollout_objective_profile` avec 1080 paramètres
+numériques fixes pour quatre muscles et 30 intervalles. Les sept inversions
+non finies restent explicites ; parmi les 113 inversions finies, deux dépassent
+la borne PW. Ce résultat valide la fidélité de représentation du cycle source,
+pas la prédiction prospective d'endurance.
 
 ### Niveaux 5 et 6 — Méthodes avancées
 
@@ -488,13 +502,31 @@ cycling_fes_solver_comparison.py
   -> CustomObjective
 ```
 
-Le coût terminal sera un `ObjectiveFcn.Mayer`, `Node.END`, scalaire et non
-quadratique. Les options et la méthode devront apparaître dans le JSON final et
-dans la signature de codegen.
+Le coût terminal est un `ObjectiveFcn.Mayer`, `Node.END`, scalaire et non
+quadratique ; les `domain_margins` ont des bornes composante par composante :
+zéro pour les domaines fermés (repos et recrutement nul admissibles), epsilon
+pour les quantités strictement positives et les dénominateurs. Les options et
+la méthode figurent dans le JSON final et la signature de codegen ; les caches
+de solutions incluent aussi l'empreinte des valeurs numériques et la provenance
+du rapport.
 
-Gate : objectif entièrement absent si son poids est nul et problème strictement
-identique au baseline ; une seule compilation sur
-un petit RHO multi-fenêtres ; mêmes paramètres pour tous les solveurs comparés.
+Le Bioptim épinglé substitue les `numerical_data_timeseries` comme constantes
+NLP, ce qui reconstruirait le graphe lors d'un changement de profil. Le
+prototype utilise donc un `ParameterList` à bornes inférieure et supérieure
+égales. Cela ajoute **1080 variables fixes** au vecteur NLP générique pour le
+profil réel ; seules leurs bornes et leur initialisation changent entre
+fenêtres. Ce surcoût dimensionnel n'est pas une amélioration de performance.
+
+Gate structurel vérifié : poids zéro sans objectif, contrainte ni paramètre
+supplémentaire, fonctions Bioptim identiques au baseline ; vrai petit RHO
+synthétique de deux fenêtres IPOPT/MUMPS avec compilation C, changement de
+profil, convergence des deux solves et `compiled_solver_build_count=1`.
+Les paramètres sont partagés entre tous les solveurs construits par le CLI,
+mais les autres backends ne sont pas validés par ce test. Le CLI conserve le
+profil initial figé ; la reconstruction/certification automatique après chaque
+RHO reste à réaliser. Aucun gain physiologique ou d'endurance n'est établi.
+Les détails et limites sont dans
+[`endurance_rollout_bioptim_binding.md`](endurance_rollout_bioptim_binding.md).
 
 ### Étape D — Validation scientifique prospective sans FHO
 

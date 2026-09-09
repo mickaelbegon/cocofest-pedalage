@@ -76,6 +76,11 @@ from cocofest.optimization.isokinetic_cycling import (
     audit_isokinetic_trajectory,
     inverse_load_torque,
 )
+from cocofest.optimization.endurance_rollout_ocp import (
+    add_endurance_rollout_cli,
+    endurance_rollout_signature_fields,
+    resolve_endurance_rollout_options,
+)
 from cocofest.optimization.muscle_reserve import (
     DEFAULT_SMOOTH_MIN_TEMPERATURE,
     capacity_reserve_metrics,
@@ -1155,6 +1160,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=DEFAULT_SMOOTH_MIN_TEMPERATURE,
         help="Dimensionless smooth-min temperature for the terminal reserve proxy.",
     )
+    add_endurance_rollout_cli(parser)
     parser.add_argument(
         "--control-regularization-weight",
         type=float,
@@ -3504,6 +3510,8 @@ def _scientific_ocp_source_stamps(repository_root: Path) -> list[dict]:
     relative_paths = (
         "cocofest/custom_objectives.py",
         "cocofest/optimization/muscle_reserve.py",
+        "cocofest/optimization/endurance_rollout_objective.py",
+        "cocofest/optimization/endurance_rollout_ocp.py",
         "cocofest/optimization/isokinetic_cycling.py",
         "cocofest/models/reduced_cycling_model.py",
         "cocofest/dynamics/reduced_cycling.py",
@@ -3569,6 +3577,9 @@ def _warmup_cacheable_conditions(simulation_conditions: dict) -> dict:
     # not by the standard full-mechanics IPOPT bridge. Besides being target
     # specific, it contains CasADi functions and is not JSON serializable.
     conditions.pop("reduced_cycling_dynamics", None)
+    rollout = conditions.pop("endurance_rollout_options", None)
+    if rollout is not None:
+        conditions["endurance_rollout"] = rollout.metadata()
     return conditions
 
 
@@ -4116,6 +4127,7 @@ def _common_initial_solution_metadata(args: argparse.Namespace) -> dict:
     )
     return {
         "schema": "cocofest-common-periodic-initial-solution-v3",
+        **endurance_rollout_signature_fields(args),
         "model_formulation": args.model_formulation,
         "mechanical_formulation": args.mechanical_formulation,
         "formulation": getattr(args, "formulation", "dynamic"),
@@ -4706,6 +4718,7 @@ def _continuation_cache_signature(args: argparse.Namespace) -> str:
     repository_root = Path(__file__).resolve().parents[3]
     payload = {
         "kind": "acados_one_cycle_continuation",
+        **endurance_rollout_signature_fields(args),
         "cache_version": 3,
         "nmpc_builder_version": 2,
         "model_formulation": args.model_formulation,
@@ -4810,6 +4823,7 @@ def _horizon_seed_cache_signature(args: argparse.Namespace) -> str:
     repository_root = Path(__file__).resolve().parents[3]
     payload = {
         "kind": "acados_horizon_seed",
+        **endurance_rollout_signature_fields(args),
         "cache_version": 5,
         "nmpc_builder_version": 2,
         "model_formulation": args.model_formulation,
@@ -4904,6 +4918,7 @@ def _horizon_seed_cache_path(args: argparse.Namespace) -> Path:
 def _codegen_signature(args: argparse.Namespace) -> str:
     repository_root = Path(__file__).resolve().parents[3]
     payload = {
+        **endurance_rollout_signature_fields(args, structure_only=True),
         # Increment when solve_case changes the generated OCP structure in a way that is
         # not represented by the arguments or the model sources below.
         "problem_builder_version": 2,
@@ -8743,6 +8758,9 @@ def attach_exact_initial_nlp_audits(summary: dict, nmpc) -> None:
     audits = getattr(getattr(nmpc, "ocp_solver", None), "initial_nlp_audits", None)
     if audits:
         summary["exact_initial_nlp_audits"] = deepcopy(audits)
+    rollout_binding = getattr(nmpc, "endurance_rollout_binding", None)
+    if rollout_binding is not None:
+        summary["endurance_rollout"] = rollout_binding.summary()
 
 
 def canonical_solution_kkt_audit(
@@ -9238,6 +9256,9 @@ class CompiledNlpReuseTracker:
         return digest.hexdigest()
 
     def record(self, nmpc, window: int) -> None:
+        rollout_binding = getattr(nmpc, "endurance_rollout_binding", None)
+        if rollout_binding is not None:
+            rollout_binding.observe_solver(nmpc)
         if not self.enabled:
             return
         interface = getattr(nmpc, "ocp_solver", None)
@@ -17344,6 +17365,11 @@ def _should_apply_transfer_phase_one(
 
 def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
     preparation_start = perf_counter()
+    args._endurance_rollout_options = resolve_endurance_rollout_options(args)
+    if args._endurance_rollout_options is not None:
+        # The historical multibody aggregate builder treats every parameter
+        # as a stimulation series. Compact output preserves fixed profiles.
+        args.compact_rho_output = True
     apply_assisted_hot_start_defaults(args)
     args.formulation = getattr(args, "formulation", "dynamic")
     if args.formulation not in ("dynamic", "isokinetic"):
@@ -18586,6 +18612,8 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         "objective_shape": args.objective_shape,
         "terminal_reserve_weight": args.terminal_reserve_weight,
         "terminal_reserve_temperature": args.terminal_reserve_temperature,
+        **({"endurance_rollout_options": args._endurance_rollout_options}
+           if args._endurance_rollout_options is not None else {}),
         "control_regularization_weight": args.control_regularization_weight,
         "control_regularization_target": args.control_regularization_target,
         "wheel_qdot_regularization_weight": args.wheel_qdot_regularization_weight,

@@ -17,6 +17,28 @@ from .optimization.muscle_reserve import (
 
 class CustomObjective:
     @staticmethod
+    def _terminal_rollout_outputs(controller: PenaltyController, binding):
+        from .optimization.endurance_rollout_ocp import ROLLOUT_PARAMETER_KEY
+
+        states = vertcat(*[
+            controller.states[f"{key}_{name}"].cx
+            for name in binding.options.profile.muscle_names
+            for key in ("A", "Tau1", "Km")
+        ])
+        profile = controller.parameters[ROLLOUT_PARAMETER_KEY].cx
+        return binding.function(states, profile)
+
+    @staticmethod
+    def minimize_terminal_endurance_rollout(controller: PenaltyController, binding):
+        """Scalar nonquadratic Mayer cost of the certified numerical policy."""
+        return CustomObjective._terminal_rollout_outputs(controller, binding)[0]
+
+    @staticmethod
+    def terminal_endurance_rollout_domain(controller: PenaltyController, binding):
+        """Margins in the binding's mixed closed/strict lower-bound order."""
+        return CustomObjective._terminal_rollout_outputs(controller, binding)[3]
+
+    @staticmethod
     def _muscle_names(controller: PenaltyController) -> list[str]:
         if hasattr(controller.model, "muscles_dynamics_model"):
             return [

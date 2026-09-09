@@ -36,6 +36,7 @@ import numpy as np
 from bioptim import SolutionMerge
 
 from cocofest.optimization.muscle_reserve import DEFAULT_SMOOTH_MIN_TEMPERATURE
+from cocofest.optimization.endurance_rollout_ocp import add_endurance_rollout_cli
 from cocofest.optimization.solver_backends import (
     effective_ipopt_options,
     file_provenance,
@@ -3551,6 +3552,7 @@ def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
                     result.get("parametric_kkt_prediction_audits") or []
                 ),
                 "compiled_nlp_reuse": result.get("compiled_nlp_reuse"),
+                "endurance_rollout": result.get("endurance_rollout"),
                 "acados_maxiter_retry_summaries": (
                     result.get("acados_maxiter_retry_summaries") or []
                 ),
@@ -3760,6 +3762,12 @@ def main(
     objective_shape: str = "quadratic",
     terminal_reserve_weight: float = 0.0,
     terminal_reserve_temperature: float = DEFAULT_SMOOTH_MIN_TEMPERATURE,
+    experimental_endurance_rollout: bool = False,
+    endurance_rollout_weight: float = 0.0,
+    endurance_rollout_profile: str | Path | None = None,
+    endurance_rollout_domain_epsilon: float = 1e-8,
+    endurance_rollout_horizon_cycles: int = 5,
+    endurance_rollout_temperature: float = 0.02,
     solvers: tuple[str, ...] = BENCHMARK_SOLVERS,
     single_shot: bool = False,
     cycles_per_window: int = 1,
@@ -4417,6 +4425,12 @@ def main(
     ipopt_args.rho_replay_checkpoint_output = rho_replay_checkpoint_output
     acados_args.rho_replay_checkpoint_output = rho_replay_checkpoint_output
     for solver_args in (ipopt_args, acados_args):
+        solver_args.experimental_endurance_rollout = experimental_endurance_rollout
+        solver_args.endurance_rollout_weight = endurance_rollout_weight
+        solver_args.endurance_rollout_profile = endurance_rollout_profile
+        solver_args.endurance_rollout_domain_epsilon = endurance_rollout_domain_epsilon
+        solver_args.endurance_rollout_horizon_cycles = endurance_rollout_horizon_cycles
+        solver_args.endurance_rollout_temperature = endurance_rollout_temperature
         solver_args.rho_prepared_checkpoint_output_template = (
             None
             if rho_prepared_checkpoint_output_template is None
@@ -5022,6 +5036,7 @@ def build_cli() -> argparse.ArgumentParser:
         default=DEFAULT_SMOOTH_MIN_TEMPERATURE,
         help="Dimensionless smooth-min temperature for terminal muscle reserve.",
     )
+    add_endurance_rollout_cli(parser)
     parser.add_argument("--cycles-per-window", type=int, default=1)
     parser.add_argument("--stimulations-per-cycle", type=int, default=30)
     parser.add_argument(
@@ -6592,6 +6607,12 @@ if __name__ == "__main__":
         objective_shape=args.objective_shape,
         terminal_reserve_weight=args.terminal_reserve_weight,
         terminal_reserve_temperature=args.terminal_reserve_temperature,
+        experimental_endurance_rollout=args.experimental_endurance_rollout,
+        endurance_rollout_weight=args.endurance_rollout_weight,
+        endurance_rollout_profile=args.endurance_rollout_profile,
+        endurance_rollout_domain_epsilon=args.endurance_rollout_domain_epsilon,
+        endurance_rollout_horizon_cycles=args.endurance_rollout_horizon_cycles,
+        endurance_rollout_temperature=args.endurance_rollout_temperature,
         cycles_per_window=args.cycles_per_window,
         stimulations_per_cycle=args.stimulations_per_cycle,
         n_windows=args.n_windows,

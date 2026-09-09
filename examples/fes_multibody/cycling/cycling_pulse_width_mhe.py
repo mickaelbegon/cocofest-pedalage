@@ -56,6 +56,9 @@ from cocofest.optimization.isokinetic_cycling import (
     validate_external_torque_effectiveness,
 )
 from cocofest.optimization.muscle_reserve import DEFAULT_SMOOTH_MIN_TEMPERATURE
+from cocofest.optimization.endurance_rollout_ocp import (
+    EnduranceRolloutBinding,
+)
 
 
 # ACADOS rejects infinite x bounds. This value is deliberately many orders of
@@ -1122,6 +1125,8 @@ def prepare_nmpc(
     terminal_reserve_temperature = simulation_conditions.get(
         "terminal_reserve_temperature", DEFAULT_SMOOTH_MIN_TEMPERATURE
     )
+    endurance_rollout_options = simulation_conditions.get("endurance_rollout_options")
+    rollout_binding = None
     control_regularization_weight = simulation_conditions.get(
         "control_regularization_weight", 0.0
     )
@@ -1377,6 +1382,15 @@ def prepare_nmpc(
     )
 
     # --- Set constraints --- #
+    if endurance_rollout_options is not None and endurance_rollout_options.weight > 0.0:
+        endurance_rollout_options.profile.validate_model(model, control_bounds=u_bounds)
+        rollout_binding = EnduranceRolloutBinding(endurance_rollout_options, use_sx=use_sx)
+        rollout_binding.validate_context(
+            cycle_period_s=cycle_duration,
+            signed_crank_torque_nm=constant_crank_torque,
+            mechanical_formulation=mechanical_formulation,
+            formulation=formulation,
+        )
     constraints = set_constraints(
         model,
         enforce_start_constraints=enforce_start_constraints,
@@ -1416,6 +1430,14 @@ def prepare_nmpc(
     )
 
     # --- Set objective --- #
+    if rollout_binding is not None:
+        constraints.add(
+            CustomObjective.terminal_endurance_rollout_domain,
+            node=Node.END,
+            binding=rollout_binding,
+            min_bound=rollout_binding.domain_lower_bounds,
+            max_bound=np.inf,
+        )
     objective_functions = set_objective_functions(
         model,
         minimize_force,
@@ -1430,6 +1452,7 @@ def prepare_nmpc(
         objective_shape=objective_shape,
         terminal_reserve_weight=terminal_reserve_weight,
         terminal_reserve_temperature=terminal_reserve_temperature,
+        endurance_rollout_binding=rollout_binding,
         control_regularization_weight=control_regularization_weight,
         control_regularization_target=control_regularization_target,
         wheel_qdot_regularization_weight=wheel_qdot_regularization_weight,
@@ -1484,7 +1507,12 @@ def prepare_nmpc(
     )
     if "ordering_strategy" in mhe_info:
         nmpc_options["ordering_strategy"] = mhe_info["ordering_strategy"]
+    if rollout_binding is not None:
+        nmpc_options.update(rollout_binding.parameter_options(use_sx=use_sx))
     nmpc = MyCyclicNMPC(**nmpc_options)
+    if rollout_binding is not None:
+        rollout_binding.attach(nmpc)
+        nmpc.endurance_rollout_binding = rollout_binding
     nmpc.isokinetic_config = isokinetic_config
     if isokinetic_config is not None:
         nmpc._isokinetic_energy_seed_fraction = (
@@ -2738,6 +2766,7 @@ def set_objective_functions(
     position_state_index: int = 2,
     velocity_state_key: str = "qdot",
     velocity_state_index: int = 2,
+    endurance_rollout_binding=None,
 ):
     try:
         terminal_reserve_weight = float(terminal_reserve_weight)
@@ -2756,6 +2785,15 @@ def set_objective_functions(
         raise ValueError("terminal_reserve_temperature must be finite and positive.")
 
     objective_functions = ObjectiveList()
+    if endurance_rollout_binding is not None and endurance_rollout_binding.options.weight > 0.0:
+        objective_functions.add(
+            CustomObjective.minimize_terminal_endurance_rollout,
+            custom_type=ObjectiveFcn.Mayer,
+            node=Node.END,
+            weight=10000.0 * endurance_rollout_binding.options.weight,
+            quadratic=False,
+            binding=endurance_rollout_binding,
+        )
     is_quadratic = objective_shape == "quadratic"
     # --- Set main cost function --- #
     if minimize_force:
