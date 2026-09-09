@@ -29,6 +29,11 @@ def test_isokinetic_cli_defaults_follow_the_documented_crank_convention():
     assert args.isokinetic_omega == pytest.approx(-2 * math.pi)
     assert args.load_torque_min == pytest.approx(-3.0)
     assert args.load_torque_max == pytest.approx(3.0)
+    assert args.acados_max_iter == 100
+    assert args.acados_stationarity_tolerance == pytest.approx(5e-3)
+    assert args.acados_control_homotopy_window_growth == pytest.approx(1.25)
+    assert args.acados_control_homotopy_window_max_radius == pytest.approx(1e-5)
+    assert not args.acados_release_control_homotopy
 
 
 def test_default_worker_threads_respects_the_process_affinity():
@@ -51,6 +56,10 @@ def test_default_worker_threads_respects_the_process_affinity():
         ["--load-torque-min", "0", "--load-torque-max", "1"],
         ["--load-torque-min", "-1", "--load-torque-max", "0"],
         ["--energy-equivalent-torque", "2", "--load-torque-max", "1"],
+        ["--acados-max-iter", "0"],
+        ["--acados-stationarity-tolerance", "0"],
+        ["--acados-control-homotopy-window-growth", "0.99"],
+        ["--acados-control-homotopy-window-max-radius", "0"],
     ),
 )
 def test_isokinetic_cli_rejects_nonphysical_numeric_values(arguments):
@@ -68,6 +77,10 @@ def test_isokinetic_environment_and_all_backend_commands_share_the_same_options(
             "--load-torque-min", "-0.8",
             "--load-torque-max", "0.9",
             "--ipopt-hsl-library", str(tmp_path / "libhsl.so"),
+            "--acados-max-iter", "200",
+            "--acados-stationarity-tolerance", "1e-5",
+            "--acados-control-homotopy-window-growth", "1.1",
+            "--acados-control-homotopy-window-max-radius", "1e-5",
             "--output-root", str(tmp_path / "results"),
         ]
     )
@@ -118,6 +131,16 @@ def test_isokinetic_environment_and_all_backend_commands_share_the_same_options(
     assert acados_command[
         acados_command.index("--acados-search-direction-mode") + 1
     ] == "BYRD_OMOJOKUN"
+    assert acados_command[acados_command.index("--acados-max-iter") + 1] == "200"
+    assert acados_command[
+        acados_command.index("--acados-stationarity-tolerance") + 1
+    ] == "1e-05"
+    assert acados_command[
+        acados_command.index("--acados-control-homotopy-window-growth") + 1
+    ] == "1.1"
+    assert acados_command[
+        acados_command.index("--acados-control-homotopy-window-max-radius") + 1
+    ] == "1e-05"
     assert "--acados-control-homotopy-release-final-radius" not in acados_command
     assert "--periodic-ipopt-refinement-each-window" not in acados_command
     assert "--acados-transfer-irk-rollout" not in acados_command

@@ -86,6 +86,15 @@ def nonnegative_finite_float(value: str) -> float:
     return parsed
 
 
+def positive_finite_float(value: str) -> float:
+    """Parse a strictly positive finite tuning parameter."""
+
+    parsed = finite_float(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be strictly positive")
+    return parsed
+
+
 def negative_finite_float(value: str) -> float:
     """Parse the crank convention's strictly negative isokinetic speed."""
 
@@ -569,7 +578,7 @@ def build_command(case: Case, prefix: Path, args: argparse.Namespace) -> tuple[l
         "--experimental-reduced-acados",
         "--acados-dir", str(prefix),
         "--acados-check-reuse-possible",
-        "--acados-max-iter", "100",
+        "--acados-max-iter", str(args.acados_max_iter),
         "--acados-nlp-solver-type",
         (
             "SQP_WITH_FEASIBLE_QP"
@@ -586,14 +595,35 @@ def build_command(case: Case, prefix: Path, args: argparse.Namespace) -> tuple[l
         "--acados-sim-stages", "4",
         "--acados-sim-steps", "5",
         "--acados-newton-iter", "5",
-        "--acados-stationarity-tolerance", "5e-3",
+        "--acados-stationarity-tolerance", str(args.acados_stationarity_tolerance),
         # IPOPT is a conditional recovery backend, not a per-window warm-start
         # producer. The direct cyclic shift preserves the isokinetic energy
         # accumulator; the generic IRK transfer currently does not.
         "--acados-ipopt-recovery",
         *(
             ["--acados-control-homotopy-release-final-radius"]
-            if args.formulation == "dynamic"
+            if args.formulation == "dynamic" or args.acados_release_control_homotopy
+            else []
+        ),
+        # The isokinetic seed starts inside a +/-0.1 us PW box. Growing that
+        # box preserves the robust early transfer while avoiding a permanently
+        # constrained local strategy over long RHO campaigns.
+        *(
+            [
+                "--acados-control-homotopy-window-growth",
+                str(args.acados_control_homotopy_window_growth),
+            ]
+            if args.formulation == "isokinetic"
+            and args.acados_control_homotopy_window_growth != 1.0
+            else []
+        ),
+        *(
+            [
+                "--acados-control-homotopy-window-max-radius",
+                str(args.acados_control_homotopy_window_max_radius),
+            ]
+            if args.formulation == "isokinetic"
+            and args.acados_control_homotopy_window_max_radius is not None
             else []
         ),
         *(
@@ -860,6 +890,39 @@ def parse_arguments(argv: list[str] | None) -> argparse.Namespace:
         help="finite upper bound on isokinetic load torque (default: 3)",
     )
     parser.add_argument("--max-iter", type=int, default=2000)
+    parser.add_argument(
+        "--acados-max-iter",
+        type=int,
+        default=100,
+        help="maximum SQP iterations per Acados RHO (default: 100)",
+    )
+    parser.add_argument(
+        "--acados-stationarity-tolerance",
+        type=positive_finite_float,
+        default=5e-3,
+        help="Acados stationarity tolerance (default: 5e-3)",
+    )
+    parser.add_argument(
+        "--acados-control-homotopy-window-growth",
+        type=positive_finite_float,
+        default=1.25,
+        help=(
+            "multiplicative growth of the retained PW radius after each RHO "
+            "(default: 1.25)"
+        ),
+    )
+    parser.add_argument(
+        "--acados-control-homotopy-window-max-radius",
+        type=positive_finite_float,
+        default=1e-5,
+        metavar="SECONDS",
+        help="cap for the progressively relaxed PW radius (default: 1e-5 s)",
+    )
+    parser.add_argument(
+        "--acados-release-control-homotopy",
+        action="store_true",
+        help="release the retained PW radius completely after initial homotopy",
+    )
     parser.add_argument("--output-root", default="local-results")
     parser.add_argument("--summary-dir", default="local-summary")
     parser.add_argument("--verbose", action="store_true",
@@ -898,6 +961,12 @@ def parse_arguments(argv: list[str] | None) -> argparse.Namespace:
     if args.energy_equivalent_torque > args.load_torque_max:
         parser.error(
             "--energy-equivalent-torque cannot exceed --load-torque-max"
+        )
+    if args.acados_max_iter <= 0:
+        parser.error("--acados-max-iter must be strictly positive")
+    if args.acados_control_homotopy_window_growth < 1.0:
+        parser.error(
+            "--acados-control-homotopy-window-growth must be greater than or equal to one"
         )
     return args
 
