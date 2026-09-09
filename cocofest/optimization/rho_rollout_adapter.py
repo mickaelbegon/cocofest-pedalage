@@ -2,13 +2,13 @@ r"""Auditable adapter from a certified RHO NPZ export to endurance rollouts.
 
 The adapter understands the collocation-node layout written by the cycling RHO
 benchmark.  It selects the final certified cycle from metadata, reconstructs
-the actual Radau sample times, fits explicit periodic Fourier representations
+the actual Radau sample times, retains the local collocation polynomials
 of ``F`` and ``Cn``, and evaluates reduced muscle geometry at interval
 midpoints.  It never treats the dense collocation columns as uniformly spaced.
 
 The periodic-policy assumption is a scientific gate.  A source without
 certification metadata, an invalid crank winding, non-periodic ``omega``, ``F``
-or ``Cn``, excessive Fourier residual, or negative reconstructed force produces
+or ``Cn``, excessive representation residual, or negative reconstructed force produces
 a rejected report with measured reasons.  The source transcription is checked
 where Radau actually enforces the ODE.  Midpoint inversion is reported as a
 separate approximation-quality diagnostic because midpoint states are not NLP
@@ -39,6 +39,7 @@ from cocofest.optimization.endurance_rollout import (
     rollout_periodic_ding_endurance,
 )
 from cocofest.optimization.periodic_force_profile import PeriodicFourierForceProfile
+from cocofest.optimization.periodic_collocation_profile import PeriodicCollocationProfile
 from cocofest.optimization.recruitment_margin import ding_recruitment_margin
 
 
@@ -423,7 +424,7 @@ def _fourier_audit(
     maximum = np.max(np.abs(error), axis=1)
     return (
         {
-            "harmonic_count": profile.harmonic_count,
+            "harmonic_count": getattr(profile, "harmonic_count", None),
             "sample_count": int(times.size),
             "rmse": rmse.tolist(),
             "relative_rmse": (rmse / scales).tolist(),
@@ -528,6 +529,16 @@ def _collocation_nodes(cycle: SelectedRhoCycle) -> np.ndarray:
             f"of degree {cycle.collocation_degree}."
         ) from error
     return np.concatenate(([0.0], stages))
+
+
+def _collocation_profile(cycle: SelectedRhoCycle, state_names: Sequence[str]) -> PeriodicCollocationProfile:
+    """Retain each interval's actual shooting/stage polynomial without projection."""
+    nodes = _collocation_nodes(cycle)
+    columns = (cycle.start_column
+        + np.arange(cycle.stimulations_per_cycle)[:, None] * cycle.state_columns_per_interval
+        + np.arange(nodes.size)[None, :])
+    values = np.stack([cycle.states[name][columns] for name in state_names])
+    return PeriodicCollocationProfile.from_samples(period=cycle.period, nodes=nodes, values=values)
 
 
 def _state_midpoints_and_derivatives_from_collocation(
@@ -1214,6 +1225,7 @@ def build_rho_endurance_rollout_report(
     horizons: Sequence[int] = DEFAULT_HORIZONS,
     source_cycle_index: int | None = None,
     cycle_period: float | None = None,
+    policy_representation: str = "collocation",
     force_harmonics: int = DEFAULT_FORCE_HARMONICS,
     cn_harmonics: int | None = None,
     kinematic_harmonics: int = DEFAULT_FORCE_HARMONICS,
@@ -1244,6 +1256,8 @@ def build_rho_endurance_rollout_report(
 
     source = Path(source)
     reduced_profile = Path(reduced_profile)
+    if policy_representation not in {"collocation", "fourier"}:
+        raise ValueError("policy_representation must be 'collocation' or 'fourier'.")
     horizons = tuple(_positive_integer(value, name="horizon") for value in horizons)
     if not horizons:
         raise ValueError("At least one rollout horizon is required.")
@@ -1355,18 +1369,17 @@ def build_rho_endurance_rollout_report(
                 relative_tolerance=thresholds["periodicity_relative"],
             )
 
-    force_profile = fit_nonnegative_periodic_fourier_force_profile(
-        force_samples,
-        cycle.sample_times,
-        period=cycle.period,
-        root_harmonic_count=force_harmonics,
-    )
-    cn_profile = _fit_periodic_at_times(
-        cn_samples,
-        cycle.sample_times,
-        period=cycle.period,
-        harmonic_count=cn_harmonics,
-    )
+    if policy_representation == "collocation":
+        force_profile = _collocation_profile(cycle, [f"F_{name}" for name in muscle_names])
+        cn_profile = _collocation_profile(cycle, [f"Cn_{name}" for name in muscle_names])
+    else:
+        force_profile = fit_nonnegative_periodic_fourier_force_profile(
+            force_samples, cycle.sample_times, period=cycle.period,
+            root_harmonic_count=force_harmonics,
+        )
+        cn_profile = _fit_periodic_at_times(
+            cn_samples, cycle.sample_times, period=cycle.period, harmonic_count=cn_harmonics,
+        )
     dense_count = max(10 * sample_count, 1000)
     force_fourier_audit, dense_force = _fourier_audit(
         force_profile,
@@ -1376,9 +1389,10 @@ def build_rho_endurance_rollout_report(
     )
     force_fourier_audit.update(
         {
-            "fit_space": "sqrt_force",
-            "root_harmonic_count": force_harmonics,
-            "nonnegative_construction": "exact_complex_fourier_convolution_of_squared_root_series",
+            "fit_space": "source_collocation_values" if policy_representation == "collocation" else "sqrt_force",
+            "root_harmonic_count": force_harmonics if policy_representation == "fourier" else None,
+            "nonnegative_construction": ("unmodified_polynomial_extrema_audit"
+                if policy_representation == "collocation" else "exact_complex_fourier_convolution_of_squared_root_series"),
             "clipping_applied": False,
         }
     )
@@ -1393,32 +1407,60 @@ def build_rho_endurance_rollout_report(
         maximum_error = max(audit["relative_maximum_absolute_error"])
         if maximum_rmse > thresholds["fourier_relative_rmse"]:
             reject(
-                f"{kind}_fourier_rmse_too_large",
-                f"{kind} Fourier relative RMSE exceeds tolerance.",
+                f"{kind}_{policy_representation}_rmse_too_large",
+                f"{kind} {policy_representation} relative RMSE exceeds tolerance.",
                 maximum_relative_rmse=maximum_rmse,
                 tolerance=thresholds["fourier_relative_rmse"],
             )
         if maximum_error > thresholds["fourier_relative_maximum"]:
             reject(
-                f"{kind}_fourier_maximum_error_too_large",
-                f"{kind} Fourier maximum relative error exceeds tolerance.",
+                f"{kind}_{policy_representation}_maximum_error_too_large",
+                f"{kind} {policy_representation} maximum relative error exceeds tolerance.",
                 maximum_relative_error=maximum_error,
                 tolerance=thresholds["fourier_relative_maximum"],
             )
     minimum_dense_force = float(np.min(dense_force))
     if minimum_dense_force < -thresholds["negative_force_tolerance_n"]:
         reject(
-            "negative_fourier_force",
-            "The direct Fourier force reconstruction is negative; no clipping is permitted.",
+            f"negative_{policy_representation}_force",
+            "The force reconstruction is negative; no clipping is permitted.",
             minimum_reconstructed_force_n=minimum_dense_force,
             tolerance_n=thresholds["negative_force_tolerance_n"],
         )
     if float(np.min(dense_cn)) <= 0.0:
         reject(
-            "non_positive_fourier_cn",
-            "The Fourier Cn reconstruction leaves the positive activation domain.",
+            f"non_positive_{policy_representation}_cn",
+            "The Cn reconstruction leaves the positive activation domain.",
             minimum_reconstructed_cn=float(np.min(dense_cn)),
         )
+    positivity = force_profile.force_positivity_certificate(tolerance=thresholds["negative_force_tolerance_n"])
+    force_fourier_audit["continuous_extrema"] = {
+        "minimum": positivity.minimum_force.tolist(),
+        "minimum_time_s": positivity.minimum_time.tolist(),
+        "certified_nonnegative": positivity.certified_nonnegative.tolist(),
+        "tolerance_n": positivity.tolerance,
+        "certification_semantics": "numerical_extrema_audit_not_interval_arithmetic_proof",
+        "method": ("recursive_derivative_root_isolation_on_each_closed_polynomial_interval"
+            if policy_representation == "collocation" else "stationary_points_of_trigonometric_polynomial"),
+    }
+    if not np.all(positivity.certified_nonnegative):
+        reject("negative_continuous_force", "The continuous force interpolant is not nonnegative.",
+            minimum_force_n=float(np.min(positivity.minimum_force)))
+    if policy_representation == "collocation":
+        for kind, profile, audit, samples, tolerance in (
+            ("force", force_profile, force_fourier_audit, force_samples, thresholds["force_seam_absolute_n"]),
+            ("cn", cn_profile, cn_fourier_audit, cn_samples, thresholds["cn_seam_absolute"]),
+        ):
+            audit["seams"] = profile.seam_audit()
+            jumps = np.asarray(audit["seams"]["maximum_absolute_value_jump"])
+            if np.any((jumps > tolerance) & (jumps / _signal_scales(samples) > thresholds["periodicity_relative"])):
+                reject(f"discontinuous_{kind}_collocation_policy", "Polynomial value jumps exceed declared seam tolerances.",
+                    maximum_absolute_jump=float(np.max(jumps)))
+        cn_minima = cn_profile.force_positivity_certificate(tolerance=0.0).minimum_force
+        cn_fourier_audit["continuous_minimum"] = cn_minima.tolist()
+        if np.any(cn_minima <= 0.0):
+            reject("non_positive_continuous_cn", "The continuous Cn interpolant leaves the positive domain.",
+                minimum_cn=float(np.min(cn_minima)))
 
     theta = cycle.states.get("theta")
     omega = cycle.states.get("omega")
@@ -1430,18 +1472,20 @@ def build_rho_endurance_rollout_report(
     expected_shift = direction * 2.0 * math.pi
     normalized_time = cycle.sample_times / cycle.period
     theta_residual_samples = theta_samples - expected_shift * normalized_time[None, :]
-    theta_residual_profile = _fit_periodic_at_times(
-        theta_residual_samples,
-        cycle.sample_times,
-        period=cycle.period,
-        harmonic_count=kinematic_harmonics,
-    )
-    omega_profile = _fit_periodic_at_times(
-        omega_samples,
-        cycle.sample_times,
-        period=cycle.period,
-        harmonic_count=kinematic_harmonics,
-    )
+    if policy_representation == "collocation":
+        theta_profile = _collocation_profile(cycle, ("theta",))
+        residual_coefficients = theta_profile.coefficients.copy()
+        residual_coefficients[:, :, 0] -= expected_shift * np.arange(cycle.stimulations_per_cycle) / cycle.stimulations_per_cycle
+        residual_coefficients[:, :, 1] -= expected_shift / cycle.stimulations_per_cycle
+        theta_residual_profile = PeriodicCollocationProfile(cycle.period, residual_coefficients)
+        omega_profile = _collocation_profile(cycle, ("omega",))
+    else:
+        theta_residual_profile = _fit_periodic_at_times(
+            theta_residual_samples, cycle.sample_times, period=cycle.period, harmonic_count=kinematic_harmonics,
+        )
+        omega_profile = _fit_periodic_at_times(
+            omega_samples, cycle.sample_times, period=cycle.period, harmonic_count=kinematic_harmonics,
+        )
     theta_shift = float(theta[cycle.end_column] - theta[cycle.start_column])
     theta_winding_error = theta_shift - expected_shift
     theta_tolerance = max(
@@ -1650,6 +1694,22 @@ def build_rho_endurance_rollout_report(
         "passed": None,
         "reason": "input_adaptation_rejected",
     }
+    reconstruction_errors = {
+        name: {
+            "maximum_absolute_error": float(np.max(np.abs(actual - reference))),
+            "rmse": float(np.sqrt(np.mean((actual - reference) ** 2))),
+        }
+        for name, actual, reference in (
+            ("force_n", force_midpoints, source_force_midpoints),
+            ("force_derivative_n_per_s", force_derivative_midpoints, source_force_derivative_midpoints),
+            ("cn", cn_midpoints, source_cn_midpoints),
+            ("theta_rad", theta_midpoints, source_theta_midpoints),
+            ("omega_rad_per_s", omega_midpoints, source_omega_midpoints),
+            ("force_length", force_length, source_force_length),
+            ("force_velocity", force_velocity, source_force_velocity),
+            ("passive_force", passive_force, source_passive_force),
+        )
+    }
     report = {
         "schema": REPORT_SCHEMA,
         "status": adapter_completion_status(
@@ -1673,20 +1733,30 @@ def build_rho_endurance_rollout_report(
         },
         "configuration": {
             "horizons": list(horizons),
-            "force_sqrt_harmonics": force_harmonics,
-            "force_resulting_harmonics": force_profile.harmonic_count,
-            "cn_harmonics": cn_harmonics,
-            "kinematic_harmonics": kinematic_harmonics,
+            "policy_representation": policy_representation,
+            "force_sqrt_harmonics": force_harmonics if policy_representation == "fourier" else None,
+            "force_resulting_harmonics": getattr(force_profile, "harmonic_count", None),
+            "cn_harmonics": cn_harmonics if policy_representation == "fourier" else None,
+            "kinematic_harmonics": kinematic_harmonics if policy_representation == "fourier" else None,
+            "force_polynomial_coefficient_shape": (list(force_profile.coefficients.shape)
+                if policy_representation == "collocation" else None),
             "thresholds": thresholds,
             "saturation_utilization_threshold": saturation_utilization_threshold,
         },
         "muscle_names": list(muscle_names),
         "model_parameters": parameter_report,
         "audits": {
+            "policy_vs_source_collocation_midpoints": {
+                "role": "representation_fidelity_diagnostic; independent_Ding_ODE_gate_also_required",
+                "clipping_applied": False,
+                "errors": reconstruction_errors,
+            },
             "force_endpoint_periodicity": force_endpoint_audit,
             "cn_endpoint_periodicity": cn_endpoint_audit,
-            "force_fourier": force_fourier_audit,
-            "cn_fourier": cn_fourier_audit,
+            "force_policy": force_fourier_audit,
+            "cn_policy": cn_fourier_audit,
+            **({"force_fourier": force_fourier_audit, "cn_fourier": cn_fourier_audit}
+                if policy_representation == "fourier" else {}),
             "theta_winding": {
                 "observed_shift_rad": theta_shift,
                 "expected_shift_rad": expected_shift,
@@ -1694,6 +1764,9 @@ def build_rho_endurance_rollout_report(
                 "tolerance_rad": theta_tolerance,
             },
             "omega_endpoint_periodicity": omega_endpoint_audit,
+            **({"theta_residual_polynomial_seams": theta_residual_profile.seam_audit(),
+                "omega_polynomial_seams": omega_profile.seam_audit()}
+                if policy_representation == "collocation" else {}),
             "theta_dot_vs_omega_midpoints": {
                 "maximum_absolute_error_rad_s": maximum_kinematic_error,
                 "rmse_rad_s": float(np.sqrt(np.mean(theta_omega_error**2))),
@@ -1708,16 +1781,16 @@ def build_rho_endurance_rollout_report(
             "midpoint_alignment": {
                 "policy": "shared_equal_stimulation_interval_midpoints",
                 "times_s": midpoint_times.tolist(),
-                "force_source": "direct_periodic_fourier_evaluation",
-                "cn_source": "direct_periodic_fourier_evaluation",
-                "theta_source": "linear_winding_plus_periodic_fourier_residual",
-                "omega_source": "periodic_fourier_evaluation",
+                "force_source": f"direct_periodic_{policy_representation}_evaluation",
+                "cn_source": f"direct_periodic_{policy_representation}_evaluation",
+                "theta_source": f"linear_winding_plus_periodic_{policy_representation}_residual",
+                "omega_source": f"periodic_{policy_representation}_evaluation",
                 "muscle_relationship_source": "ReducedCyclingDynamics.muscle_relationships(theta,omega)",
                 "source_slow_state_source": (
                     "degree-specific_piecewise_collocation_polynomial_at_shared_midpoints"
                 ),
                 "reference_policy_source": (
-                    "adapted_periodic_Fourier_F,F_dot,Cn_and_geometry; "
+                    f"adapted_periodic_{policy_representation}_F,F_dot,Cn_and_geometry; "
                     "source_A,Tau1,Km_from_local_collocation_polynomials"
                 ),
                 "all_array_shapes": list(expected_midpoint_shape),
@@ -1744,6 +1817,7 @@ def build_rho_endurance_rollout_report(
         },
         "rejection_reasons": reasons,
         "horizons": [],
+        "rollout_outcome": {"status": "not_evaluated", "reason": "input_adaptation_rejected"},
     }
     if reasons:
         return report
@@ -1799,7 +1873,7 @@ def build_rho_endurance_rollout_report(
         midpoint_inverse_coverage_minimum=thresholds[
             "midpoint_inverse_coverage_minimum"
         ],
-        policy_source="periodic_Fourier_policy_used_by_endurance_rollout",
+        policy_source=f"periodic_{policy_representation}_policy_used_by_endurance_rollout",
         used_for_global_acceptance=True,
     )
     report["adapted_policy_fidelity"] = adapted_policy_fidelity
@@ -1816,6 +1890,25 @@ def build_rho_endurance_rollout_report(
         force_velocity_relationship=force_velocity,
         passive_force_relationship=passive_force,
     )
+    if adapted_policy_fidelity["passed"]:
+        from cocofest.optimization.endurance_rollout_objective import (
+            RolloutObjectiveLayout, pack_rollout_objective_parameters,
+        )
+
+        layout = RolloutObjectiveLayout(len(muscle_names), cycle.stimulations_per_cycle, horizons[0])
+        packed = pack_rollout_objective_parameters(recruitment_profile, parameters, layout)
+        report["rollout_objective_profile"] = {
+            "schema": "cocofest-rollout-objective-profile-v1",
+            "muscle_count": layout.muscle_count,
+            "interval_count": layout.interval_count,
+            "parameter_size": layout.parameter_size,
+            "packing": "pack_rollout_objective_parameters; field-major then muscle-major C order",
+            "parameters": packed.tolist(),
+            "initial_slow_states": initial_slow_states.tolist(),
+            "source_policy_gate_passed": True,
+            "certification_scope": "source_cycle_representation_fidelity_only; future_feasibility_not_certified",
+            "horizon_independent": True,
+        }
     report["horizons"] = [
         _horizon_payload(
             rollout_periodic_ding_endurance(
@@ -1831,6 +1924,13 @@ def build_rho_endurance_rollout_report(
         )
         for horizon in horizons
     ]
+    all_feasible = all(row["feasible"] for row in report["horizons"])
+    report["rollout_outcome"] = {
+        "status": "feasible" if all_feasible else "infeasible",
+        "all_requested_horizons_feasible": all_feasible,
+        "first_failure": next((row["first_failure"] for row in report["horizons"] if row["first_failure"]), None),
+        "interpretation": "frozen_policy_model_outcome; distinct_from_source_fidelity_and_clinical_endurance",
+    }
     return report
 
 

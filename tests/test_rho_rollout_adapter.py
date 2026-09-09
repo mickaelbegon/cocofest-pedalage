@@ -105,6 +105,7 @@ def _write_archive(path, *, certified=True, break_periodicity=False, force_scale
 
 
 def _build(source, reduced_profile, **kwargs):
+    kwargs.setdefault("policy_representation", "fourier")
     kwargs.setdefault("collocation_force_ode_tolerance_n_per_s", 1e6)
     # The synthetic fixture is not a discretized Ding trajectory.  Tests that
     # exercise a strict midpoint-quality rejection override these explicitly.
@@ -480,3 +481,41 @@ def test_cli_returns_two_for_midpoint_approximation_out_of_tolerance(tmp_path, m
     assert json.loads((tmp_path / "report.json").read_text())["status"] == (
         "midpoint_approximation_out_of_tolerance"
     )
+
+
+def test_collocation_policy_retains_source_phases_and_exports_fixed_size_parameters(tmp_path):
+    source = tmp_path / "rho.npz"
+    reduced_profile = tmp_path / "reduced.npz"
+    _write_archive(source)
+    reduced_profile.write_bytes(b"test-profile")
+    report = _build(source, reduced_profile, policy_representation="collocation")
+    assert report["status"] == "complete"
+    assert report["configuration"]["force_polynomial_coefficient_shape"] == [2, 6, 4]
+    assert report["configuration"]["force_resulting_harmonics"] is None
+    assert "force_fourier" not in report["audits"]
+    for error in report["audits"]["policy_vs_source_collocation_midpoints"]["errors"].values():
+        assert error["maximum_absolute_error"] < 1e-11
+    assert report["adapted_policy_fidelity"]["policy_source"] == "periodic_collocation_policy_used_by_endurance_rollout"
+    packed = report["rollout_objective_profile"]
+    assert packed["parameter_size"] == len(packed["parameters"]) == 9 * 2 * 6
+    assert packed["source_policy_gate_passed"] is True
+    assert "future_feasibility_not_certified" in packed["certification_scope"]
+    assert report["rollout_outcome"]["all_requested_horizons_feasible"] == all(row["feasible"] for row in report["horizons"])
+
+
+def test_collocation_policy_rejects_hidden_negative_overshoot(tmp_path):
+    source = tmp_path / "rho.npz"
+    reduced_profile = tmp_path / "reduced.npz"
+    _write_archive(source)
+    reduced_profile.write_bytes(b"test-profile")
+    with np.load(source, allow_pickle=False) as archive:
+        payload = {key: np.asarray(archive[key]).copy() for key in archive.files}
+    # Positive shooting/stage values, negative between the first two stages.
+    nodes = np.r_[0., ca.collocation_points(3, "radau")]
+    payload["states__F_m1"][0, 24:28] = 100. * (nodes - .37)**2 - .1
+    np.savez(source, **payload)
+    report = _build(source, reduced_profile, policy_representation="collocation")
+    assert report["status"] == "rejected"
+    assert "negative_continuous_force" in {reason["code"] for reason in report["rejection_reasons"]}
+    assert report["audits"]["force_policy"]["clipping_applied"] is False
+    assert "rollout_objective_profile" not in report

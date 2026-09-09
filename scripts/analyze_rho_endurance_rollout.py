@@ -48,6 +48,8 @@ def build_cli() -> argparse.ArgumentParser:
     parser.add_argument("--model-path", type=Path, help="Source bioMod; defaults to the Wu cycling model.")
     parser.add_argument("--horizons", type=_horizons, default=DEFAULT_HORIZONS)
     parser.add_argument("--cycle-period", type=float)
+    parser.add_argument("--policy-representation", choices=("collocation", "fourier"), default="collocation",
+        help="Retain source collocation polynomials (default); Fourier remains a diagnostic comparison.")
     parser.add_argument(
         "--force-harmonics",
         type=int,
@@ -111,6 +113,7 @@ def main(argv: list[str] | None = None) -> int:
             args.reduced_profile,
             horizons=args.horizons,
             cycle_period=args.cycle_period,
+            policy_representation=args.policy_representation,
             force_harmonics=args.force_harmonics,
             cn_harmonics=args.cn_harmonics,
             kinematic_harmonics=args.kinematic_harmonics,

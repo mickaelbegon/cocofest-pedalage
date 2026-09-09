@@ -4,15 +4,15 @@ This module is intentionally a diagnostic, not an optimal-control problem.  A
 certified RHO supplies a periodic force profile and the quantities needed to
 invert Ding's force equation.  The profile is repeated for a fixed number of
 cycles, while the slow Ding state ``(A, Tau1, Km)`` is propagated exactly under
-the continuous Fourier force interpolant.  No full-horizon trajectory,
+the declared continuous Fourier or piecewise collocation force interpolant. No full-horizon trajectory,
 new decision variable, pulse-width clipping, or muscle-specific weight enters
 the calculation.
 
 The slow state used for a recruitment diagnostic is the state at the midpoint
-of the same interval: an exact Fourier-convolution half-step is taken, the
+of the same interval: an exact force-convolution half-step is taken, the
 diagnostic is evaluated with ``F`` and ``F_dot`` at that midpoint, then the
 remaining exact half-step is taken.  The derivative used by recruitment is the
-analytical derivative of the same declared periodic Fourier interpolant.
+analytical derivative of the same declared periodic interpolant.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from cocofest.optimization.periodic_force_profile import (
     PeriodicForcePositivityCertificate,
     PeriodicFourierForceProfile,
 )
+from cocofest.optimization.periodic_collocation_profile import PeriodicCollocationProfile
 from cocofest.optimization.recruitment_margin import (
     RecruitmentMarginResult,
     RecruitmentStatus,
@@ -88,7 +89,7 @@ class PeriodicRecruitmentProfile:
     straightforward permutation of every first axis.
     """
 
-    force_profile: PeriodicFourierForceProfile
+    force_profile: PeriodicFourierForceProfile | PeriodicCollocationProfile
     interval_count: int
     cn: np.ndarray
     force_length_relationship: np.ndarray
@@ -96,8 +97,8 @@ class PeriodicRecruitmentProfile:
     passive_force_relationship: np.ndarray
 
     def __post_init__(self) -> None:
-        if not isinstance(self.force_profile, PeriodicFourierForceProfile):
-            raise TypeError("force_profile must be a PeriodicFourierForceProfile instance.")
+        if not isinstance(self.force_profile, (PeriodicFourierForceProfile, PeriodicCollocationProfile)):
+            raise TypeError("force_profile must be a periodic Fourier or collocation profile instance.")
         interval_count = _positive_integer(self.interval_count, name="interval_count")
         muscle_count = self.force_profile.signal_count
         object.__setattr__(
