@@ -528,6 +528,69 @@ RHO reste à réaliser. Aucun gain physiologique ou d'endurance n'est établi.
 Les détails et limites sont dans
 [`endurance_rollout_bioptim_binding.md`](endurance_rollout_bioptim_binding.md).
 
+### Étape C2 — PW adaptatives à moment musculaire individuel constant
+
+Une alternative moins approximative que la répétition des PW est maintenant
+implémentée dans `adaptive_moment_rollout.py` et
+`rho_adaptive_moment_policy.py`. Un cycle RHO certifié fournit, à chacune des
+30 phases, le moment cible de chaque muscle
+
+\[
+M_{i,k}^{\star}=r_i(\theta_k)F_{i,k}^{\mathrm{RHO}}.
+\]
+
+À chaque phase future, le modèle de Ding complet
+`(Cn,F,A,Tau1,Km)` est propagé, puis une équation scalaire bornée est résolue
+pour trouver `PW[i,k]` telle que
+`r_i(theta[k]) F_i[k+1] = M*[i,k]`. La propagation reprend la loi calcique
+`exact_exponential_periodic_node`, les relations force-longueur,
+force-vitesse et passive du profil réduit, et les bornes propres au modèle
+`[PD0, PW_max]`. Cette opération ne résout aucun OCP et n'utilise aucune donnée
+FHO. Une cible hors de l'enveloppe atteignable est classée explicitement ; elle
+n'est jamais rendue artificiellement faisable par clipping.
+
+Le CLI `scripts/analyze_adaptive_moment_policy.py` compare cette politique au
+baseline qui répète les PW du cycle source. Il exporte les PW, moments et cinq
+états de Ding, un rapport JSON, ainsi que trois figures : évolution des PW,
+erreur de suivi du moment et capacité `A/A_rest`. Les violations des bornes de
+PW du fichier source inférieures à `1e-10 s` sont projetées uniquement pour le
+baseline de propagation et sont comptées dans le rapport ; les PW adaptatives
+ne sont pas projetées.
+
+Validation numérique actuelle :
+
+- la transition RK4 à 128 sous-pas concorde avec DOP853 à `2e-8` en erreur
+  relative et `2e-9` en erreur absolue sur un intervalle ;
+- l'inversion scalaire récupère une PW synthétique connue à `2e-12 s` près ;
+- les cas sous `PD0`, au-dessus de `PW_max`, de signe incompatible et de
+  domaine non physique sont séparés ;
+- sur le cycle 0 du RHO réel à résistance `0.1 N.m`, 8 sous-pas reconstruisent
+  les 120 PW avec une RMSE de `0.142 us`, un maximum de `1.523 us` et une RMSE
+  du moment de `2.52e-5 N.m` en environ `1.4 s` sur la machine de développement.
+
+Le test multi-cycle apporte aussi une information scientifique négative. Le
+profil individuel du cycle 0 devient impossible dès le début du cycle 2 : le
+deltoïde postérieur dépendait initialement d'une force résiduelle issue du
+préchauffage et `PW_max` ne peut pas la recréer instantanément après sa
+dissipation. Avec le cycle 112 comme ancre, le biceps est déjà proche de
+`PW_max` et le même profil devient également impossible au cycle suivant. Ce
+résultat ne signifie pas que le pédalage total est impossible : il montre que
+conserver exactement la contribution de chaque muscle est trop restrictif.
+La prochaine généralisation doit donc préserver le **moment total** tout en
+autorisant une redistribution musculaire à bas coût, avec pénalisation de la
+variation par rapport à l'allocation RHO et de la proximité de `PW_max`.
+
+Exemple reproductible :
+
+```bash
+conda run -n cocofest-rho32 python scripts/analyze_adaptive_moment_policy.py \
+  ipopt-linear-solver-150-20260904/resistance-0p10Nm/ipopt-sx-radau5-ma57-150-max2000-reduced/validated-rho-trajectory.npz \
+  benchmark-seed/reduced-cycling-fourier12.npz \
+  adaptive-moment-cycle0-150 \
+  --cycles 150 --source-cycle-index 0 --cycle-period 1.0 \
+  --integration-substeps 8 --moment-tolerance 1e-4
+```
+
 ### Étape D — Validation scientifique prospective sans FHO
 
 Comparer :
@@ -559,7 +622,9 @@ Gate scientifique du rollout :
 
 1. Récupération analytique vers le repos lorsque `F = 0`.
 2. Force constante contre DOP853 sur 1 puis 100 cycles.
-3. Reconstruction du PW du cycle de référence à `1e-9 s` près.
+3. Inversion synthétique auto-cohérente à `2e-12 s` près ; sur une transcription
+   RHO réelle, RMSE du moment au plus `1e-4 N.m` et erreur PW rapportée
+   séparément pour les phases actives et celles collées aux bornes.
 4. Égalité du membre droit de la dynamique de force après inversion.
 5. Monotonie par rapport à `A`, `Km`, `PW_max`, force et horizon ; `Tau1` est
    testé séparément car son effet n’a pas nécessairement le même signe.
