@@ -92,8 +92,27 @@ print(default_worker_threads())
     libdirs="$CONDA_PREFIX/lib"
     # Keep an explicitly selected library for comparisons. Otherwise a
     # licensed CoinHSL provisioned in this target environment is the default.
-    if [[ -z "${IPOPT_HSL_LIBRARY:-}" && -f "$CONDA_PREFIX/lib/libhsl.so" ]]; then
-      export IPOPT_HSL_LIBRARY="$CONDA_PREFIX/lib/libhsl.so"
+    # A versioned installation below opt is accepted only when unique: never
+    # silently select an arbitrary version and never search transient paths.
+    if [[ -z "${IPOPT_HSL_LIBRARY:-}" ]]; then
+      if [[ -f "$CONDA_PREFIX/lib/libhsl.so" ]]; then
+        export IPOPT_HSL_LIBRARY="$CONDA_PREFIX/lib/libhsl.so"
+      else
+        local -a versioned_hsl_candidates=()
+        if [[ -d "$CONDA_PREFIX/opt/libhsl" ]]; then
+          mapfile -t versioned_hsl_candidates < <(
+            find "$CONDA_PREFIX/opt/libhsl" -mindepth 3 -maxdepth 3 -type f \
+              -path '*/lib/libhsl.so' -print | LC_ALL=C sort
+          )
+        fi
+        if [[ "${#versioned_hsl_candidates[@]}" -eq 1 ]]; then
+          export IPOPT_HSL_LIBRARY="${versioned_hsl_candidates[0]}"
+        elif [[ "${#versioned_hsl_candidates[@]}" -gt 1 ]]; then
+          echo "Ambiguous versioned CoinHSL installations; set IPOPT_HSL_LIBRARY explicitly:" >&2
+          printf '  %s\n' "${versioned_hsl_candidates[@]}" >&2
+          return 1
+        fi
+      fi
     fi
   else
     export CASADI_CXX_ABI=1
@@ -117,6 +136,9 @@ print(default_worker_threads())
   echo "$env_name ready"
   echo "  COCOFEST_ROOT     $COCOFEST_ROOT"
   echo "  CONDA_PREFIX      $CONDA_PREFIX"
+  if [[ "$flavour" == rho32 && -n "${IPOPT_HSL_LIBRARY:-}" ]]; then
+    echo "  IPOPT_HSL_LIBRARY $IPOPT_HSL_LIBRARY"
+  fi
   echo "  BENCHMARK_THREADS $BENCHMARK_THREADS (numeric libraries: $numeric)"
 }
 

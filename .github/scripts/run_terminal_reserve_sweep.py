@@ -38,6 +38,56 @@ DEFAULT_METRIC_TOLERANCES = {
     "fatigue_auc_cycles": 1e-4,
     "maximum_pw_upper_fraction": 1e-3,
 }
+
+
+class HslLibraryDiscoveryError(RuntimeError):
+    """Raised when the target Conda environment has ambiguous CoinHSL installs."""
+
+
+def discover_conda_hsl_library(
+    environment: dict[str, str] | None = None,
+) -> Path | None:
+    """Return the explicit or unique durable CoinHSL library for a Conda env.
+
+    The versioned location deliberately stays below ``$CONDA_PREFIX/opt``.  A
+    temporary download directory (notably ``/tmp``) is never a candidate.  The
+    selected path and digest are subsequently frozen by :func:`campaign_contract`.
+    """
+
+    environment = os.environ if environment is None else environment
+    explicit = environment.get("IPOPT_HSL_LIBRARY")
+    if explicit:
+        return Path(explicit).expanduser()
+    conda_prefix = environment.get("CONDA_PREFIX")
+    if not conda_prefix:
+        return None
+    prefix = Path(conda_prefix).expanduser()
+    conventional = prefix / "lib" / "libhsl.so"
+    if conventional.is_file():
+        return conventional
+    versioned_root = prefix / "opt" / "libhsl"
+    candidates = sorted(
+        (path for path in versioned_root.glob("*/lib/libhsl.so") if path.is_file()),
+        key=lambda path: str(path),
+    )
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        formatted = ", ".join(str(path) for path in candidates)
+        raise HslLibraryDiscoveryError(
+            "Multiple durable CoinHSL candidates were found; select one explicitly "
+            f"with --hsl-library or IPOPT_HSL_LIBRARY: {formatted}"
+        )
+    return None
+
+
+def default_hsl_library() -> Path | None:
+    """Return a non-throwing parser default; main reports ambiguity cleanly."""
+
+    try:
+        return discover_conda_hsl_library()
+    except HslLibraryDiscoveryError:
+        return None
 CAMPAIGN_SOURCE_PATHS = (
     Path(__file__).resolve(),
     Path(__file__).resolve().with_name("probe_ipopt_ma57.py"),
@@ -903,7 +953,7 @@ def quarantine_case_artifacts(case_directory: Path) -> Path | None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=Path, required=True)
-    parser.add_argument("--hsl-library", type=Path, default=os.environ.get("IPOPT_HSL_LIBRARY"))
+    parser.add_argument("--hsl-library", type=Path, default=default_hsl_library())
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
     parser.add_argument("--weights", default=",".join(map(str, DEFAULT_WEIGHTS)))
@@ -958,6 +1008,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(cli_args: list[str] | None = None) -> int:
     args = build_parser().parse_args(cli_args)
+    if args.hsl_library is None:
+        try:
+            args.hsl_library = discover_conda_hsl_library()
+        except HslLibraryDiscoveryError as error:
+            raise SystemExit(str(error)) from error
     args.seed = args.seed.expanduser().resolve()
     args.output_root = args.output_root.expanduser().resolve()
     args.python = args.python.expanduser().resolve()

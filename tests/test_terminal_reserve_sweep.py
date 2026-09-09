@@ -103,6 +103,39 @@ def test_grid_has_one_temperature_independent_baseline():
     assert len(cases) == 7
 
 
+def test_discovers_one_durable_versioned_conda_hsl(tmp_path):
+    library = tmp_path / "opt" / "libhsl" / "v2025.7.21" / "lib" / "libhsl.so"
+    library.parent.mkdir(parents=True)
+    library.write_bytes(b"licensed hsl")
+
+    selected = sweep.discover_conda_hsl_library({"CONDA_PREFIX": str(tmp_path)})
+
+    assert selected == library
+
+
+def test_conventional_conda_hsl_has_priority_over_versioned_install(tmp_path):
+    conventional = tmp_path / "lib" / "libhsl.so"
+    versioned = tmp_path / "opt" / "libhsl" / "v2025.7.21" / "lib" / "libhsl.so"
+    conventional.parent.mkdir(parents=True)
+    versioned.parent.mkdir(parents=True)
+    conventional.write_bytes(b"conventional")
+    versioned.write_bytes(b"versioned")
+
+    selected = sweep.discover_conda_hsl_library({"CONDA_PREFIX": str(tmp_path)})
+
+    assert selected == conventional
+
+
+def test_ambiguous_versioned_conda_hsl_requires_an_explicit_selection(tmp_path):
+    for version in ("v2025.7.21", "v2026.1.1"):
+        library = tmp_path / "opt" / "libhsl" / version / "lib" / "libhsl.so"
+        library.parent.mkdir(parents=True)
+        library.write_bytes(version.encode())
+
+    with pytest.raises(sweep.HslLibraryDiscoveryError, match="Multiple durable CoinHSL"):
+        sweep.discover_conda_hsl_library({"CONDA_PREFIX": str(tmp_path)})
+
+
 @pytest.mark.parametrize(
     ("raw", "non_negative"),
     [("", True), ("nan", True), ("-0.1", True), ("0", False)],

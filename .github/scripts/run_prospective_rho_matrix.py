@@ -346,7 +346,7 @@ def write_summary(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=Path, required=True)
-    parser.add_argument("--hsl-library", type=Path, default=os.environ.get("IPOPT_HSL_LIBRARY"))
+    parser.add_argument("--hsl-library", type=Path, default=_sweep.default_hsl_library())
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
     parser.add_argument("--n-windows", type=int, default=150)
@@ -374,6 +374,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _normalize_and_validate(args: argparse.Namespace) -> None:
+    if args.hsl_library is None:
+        try:
+            args.hsl_library = _sweep.discover_conda_hsl_library()
+        except _sweep.HslLibraryDiscoveryError as error:
+            raise SystemExit(str(error)) from error
     for name in ("seed", "hsl_library", "output_root", "python"):
         value = getattr(args, name)
         setattr(args, name, None if value is None else value.expanduser().resolve())
