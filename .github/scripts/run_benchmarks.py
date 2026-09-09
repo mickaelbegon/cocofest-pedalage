@@ -607,6 +607,9 @@ def build_command(case: Case, prefix: Path, args: argparse.Namespace) -> tuple[l
         ),
         "--compact-rho-output",
         "--print-traces",
+        "--receding-horizon-solution-output",
+        str(case_dir / "validated-rho-trajectory.npz"),
+        "--allow-partial-receding-horizon-solution-output",
         "--codegen-tag", f"ide-{case.key}",
         "--output-json", str(case_dir / "result.json"),
     ]

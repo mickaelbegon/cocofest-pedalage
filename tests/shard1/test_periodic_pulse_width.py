@@ -3271,6 +3271,42 @@ def test_receding_horizon_solution_rejects_an_incomplete_physical_prefix(
         )
 
 
+def test_isokinetic_rho_export_accepts_the_per_cycle_energy_reset(tmp_path):
+    args = periodic_example.build_argument_parser().parse_args(
+        ["--formulation", "isokinetic"]
+    )
+    args.single_shot = False
+    args.cycles_per_window = 1
+    args.terminal_wheel_q_reference_mode = "absolute_initial"
+    args.n_windows = 2
+    output_path = tmp_path / "isokinetic_rho_seed.npz"
+    summary = {
+        "success": True,
+        "covered_cycles": 2,
+        "state_traces": {
+            "theta": np.array([[0.0, -2.0 * np.pi, -4.0 * np.pi]]),
+            "E_prod": np.array([[0.0, 1.256637, 0.0, 1.256637]]),
+        },
+        "control_traces": {"Biceps": np.array([[150e-6, 160e-6]])},
+        "state_boundary_jumps": {
+            "available": True,
+            "boundary_count": 1,
+            "by_state": {
+                "theta": {"maximum_absolute_jump": 1e-10},
+                "E_prod": {"maximum_absolute_jump": 1.256637},
+            },
+        },
+    }
+
+    periodic_example._save_receding_horizon_solution(output_path, summary, args)
+    seed = periodic_example._load_warmup_cache(output_path)
+
+    assert seed.metadata["state_boundary_maximum_absolute_jump"] == pytest.approx(1e-10)
+    assert seed.metadata["cycle_boundary_reset_state_jumps"] == {
+        "E_prod": pytest.approx(1.256637)
+    }
+
+
 def test_optional_rho_export_keeps_an_incomplete_prefix_diagnostic(tmp_path):
     args = periodic_example.build_argument_parser().parse_args([])
     args.single_shot = False

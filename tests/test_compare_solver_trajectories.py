@@ -146,3 +146,30 @@ def test_main_writes_figures_and_summary_without_solver_dependencies(tmp_path):
     persisted = json.loads((output / "comparison.json").read_text(encoding="utf-8"))
     assert persisted["cycles_compared"] == 3
     assert persisted["metadata"]["ACADOS IRK"]["mechanical_formulation"] == "full"
+
+
+def test_main_can_compare_ipopt_and_acados_only(tmp_path):
+    ipopt = tmp_path / "ipopt.npz"
+    acados = tmp_path / "acados.npz"
+    _write_trajectory(
+        ipopt, cycles=3, formulation="reduced", state_intervals=4, offset=0.0
+    )
+    _write_trajectory(
+        acados, cycles=3, formulation="reduced", state_intervals=2, offset=0.4
+    )
+    output = tmp_path / "pair-comparison"
+
+    return_code = comparison.main(
+        [
+            "--cycles", "3",
+            "--ipopt-trajectory", str(ipopt),
+            "--acados-trajectory", str(acados),
+            "--without-madnlp",
+            "--output-dir", str(output),
+        ]
+    )
+
+    assert return_code == 0
+    persisted = json.loads((output / "comparison.json").read_text(encoding="utf-8"))
+    assert persisted["comparators"] == ["ACADOS IRK"]
+    assert set(persisted["metadata"]) == {"IPOPT R5", "ACADOS IRK"}

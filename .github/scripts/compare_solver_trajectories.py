@@ -159,6 +159,9 @@ def _comparison_values(
 def compute_comparison(
     raw_trajectories: dict[str, dict[str, np.ndarray]], metadata: dict[str, dict], cycles: int
 ) -> tuple[dict, dict]:
+    comparators = tuple(name for name in raw_trajectories if name != REFERENCE)
+    if REFERENCE not in raw_trajectories or not comparators:
+        raise ValueError("The comparison requires IPOPT R5 and at least one comparator.")
     trajectories = {
         name: canonicalize_trajectory(arrays, metadata[name])
         for name, arrays in raw_trajectories.items()
@@ -168,8 +171,8 @@ def compute_comparison(
         key: align_many_blocks(trajectories, exported_cycles, cycles, key) for key in common_keys
     }
     pairwise = {}
-    per_cycle_normalized = {name: {} for name in COMPARATORS}
-    for comparator in COMPARATORS:
+    per_cycle_normalized = {name: {} for name in comparators}
+    for comparator in comparators:
         rows = {}
         for key in common_keys:
             values, units = _comparison_values(key, aligned[key], metadata)
@@ -187,7 +190,7 @@ def compute_comparison(
         pairwise[f"{comparator} vs {REFERENCE}"] = rows
 
     headline = {}
-    for comparator in COMPARATORS:
+    for comparator in comparators:
         control_deltas = []
         final_capacity_deltas = []
         for muscle in MUSCLES:
@@ -211,7 +214,7 @@ def compute_comparison(
         }
 
     summary = {
-        "schema": "cocofest-three-solver-trajectory-comparison-v1",
+        "schema": "cocofest-solver-trajectory-comparison-v2",
         "cycles_compared": cycles,
         "reference": REFERENCE,
         "common_variables": common_keys,
@@ -219,6 +222,7 @@ def compute_comparison(
         "headline": headline,
         "pairwise": pairwise,
         "metadata": metadata,
+        "comparators": list(comparators),
         "comparison_note": _configuration_note(metadata),
     }
     plot_data = {
@@ -228,6 +232,7 @@ def compute_comparison(
         "common_keys": common_keys,
         "per_cycle_normalized": per_cycle_normalized,
         "metadata": metadata,
+        "comparators": comparators,
     }
     return summary, plot_data
 
@@ -320,13 +325,17 @@ def plot_pulse_widths(data: dict, cycles: int, output: Path) -> None:
 
 
 def plot_control_differences(data: dict, cycles: int, output: Path) -> None:
-    fig, axes = plt.subplots(len(MUSCLES), len(COMPARATORS), figsize=(13, 10), sharex=True)
+    comparators = data["comparators"]
+    fig, axes = plt.subplots(
+        len(MUSCLES), len(comparators), figsize=(6.5 * len(comparators), 10), sharex=True
+    )
+    axes = np.asarray(axes, dtype=object).reshape(len(MUSCLES), len(comparators))
     for row, muscle in enumerate(MUSCLES):
         key = f"controls__last_pulse_width_{muscle}"
         values = {name: _cycle_matrix(blocks) * 1e6 for name, blocks in data["aligned"][key].items()}
-        maximum = max(np.max(np.abs(values[name] - values[REFERENCE])) for name in COMPARATORS)
+        maximum = max(np.max(np.abs(values[name] - values[REFERENCE])) for name in comparators)
         maximum = max(float(maximum), 1.0)
-        for column, name in enumerate(COMPARATORS):
+        for column, name in enumerate(comparators):
             delta = values[name] - values[REFERENCE]
             image = axes[row, column].imshow(
                 delta,
@@ -359,7 +368,7 @@ def plot_mechanics(data: dict, cycles: int, output: Path) -> None:
         "states__wheel_angle", data["aligned"]["states__wheel_angle"], data["metadata"]
     )
     fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharex=True)
-    for name in COLORS:
+    for name in data["trajectories"]:
         axes[0, 0].plot(
             x, np.mean(speed[name], axis=1), color=COLORS[name], linestyle=LINESTYLES[name], label=name
         )
@@ -370,7 +379,7 @@ def plot_mechanics(data: dict, cycles: int, output: Path) -> None:
         axes[1, 0].plot(
             x, angle_closure_error, color=COLORS[name], linestyle=LINESTYLES[name], label=name
         )
-    for name in COMPARATORS:
+    for name in data["comparators"]:
         rmse = np.sqrt(np.mean((speed[name] - speed[REFERENCE]) ** 2, axis=1))
         axes[1, 1].plot(x, rmse, color=COLORS[name], linestyle=LINESTYLES[name], label=name)
     axes[0, 0].set_title("Vitesse angulaire moyenne")
@@ -393,10 +402,13 @@ def plot_mechanics(data: dict, cycles: int, output: Path) -> None:
 
 def plot_normalized_error_heatmaps(data: dict, cycles: int, output: Path) -> None:
     keys = data["common_keys"]
+    comparators = data["comparators"]
     fig_height = max(8.0, 0.30 * len(keys))
-    fig, axes = plt.subplots(1, len(COMPARATORS), figsize=(16, fig_height), sharey=True)
+    fig, axes = plt.subplots(
+        1, len(comparators), figsize=(8 * len(comparators), fig_height), sharey=True
+    )
     image = None
-    for axis, name in zip(np.atleast_1d(axes), COMPARATORS):
+    for axis, name in zip(np.atleast_1d(axes), comparators):
         matrix = np.vstack([data["per_cycle_normalized"][name][key] for key in keys])
         image = axis.imshow(
             np.log10(np.maximum(matrix, 1e-16)), origin="upper", aspect="auto", cmap="magma"
@@ -456,7 +468,7 @@ def plot_selected_pulse_width_profiles(data: dict, cycles: int, output: Path) ->
 
 def write_markdown(path: Path, summary: dict, figure_names: list[str]) -> None:
     lines = [
-        "# Comparaison IPOPT–MadNLP–ACADOS",
+        "# Comparaison de stratégies entre solveurs",
         "",
         f"Comparaison de `{summary['cycles_compared']}` cycles exportés.",
         "",
@@ -487,6 +499,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cycles", type=int, default=500)
     parser.add_argument("--ipopt-trajectory", type=Path, default=DEFAULT_PATHS["IPOPT R5"])
     parser.add_argument("--madnlp-trajectory", type=Path, default=DEFAULT_PATHS["MadNLP R5"])
+    parser.add_argument(
+        "--without-madnlp",
+        action="store_true",
+        help="Compare only IPOPT and ACADOS.",
+    )
     parser.add_argument("--acados-trajectory", type=Path, default=DEFAULT_PATHS["ACADOS IRK"])
     parser.add_argument(
         "--output-dir", type=Path, default=DEFAULT_RESULTS / "three-solver-trajectory-comparison"
@@ -500,9 +517,10 @@ def main(argv: Iterable[str] | None = None) -> int:
         raise ValueError("--cycles must be strictly positive.")
     paths = {
         "IPOPT R5": args.ipopt_trajectory.resolve(),
-        "MadNLP R5": args.madnlp_trajectory.resolve(),
         "ACADOS IRK": args.acados_trajectory.resolve(),
     }
+    if not args.without_madnlp:
+        paths["MadNLP R5"] = args.madnlp_trajectory.resolve()
     raw_trajectories = {}
     metadata = {}
     for name, path in paths.items():

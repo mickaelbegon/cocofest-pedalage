@@ -4226,6 +4226,7 @@ def _receding_horizon_solution_metadata(
     fatigue_capacity_scales: dict[str, float] | None = None,
     absolute_wheel_q_origin_reference: float | None = None,
     absolute_wheel_q_start_cycle_index: int | None = None,
+    reset_state_boundary_jumps: dict[str, float] | None = None,
 ) -> dict:
     """Describe a concatenated RHO trace as one multi-cycle primal seed."""
 
@@ -4239,6 +4240,10 @@ def _receding_horizon_solution_metadata(
             "state_boundary_maximum_absolute_jump": float(
                 maximum_boundary_jump
             ),
+            "cycle_boundary_reset_state_jumps": {
+                str(key): float(value)
+                for key, value in (reset_state_boundary_jumps or {}).items()
+            },
             # Preserve the rested Ding reference explicitly.  A terminal-set
             # dataset assembled from several loads or replay checkpoints must
             # compare A/A_scale, not A relative to the first (possibly already
@@ -4371,10 +4376,19 @@ def _save_receding_horizon_solution(
             "The concatenated RHO initial solution has no explicit state-boundary "
             "certificate."
         )
+    reset_state_keys = (
+        {"E_prod"} if getattr(args, "formulation", "dynamic") == "isokinetic" else set()
+    )
+    reset_state_boundary_jumps = {
+        key: float(item["maximum_absolute_jump"])
+        for key, item in by_state.items()
+        if key in reset_state_keys
+    }
     maximum_boundary_jump = max(
         (
             float(item["maximum_absolute_jump"])
-            for item in by_state.values()
+            for key, item in by_state.items()
+            if key not in reset_state_keys
         ),
         default=0.0,
     )
@@ -4394,6 +4408,7 @@ def _save_receding_horizon_solution(
             summary.get("fatigue_capacity_scales"),
             summary.get("absolute_wheel_q_origin_reference"),
             summary.get("absolute_wheel_q_start_cycle_index"),
+            reset_state_boundary_jumps,
         ),
     )
 

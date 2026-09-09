@@ -122,6 +122,14 @@ def test_isokinetic_environment_and_all_backend_commands_share_the_same_options(
     assert "--periodic-ipopt-refinement-each-window" not in acados_command
     assert "--acados-transfer-irk-rollout" not in acados_command
     assert "--acados-ipopt-recovery" in acados_command
+    trajectory_index = acados_command.index("--receding-horizon-solution-output")
+    assert acados_command[trajectory_index + 1] == str(
+        tmp_path
+        / "results"
+        / "acados-irk-reduced-isokinetic-torque-0.25-omega--5.5-load--0.8-to-0.9"
+        / "validated-rho-trajectory.npz"
+    )
+    assert "--allow-partial-receding-horizon-solution-output" in acados_command
     assert acados_command[acados_command.index("--ipopt-linear-solver") + 1] == "ma57"
     assert acados_command[acados_command.index("--warmup-ipopt-linear-solver") + 1] == "ma57"
     assert acados_command[acados_command.index("--ipopt-hsl-library") + 1] == str(
