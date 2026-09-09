@@ -312,19 +312,24 @@ MA57 est une bibliothèque sous licence séparée : l'utilisateur doit obtenir
 CoinHSL auprès de son détenteur de licence. Ne pas la télécharger depuis une
 source non vérifiée ni la versionner dans ce dépôt.
 
-Sur Ubuntu 26.04, construire CoinHSL avec le compilateur Fortran et les BLAS /
-LAPACK de **l'environnement Conda cible** est obligatoire pour une campagne de
-production. Une HSL précompilée historique qui déclare `libgfortran.so.4` ne
+Une distribution CoinHSL licenciée est utilisable en production si le probe
+ci-dessous confirme ses dépendances et son chargement effectif. Dans
+`cocofest-rho32`, HSL v2025.7.21 se trouve actuellement sous
+`$CONDA_PREFIX/opt/libhsl/v2025.7.21/lib/libhsl.so` : elle dépend de
+`libgfortran.so.5`, exporte MA57 et passe le probe avec
+`production_ready=true`. Une HSL historique qui déclare `libgfortran.so.4` ne
 peut pas devenir compatible avec un runtime `.so.5` par lien symbolique,
-`LD_PRELOAD`, ou copie latérale. **Ne jamais créer un lien `.4` vers `.5` et ne
+`LD_PRELOAD` ou copie latérale. **Ne jamais créer un lien `.4` vers `.5` et ne
 pas conserver deux ABI Fortran chargées dans le processus de calcul.**
 
-Le dépôt ne contient ni les sources CoinHSL ni une chaîne de compilation C/Fortran. Le
-titulaire de la licence doit d'abord fournir les sources autorisées puis
-installer la chaîne C/Fortran dans le Conda qui exécutera IPOPT. Le contrôle
-suivant est volontairement sans effet de bord : il n'exécute ni téléchargement,
-ni `configure`, ni `make`, ni installation. Il échoue avant toute mutation si
-la source, le compilateur ou le runtime Conda cible manque.
+Si aucune distribution compatible n'est disponible, reconstruire CoinHSL avec
+le compilateur Fortran et les BLAS/LAPACK de **l'environnement Conda cible**.
+Le dépôt ne contient ni les sources CoinHSL ni une chaîne de compilation
+C/Fortran. Le titulaire de la licence doit fournir les sources autorisées puis
+installer cette chaîne dans le Conda qui exécutera IPOPT. Le contrôle suivant
+est volontairement sans effet de bord : il n'exécute ni téléchargement, ni
+`configure`, ni `make`, ni installation. Il échoue avant toute mutation si la
+source, le compilateur ou le runtime cible manque.
 
 ```bash
 source .github/scripts/benchmark_env.sh rho32
@@ -383,9 +388,12 @@ le petit solve aboutit. Le probe le classe explicitement
 reconstruire/configurer CoinHSL, jamais contourner le gate expérimental.
 
 Le script `benchmark_env.sh rho32` exporte automatiquement
-`IPOPT_HSL_LIBRARY=$CONDA_PREFIX/lib/libhsl.so` lorsqu'il existe; une variable
-déjà exportée reste prioritaire. Le pilote IDE détecte également ce même
-emplacement.
+`IPOPT_HSL_LIBRARY`. Il privilégie `$CONDA_PREFIX/lib/libhsl.so`, puis accepte
+un unique candidat durable sous `$CONDA_PREFIX/opt/libhsl/*/lib/libhsl.so`.
+Plusieurs candidats versionnés sont refusés jusqu'à ce que l'opérateur en
+sélectionne un explicitement. Une variable déjà exportée reste prioritaire ;
+aucun chemin temporaire n'est recherché. Les runners terminal et prospectif
+appliquent la même règle et figent le chemin et le SHA-256 dans leur contrat.
 
 Ensuite, le smoke test fonctionnel est :
 
