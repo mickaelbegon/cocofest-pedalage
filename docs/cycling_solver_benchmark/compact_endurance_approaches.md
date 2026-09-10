@@ -325,3 +325,60 @@ physiologique : il isole volontairement le raccordement et les mises à jour.
 Les résultats sur les ancres RHO réelles et les prochaines limites à lever sont
 consignés dans `local_endurance_value_validation.md`. Aucun gain d'endurance
 clinique n'est revendiqué à ce stade.
+
+## Accélération par lots et tolérance de suivi explicite
+
+Le calcul des candidats de différences finies et de validation est maintenant
+vectorisé dans `batched_compact_muscle_prediction.py` et
+`batched_endurance_value.py`. Après une vérification du centre, les 16 points
+de différences finies puis les points de validation sont évalués par lots.
+Les équations, les sous-pas et la politique d'allocation du mode exact restent
+les mêmes; un calcul par points de rupture remplace la recherche scalaire du
+multiplicateur du petit QP. Les enveloppes sont conservées pendant le rollout,
+ce qui évite une seconde propagation pour calculer le coût.
+
+Cette vectorisation concerne des simulations numériques indépendantes, pas de
+nouvelles variables du RHO. Le raccordement conserve ses 58 paramètres fixes
+pour quatre muscles; les tests de compilation unique IPOPT/MA57 restent actifs.
+Les temps sur les trajectoires réelles, la parité des résultats et les cas
+refusés sont détaillés dans `batched_endurance_value_validation.md`.
+
+Une option séparée `tracking_band_nm`, nulle par défaut, permet d'étudier les
+petits écarts de moment dans la **politique future uniquement**. Si la demande
+initiale est atteignable, elle reste inchangée. Sinon, la politique utilise la
+borne atteignable la plus proche seulement si l'écart est inférieur à la bande,
+à la tolérance numérique explicitement déclarée près. Au-delà, elle s'arrête.
+Les PW ne sont jamais placées hors de leurs bornes pour continuer artificiellement.
+
+La valeur conserve les marges signées par rapport à la demande originale et
+ajoute, lorsque la bande est positive, une pénalité
+
+\[
+J_{\rm suivi}=w_e\frac{\sum_k\Delta t_k(e_k/s)^2}{\sum_k\Delta t_k},
+\qquad e_k=M_{\rm obtenu,k}-M_{\rm demandé,k}.
+\]
+
+L'échelle positive `s` et le poids `w_e` ne dépendent pas de la bande. Avec
+`w_e=1`, cette pénalité peut être très petite : sa présence ne suffit pas à
+garantir l'absence de dérive. Les rapports distinguent coût de marge et coût de
+suivi, nombre de phases relâchées, écart maximal et sommes `Σ Δt e` / `Σ Δt |e|`.
+Ces sommes portent sur des valeurs aux extrémités des phases; ce ne sont ni des
+intégrales continues certifiées ni un travail mécanique.
+
+Un coût ajusté avec une bande positive exige `allow_tracking_band=True` dans le
+raccordement. Une mise à jour numérique ne peut pas modifier implicitement la
+bande ou son poids. L'empreinte de la tâche et tous les paramètres de coût
+accompagnent l'ajustement, en plus de son empreinte de contexte musculaire.
+Les échecs restent isolés par candidat et aucun coût n'est fourni pour un
+horizon inachevé. Une bande positive change la tâche prédite; elle ne doit pas
+être présentée comme un gain d'endurance à suivi exact, ni comme une tolérance
+clinique validée.
+
+La prochaine décision dépend de la fidélité du prédicteur à la frontière :
+le déficit compact H30 (`1,45e-4 N·m`) est plus petit que le seuil de rejeu
+jusqu'ici utilisé (`1e-3 N·m`). Il faut d'abord rejouer le préfixe réussi avec
+les équations Ding complètes, raffiner l'intégration et reconstruire
+l'enveloppe signée de la phase critique. Un tel rejeu partiel est un diagnostic,
+pas une validation d'un horizon complet. Si la frontière persiste dans le
+modèle complet, on pourra tester une allocation anticipant quelques phases;
+sinon, il faudra d'abord corriger ou borner l'erreur du prédicteur compact.
