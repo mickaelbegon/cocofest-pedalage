@@ -74,3 +74,21 @@ def test_rho_only_is_an_explicit_driver_mode():
     args = driver.parse_arguments(["--rho-only", "--max-cycles", "150"])
 
     assert args.rho_only is True
+
+
+def test_signed_resistive_torque_and_custom_seed_directory_are_exposed():
+    args = driver.parse_arguments(
+        ["--signed-crank-torque", "0.15", "--seed-dir", "/tmp/seed-r015"]
+    )
+
+    assert args.signed_crank_torque == 0.15
+    assert args.seed_dir == Path("/tmp/seed-r015")
+
+
+def test_signed_torque_and_assistance_are_mutually_exclusive():
+    try:
+        driver.parse_arguments(["--assistance", "0.1", "--signed-crank-torque", "0.1"])
+    except SystemExit as error:
+        assert error.code == 2
+    else:
+        raise AssertionError("The two torque conventions must not be combined")

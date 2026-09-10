@@ -93,7 +93,29 @@ def parse_arguments(argv: list[str] | None) -> argparse.Namespace:
         help="RHO cycles appended before the next FHO (new-run default: 3)",
     )
     parser.add_argument("--jump-objective-relative-tolerance", type=float)
-    parser.add_argument("--assistance", default="0.00")
+    torque_group = parser.add_mutually_exclusive_group()
+    torque_group.add_argument(
+        "--assistance",
+        default="0.00",
+        help="Non-negative assistance magnitude in N.m (historical convention).",
+    )
+    torque_group.add_argument(
+        "--signed-crank-torque",
+        type=float,
+        default=None,
+        help=(
+            "Signed constant crank torque in N.m; with the nominal negative "
+            "crank velocity, a positive value is a resistance."
+        ),
+    )
+    parser.add_argument(
+        "--seed-dir",
+        type=Path,
+        help=(
+            "Directory containing the v3 common seed and reduced profile. "
+            "Defaults to benchmark-seed."
+        ),
+    )
     parser.add_argument("--q-slack", default="0.002")
     location = parser.add_mutually_exclusive_group()
     location.add_argument("--output-dir")
@@ -241,7 +263,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Missing {BENCHMARK}", file=sys.stderr)
         return 1
 
-    seed_dir = REPO_ROOT / "benchmark-seed"
+    raw_seed_dir = args.seed_dir or (REPO_ROOT / "benchmark-seed")
+    seed_dir = raw_seed_dir.expanduser().resolve()
     missing = [name for name in SEED_FILES if not (seed_dir / name).exists()]
     if missing:
         print(f"Missing seed file(s): {', '.join(missing)}", file=sys.stderr)
@@ -278,11 +301,14 @@ def main(argv: list[str] | None = None) -> int:
         "--continuation-step-cycles", str(args.continuation_step_cycles),
         "--jump-objective-relative-tolerance", str(args.jump_objective_relative_tolerance),
         "--full-horizon-solver", args.solver,
-        "--crank-assistance", args.assistance,
         "--terminal-wheel-q-slack", args.q_slack,
         # Child solver processes must use the same environment as this driver.
         "--python", interpreter,
     ]
+    if args.signed_crank_torque is None:
+        command += ["--crank-assistance", str(args.assistance)]
+    else:
+        command += ["--signed-crank-torque", str(args.signed_crank_torque)]
     if args.attempt_timeout_s is not None:
         command += ["--attempt-timeout-s", str(args.attempt_timeout_s)]
     if args.resume:
@@ -306,6 +332,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Horizon     : up to {args.max_cycles} cycles, step "
           f"{args.continuation_step_cycles}, RSS cap {args.memory_limit_gib}")
     print(f"Threads     : {args.threads} (numerical libraries: {args.numeric_threads})")
+    torque_label = (
+        f"signed {args.signed_crank_torque:+g} N.m"
+        if args.signed_crank_torque is not None
+        else f"assistance {args.assistance} N.m"
+    )
+    print(f"Crank torque: {torque_label}")
+    print(f"Seed        : {seed_dir}")
     print(f"Full log    : {log_path}")
     print(f"{'=' * 78}", flush=True)
 
