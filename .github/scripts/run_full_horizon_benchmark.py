@@ -847,6 +847,11 @@ def _seed_cycle_count(seed_path: Path) -> int:
 
 
 def _common_solver_options(args: argparse.Namespace) -> list[str]:
+    torque_option = (
+        ["--signed-crank-torque", str(args.signed_crank_torque)]
+        if getattr(args, "signed_crank_torque", None) is not None
+        else ["--crank-assistance", str(args.crank_assistance)]
+    )
     return [
         "--objective",
         "fatigue",
@@ -864,8 +869,7 @@ def _common_solver_options(args: argparse.Namespace) -> list[str]:
         "30",
         "--n-threads",
         str(args.n_threads),
-        "--crank-assistance",
-        str(args.crank_assistance),
+        *torque_option,
         "--nlp-tolerance",
         "1e-8",
         "--primal-feasibility-threshold",
@@ -1284,7 +1288,22 @@ def build_parser() -> argparse.ArgumentParser:
         default="ipopt",
         help="NLP solver used for the reduced/MX monolithic FHO problems.",
     )
-    parser.add_argument("--crank-assistance", type=float, default=0.0)
+    torque_group = parser.add_mutually_exclusive_group()
+    torque_group.add_argument(
+        "--crank-assistance",
+        type=float,
+        default=0.0,
+        help="Non-negative assistance magnitude in N.m (the historical default).",
+    )
+    torque_group.add_argument(
+        "--signed-crank-torque",
+        type=float,
+        default=None,
+        help=(
+            "Signed crank torque in N.m; a positive value is resistive for "
+            "the nominal negative crank velocity."
+        ),
+    )
     parser.add_argument("--terminal-wheel-q-slack", type=float, default=0.002)
     parser.add_argument(
         "--rho-only",

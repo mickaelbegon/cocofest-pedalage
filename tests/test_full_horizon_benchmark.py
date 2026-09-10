@@ -140,6 +140,18 @@ def test_rho_only_writes_a_complete_report_and_skips_full_horizon(
     assert len(monitored_commands) == 1
 
 
+def test_full_horizon_cli_preserves_an_explicit_resistive_signed_torque():
+    args = full_horizon.build_parser().parse_args(
+        [
+            "--workspace", ".", "--seed-dir", ".", "--output-dir", ".",
+            "--max-cycles", "50", "--n-threads", "1", "--signed-crank-torque", "0.22",
+        ]
+    )
+    command = full_horizon._common_solver_options(args)
+    assert command[command.index("--signed-crank-torque") + 1] == "0.22"
+    assert "--crank-assistance" not in command
+
+
 def test_rho_only_rejects_a_partial_reference(tmp_path, monkeypatch):
     args = full_horizon.build_parser().parse_args(
         [
