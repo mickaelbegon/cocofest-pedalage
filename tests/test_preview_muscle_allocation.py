@@ -73,6 +73,25 @@ def test_causal_force_coupling_and_first_phase_map_are_exact():
     np.testing.assert_allclose(problem.force_offsets[1] + problem.force_jacobians[1] @ controls, second[:, 1])
 
 
+def test_preview_quadratic_has_consistent_derivatives_and_positive_hessian():
+    policy = PreviewMuscleAllocation(ResidualTrapPredictor(), preview_phases=2)
+    problem = policy.build_preview_qp(toy_state(), 0)
+    point = .3 * problem.upper_bounds
+    step = 1e-5
+    differences = np.array([
+        (problem.objective(point + shift) - problem.objective(point - shift)) / (2 * step)
+        for shift in np.eye(point.size) * step
+    ])
+    np.testing.assert_allclose(differences, problem.hessian @ point + problem.linear_term,
+                               atol=1e-10, rtol=1e-8)
+    np.testing.assert_allclose(problem.hessian, problem.hessian.T, atol=1e-14)
+    assert np.linalg.eigvalsh(problem.hessian).min() >= .99 * policy.recruitment_regularization
+    deviation = problem.moment_offsets + problem.moment_jacobian @ point - problem.reference_moments
+    expected = .5 * problem.normalized_weights @ (deviation**2)
+    expected += .5 * policy.recruitment_regularization * (point @ point)
+    assert problem.objective(point) == pytest.approx(expected, abs=1e-14)
+
+
 def test_preview_prevents_residual_force_trap_without_changing_any_target():
     predictor = ResidualTrapPredictor()
     greedy = PreviewMuscleAllocation(predictor, preview_phases=1).rollout(toy_state(), horizon_cycles=1)

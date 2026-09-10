@@ -448,3 +448,29 @@ La latence totale de prédiction et les éventuels échecs sont des critères de
 décision, au même titre que les marges et les différences de fatigue. Un
 meilleur rollout compact seul ne suffit pas à accepter une nouvelle valeur
 terminale ni à revendiquer un gain d'endurance.
+
+### Résultat et décision après le premier écran
+
+Les trois politiques terminent 10 cycles aux deux ancres et 30 cycles à
+l'ancre 0; les neuf rejeux Ding correspondants passent les critères numériques.
+À l'ancre 112, les politiques à une, deux et trois phases terminent
+respectivement 607, 636 et 605 phases sur les 900 demandées. Un contrôle
+indépendant par programmation linéaire confirme l'incompatibilité des égalités
+et des bornes des deux QP figés à leurs frontières d'arrêt. Cela ne prouve pas
+l'infaisabilité du problème musculaire complet. Les résultats, réglages et
+figures sont détaillés dans `preview_muscle_allocation_validation.md`.
+
+Le preview à deux phases progresse davantage dans cet exemple, mais son
+rollout H10 coûte environ `0,7 s`, avant calcul des marges et ajustement local;
+le preview à trois phases coûte environ `1 s`. Aucun fit de 41 points sur les
+ancres réelles n'a été chronométré pour ce backend. L'accélération batch du
+greedy ne doit pas lui être attribuée. Cette étape ne justifie donc pas une
+activation automatique dans le RHO.
+
+La prochaine expérience sera une politique hybride : calcul rapide à une
+phase, avec preview à deux phases seulement lorsqu'un critère de risque
+annoncé à l'avance détecte une difficulté future. Elle changera explicitement
+la politique prédite et devra être comparée au preview systématique, à cibles
+et tolérances inchangées. Le critère de décision sera le temps **total** de
+calcul et d'audit de la valeur locale, avec le suivi Ding et le classement
+des valeurs, avant une comparaison RHO prospective avec IPOPT/MA57.
