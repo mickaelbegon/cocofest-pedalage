@@ -17,7 +17,6 @@ from dataclasses import asdict
 import json
 import os
 from pathlib import Path
-import runpy
 import sys
 
 REPO = Path(__file__).resolve().parents[1]
@@ -141,15 +140,17 @@ def main(argv=None):
 
         return original(nmpc, callback, *positional, **kwargs)
 
-    old_argv = sys.argv
     FesNmpcMsk.solve_fes_nmpc = solve_with_pace
-    sys.argv = [str(REPO / "examples/fes_multibody/cycling/cycling_fes_solver_comparison.py"),
-                *benchmark_argv]
     try:
-        runpy.run_module("examples.fes_multibody.cycling.cycling_fes_solver_comparison",
-                         run_name="__main__")
-        if not controllers:
-            raise RuntimeError("RHO benchmark never reached the PACE integration")
+        # Execute the already imported module, avoiding a second __main__
+        # module identity. The public parser and main have identical keys.
+        from examples.fes_multibody.cycling.cycling_pulse_width_mhe import MyCyclicNMPC
+        if MyCyclicNMPC.solve_fes_nmpc is not solve_with_pace:
+            raise RuntimeError("Cycling NMPC does not inherit the PACE integration")
+        benchmark.main(**vars(parsed))
+        if (len(controllers) != 1 or not controllers[0].connected
+                or not args.pace_journal.is_file() or args.pace_journal.stat().st_size == 0):
+            raise RuntimeError("RHO benchmark did not produce a connected PACE cost and journal")
         for controller in controllers:
             controller._record({"event": "launcher_completed", "ocp_cost_connected": controller.connected,
                                 "physical_outcome": "see_original_benchmark_result"})
@@ -158,7 +159,6 @@ def main(argv=None):
             controller._record({"event": "launcher_failed", "error": f"{type(error).__name__}: {error}"})
         raise
     finally:
-        sys.argv = old_argv
         FesNmpcMsk.solve_fes_nmpc = original
 
 

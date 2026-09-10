@@ -209,6 +209,17 @@ def test_isokinetic_finds_versioned_hsl_installation_in_target_environment(tmp_p
     assert environment["IPOPT_HSL_LIBRARY"] == str(installed_hsl)
 
 
+def test_base_environment_exposes_hsl_for_dynamic_rho_child_processes(tmp_path):
+    rho_prefix = tmp_path / "cocofest-rho32"
+    installed_hsl = rho_prefix / "opt" / "libhsl" / "v2025.7.21" / "lib" / "libhsl.so"
+    installed_hsl.parent.mkdir(parents=True)
+    installed_hsl.write_bytes(b"test HSL library")
+
+    environment = driver.base_environment(rho_prefix, "rho32", threads=1)
+
+    assert environment["IPOPT_HSL_LIBRARY"] == str(installed_hsl)
+
+
 def test_hsl_library_rejects_directories(tmp_path):
     with pytest.raises(SystemExit, match="2"):
         driver.parse_arguments(["--ipopt-hsl-library", str(tmp_path)])

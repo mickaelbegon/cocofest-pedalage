@@ -400,6 +400,14 @@ def base_environment(prefix: Path, suite: str, threads: int,
     # the documented shell protocol.
     if suite == "rho32":
         library_dirs = [str(prefix / "lib")]
+        # Dynamic constant-resistance RHO uses the same IPOPT/MA57 path as the
+        # isokinetic benchmark.  Do not rely on Conda activation hooks: IDE
+        # and FHO-driver child processes may not have them.  Prefer the HSL
+        # library owned by this exact environment so a stale caller value
+        # cannot silently select a different ABI.
+        environment_hsl_library = installed_hsl_library(prefix)
+        if environment_hsl_library is not None:
+            env["IPOPT_HSL_LIBRARY"] = str(environment_hsl_library)
     else:
         cache = REPO_ROOT / ".cache" / "madnlp-mumps"
         library_dirs = [str(cache / "lib"), str(cache / "share" / "julia" / "lib")]

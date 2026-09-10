@@ -179,3 +179,43 @@ def test_launcher_restricts_to_supported_real_dynamic_rho():
     args.ipopt_c_compile = True
     with pytest.raises(ValueError, match="ipopt_c_compile"):
         validate_benchmark_arguments(args, RhoPaceConfig())
+
+
+def test_launcher_executes_patched_canonical_cycling_class_and_writes_journal(tmp_path, monkeypatch):
+    from scripts.run_rho_pace_benchmark import main
+    from examples.fes_multibody.cycling import cycling_fes_solver_comparison as benchmark
+    from examples.fes_multibody.cycling.cycling_pulse_width_mhe import MyCyclicNMPC
+    from cocofest.optimization.fes_nmpc_multibody import FesNmpcMsk
+    from cocofest.optimization import rho_pace
+    original = FesNmpcMsk.solve_fes_nmpc
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"initial_weight_basis": "uniform fixture"}))
+    journal = tmp_path / "pace.jsonl"
+    model = SimpleNamespace(muscle_name="m0", **dict.fromkeys(
+        ("a_scale", "alpha_a", "alpha_tau1", "alpha_km", "tau_fat",
+         "tau1_rest", "km_rest", "tauc", "tau2", "pd0", "pdt"), 1.))
+    nmpc = object.__new__(MyCyclicNMPC)
+    nmpc.nlp = [SimpleNamespace(model=SimpleNamespace(muscles_dynamics_model=[model]),
+                               x_bounds={"A_m0": SimpleNamespace(min=np.ones((1, 1)))})]
+    monkeypatch.setattr(FesNmpcMsk, "solve_fes_nmpc", lambda self, callback, **kw: callback(self, 0, None))
+    patched_original = FesNmpcMsk.solve_fes_nmpc
+    monkeypatch.setattr(rho_pace, "update_bioptim_fatigue_cost", lambda ocp, weights: apply(weights))
+    monkeypatch.setattr(benchmark, "main", lambda **kwargs: nmpc.solve_fes_nmpc(lambda *a: True))
+    main(["--pace-config", str(config), "--pace-journal", str(journal), "--", "--solvers", "ipopt",
+          "--mechanical-formulation", "reduced", "--compact-rho-output", "--signed-crank-torque", ".22"])
+    rows = [json.loads(line) for line in journal.read_text().splitlines()]
+    assert rows[-1]["event"] == "launcher_completed"
+    assert any(row.get("status") == "applied" for row in rows)
+    assert FesNmpcMsk.solve_fes_nmpc is patched_original
+
+
+def test_launcher_cannot_succeed_when_benchmark_bypasses_cost_attachment(tmp_path, monkeypatch):
+    from scripts.run_rho_pace_benchmark import main
+    from examples.fes_multibody.cycling import cycling_fes_solver_comparison as benchmark
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"initial_weight_basis": "uniform fixture"}))
+    monkeypatch.setattr(benchmark, "main", lambda **kwargs: None)
+    with pytest.raises(RuntimeError, match="connected PACE cost and journal"):
+        main(["--pace-config", str(config), "--pace-journal", str(tmp_path / "pace.jsonl"), "--",
+              "--solvers", "ipopt", "--mechanical-formulation", "reduced",
+              "--compact-rho-output", "--signed-crank-torque", ".22"])
