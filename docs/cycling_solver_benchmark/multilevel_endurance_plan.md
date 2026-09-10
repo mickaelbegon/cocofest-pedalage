@@ -32,11 +32,43 @@ avec une faible préférence supplémentaire pour la répartition de référence
 Augmenter le poids d'un muscle encourage à utiliser les autres lorsque le
 moment demandé et leurs capacités le permettent. Les muscles antagonistes
 gardent leurs contributions signées. Le moment total original et les bornes
-de PW restent des contraintes.
+de PW restent des contraintes, vérifiées aux extrémités des phases du modèle
+compact. Cela ne valide pas des adaptations d'inertie ou de roue libre entre
+les phases, notamment autour de la zone commune de moments négatifs.
 
 Ce coût de stimulation est un choix de politique, pas une loi d'endurance.
 Le cas « tous les poids égaux » est une nouvelle référence et ne doit pas
 être confondu avec l'ancien allocateur centré sur les moments archivés.
+
+### Priorité après lecture de l'article de handcycling
+
+La demande de réutiliser les formules de l'annexe change la référence
+scientifique de la prochaine expérimentation : partir des poids physiologiques
+et mécaniques calculés, puis tester leur sensibilité aux paramètres musculaires,
+avant de rechercher des corrections lentes. Le petit coût de recrutement reste
+un test technique de redistribution, pas un substitut au coût de l'article.
+
+L'article rapporte, pour son RHO de deux cycles, 1230 cycles sans pondération,
+1692 avec les poids calculés et 1729 avec les poids bayésiens. Ces résultats
+concernent son modèle et sa tâche, pas les archives actuelles. La méthode de
+calcul des poids ne nécessite pas de FHO.
+
+Le coût de fatigue de l'équation 16 intègre une racine de somme pondérée des
+pertes de capacité au carré. Il porte sur la perte accumulée de capacité,
+pas sa dérivée. Remplacer ce coût par le recrutement au carré, supprimer la
+racine, ou normaliser chaque perte par la capacité au repos à poids inchangés
+change le coût et impose une comparaison distincte. Pour conserver exactement
+l'expression RMS en passant aux pertes relatives, il faudrait multiplier
+chaque poids brut par le carré de la capacité au repos correspondante.
+Le poids nul du triceps dans l'article
+ne peut pas non plus entrer tel quel dans le superviseur expérimental limité
+aux poids strictement positifs entre 0,25 et 4.
+
+Le protocole détaillé, les paramètres disponibles et les informations encore
+manquantes sont dans [le plan de validation des poids de l'article](physiological_weights_validation_plan.md).
+L'implémentation fidèle des formules attend le Supplementary Material 1,
+absent du PDF principal fourni. Le benchmark du coût de recrutement ne doit
+pas être présenté comme cette validation.
 
 ## Trois briques à vérifier séparément
 
@@ -80,8 +112,9 @@ et en diminution; ces choix ne seront pas réajustés après les résultats.
 
 Si plusieurs candidats terminent l'horizon, le superviseur favorise celui qui
 conserve la meilleure marge de moment dans sa phase la plus fragile. Si aucun
-ne termine, il compare la durée explicitement réalisée avant le premier
-échec. Les erreurs de calcul et les états invalides ne deviennent pas de faux
+ne termine, il compare les préfixes réalisés parmi les échecs de capacité
+explicitement comparables. Les erreurs de calcul et les refus du domaine du
+modèle sont exclus par défaut du classement et ne deviennent pas de faux
 scores d'endurance. Un échec de cette politique ne prouve pas que toute autre
 stratégie serait impossible.
 
