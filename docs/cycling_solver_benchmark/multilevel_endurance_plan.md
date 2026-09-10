@@ -64,11 +64,18 @@ Le poids nul du triceps dans l'article
 ne peut pas non plus entrer tel quel dans le superviseur expérimental limité
 aux poids strictement positifs entre 0,25 et 4.
 
-Le protocole détaillé, les paramètres disponibles et les informations encore
-manquantes sont dans [le plan de validation des poids de l'article](physiological_weights_validation_plan.md).
-L'implémentation fidèle des formules attend le Supplementary Material 1,
-absent du PDF principal fourni. Le benchmark du coût de recrutement ne doit
-pas être présenté comme cette validation.
+L'annexe et le code source sont désormais disponibles. Les poids nominaux
+et les facteurs intermédiaires de la figure S4 sont reproduits. Chaque jeu
+de paramètres reçoit ses propres poids dans un panel élargi de 138 cas,
+avec des perturbations de facteur 0,25 à 4 et un refus explicite des
+calibrations sortant du domaine physique.
+
+Le [protocole mis à jour](physiological_weights_validation_plan.md) et les
+[résultats numériques](physiological_weights_validation.md) distinguent les
+paramètres publiés de ceux du dépôt actuel. Leur réconciliation, le contact
+mécanique et la gestion des poids nuls restent nécessaires avant le raccord
+au véritable RHO. Le benchmark du coût de recrutement ne doit pas être
+présenté comme cette validation.
 
 ## Trois briques à vérifier séparément
 

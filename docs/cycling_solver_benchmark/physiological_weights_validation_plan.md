@@ -1,178 +1,139 @@
-# Réutiliser et éprouver les poids physiologiques de l'article
+# Poids physiologiques recalculés pour chaque cas
 
-## Décision et état des sources
+## Sources et décision
 
-La prochaine référence sera le calcul des poids de l'article, et non un jeu
-de poids réglé arbitrairement autour de un. On cherchera ensuite si une
-correction lente apporte quelque chose à ces poids initiaux, sans données FHO.
+L'annexe est désormais disponible : Supplementary Material 1.docx, tableaux
+S3/S4 et S6, figure S4. La référence exécutable est le
+[code public gelé au commit 31e064f4](https://github.com/pyomeca/cocofest/blob/31e064f4d80741c8b5444e6ce4d91bfe4eb78c3d/examples/fes_multibody/cycling/physiological_weight_calculation.py).
 
-Source lue : manuscrit de Co, Puchaud, Moissenet et Begon, *Maximizing Task
-Endurance through Muscle Fatigue Minimization with Consideration of Muscle
-Fatigability and Task Contribution: an in-Silico FES Study of Handcycling*,
-PDF fourni de 38 pages. Les pages 22–23 décrivent la méthode; la page 19
-donne le coût de fatigue pondéré. Le Supplementary Material 1 et son tableau
-S6 sont cités mais ne sont pas inclus. Aucune formule manquante de l'annexe
-n'est reconstruite ou présentée comme publiée ici.
+Les poids initiaux sont recalculés pour chaque jeu de paramètres, sans FHO.
+Le noyau est physiological_muscle_weights.py; le catalogue de cas est
+physiological_weight_cases.py; le script reproductible est
+scripts/validate_physiological_weights.py. Les
+[résultats numériques et limites](physiological_weights_validation.md)
+accompagnent ce protocole.
 
-Le texte principal indique :
+## Calcul reproduit
 
-- un produit normalisé entre la fatigabilité au carré et la criticité mécanique;
-- une fatigabilité obtenue à partir de la diminution de capacité lors d'une
-  activation de 80 % dans les zones de moment positif, pendant 1500 cycles;
-- une criticité qui additionne une contribution positive exclusive et une
-  contribution avant la zone où tous les muscles ont un moment négatif;
-- les poids finaux, dans l'ordre deltoïde antérieur, deltoïde postérieur,
-  biceps, triceps : **1; 0,0943; 0,389; 0**.
+1. Extraire les moments signés avec un muscle activé à la fois. Comme dans le
+   code, les contributions passives des muscles inactifs restent présentes.
+2. Mesurer la fraction d'échantillons angulaires où chaque profil est positif.
+3. Imposer une force de 80 % de Fmax pendant cette fraction d'une seconde,
+   puis un repos pendant le reste de la seconde, sur 1500 cycles.
+4. Mesurer la pente entre les capacités relatives après les cycles 1 et 1500,
+   divisée par 1500. Son signe est opposé dans S6, sans effet après élévation
+   au carré.
+5. À chaque cycle, multiplier les profils mécaniques par la capacité restante.
+   Intégrer la contribution positive exclusive et celle des 90° avant une
+   entrée dans la zone à risque. Moyenner ces contributions sur les cycles.
+6. Multiplier cette criticité mécanique par la fatigabilité au carré, puis
+   appliquer la normalisation min–max du code.
 
-Il manque notamment la définition opérationnelle de la diminution de capacité
-(pente, intervalle et normalisation), les formules et conventions angulaires
-des deux contributions, leur normalisation relative, ainsi que la
-normalisation finale. « 80 % d'activation » ne sera pas assimilé arbitrairement
-à 80 % de PW, de recrutement maximal ou de force maximale.
+Cette calibration n'est ni 80 % de PW ni le modèle Ding complet. Le risque du
+code est une somme de moments positifs inférieure à 0,20 N·m; il ne signifie
+pas exclusivement que tous les moments sont négatifs. Ce seuil ne remplace
+pas automatiquement l'assistance ou la résistance réelle du RHO.
 
-## Étape 1 — Reproduire avant de généraliser
+## Comprendre le poids nul
 
-1. Transcrire les formules exactes du supplément, en associant chaque fonction
-   à son équation ou ligne de tableau et à ses unités.
-2. Reproduire les valeurs intermédiaires du tableau S6 avant les quatre poids.
-   Les tolérances dépendront de la précision publiée, pas d'un ajustement a
-   posteriori des paramètres pour retrouver le résultat.
-3. Conserver les poids nuls. Si tous les scores sont nuls, signaler une
-   normalisation indéfinie au lieu d'inventer une préférence. Une éventuelle
-   régularisation positive sera une variante annoncée, pas la reproduction.
-4. Vérifier les permutations des muscles, les cas symétriques, les unités,
-   les limites sans fatigue et la sensibilité au maillage angulaire.
-5. Chronométrer séparément puis ensemble la calibration de fatigabilité,
-   la géométrie et le calcul final des poids. Le calcul arithmétique des poids
-   seul ne représente pas nécessairement le coût de toute la méthode.
+La normalisation min–max impose un zéro au score brut minimal. Un triceps
+devenu non minimal reçoit donc un poids positif, mais un autre muscle reçoit
+le zéro. Un plancher positif ou une division par le maximum serait une
+variante différente, pas la reproduction publiée.
 
-L'article annonce des poids calculés en moins d'une seconde, mais un OCP moyen
-de 3,62 s dans la condition physiologique. Cela ne démontre pas encore la cible
-d'un RHO complet sous une seconde.
+Dans la référence nominale reproduite, la criticité du triceps vaut aussi
+zéro. Changer seulement sa fatigabilité ne suffit donc pas. Il faut examiner
+les changements de contribution mécanique, notamment quand les capacités
+d'autres muscles changent. Conserver séparément fatigabilité, criticité,
+scores bruts, poids et écart du score triceps au minimum des autres muscles.
 
-## Étape 2 — Auditer les paramètres réellement utilisés
+## Références à ne pas confondre
 
-Les valeurs suivantes sont celles exécutées par `set_fes_model` dans
-`examples/fes_multibody/cycling/cycling_pulse_width_mhe.py`, et non une
-retranscription certifiée du supplément :
+| Paramètre | Code publié | Dépôt actuel |
+| --- | ---: | ---: |
+| alpha A du deltoïde antérieur | −0,14 | −1,4 |
+| alpha A du deltoïde postérieur | −0,11 | −1,1 |
+| alpha A du biceps | −0,056 | −0,56 |
+| alpha A du triceps | −0,034 | −0,24 |
+| A au repos du triceps, N/s | 4915,5 | 7036,3 |
+| Fmax du triceps, N | 262 | 617 |
+| tau de récupération du triceps, s | 109,1 | 76,2 |
 
-| Muscle | A au repos (`a_scale`, N/s) | `alpha_a` | `tau_fat` (s) | `fmax` (N) |
-| --- | ---: | ---: | ---: | ---: |
-| Biceps | 3314,7 | −0,56 | 179,6 | 149 |
-| Triceps | 7036,3 | −0,24 | 76,2 | 617 |
-| Deltoïde antérieur | 1148,6 | −1,4 | 445,5 | 48 |
-| Deltoïde postérieur | 1234,5 | −1,1 | 342,7 | 51 |
+Les autres valeurs sont conservées telles qu'elles apparaissent dans chaque
+référence. Un test compare les 16 paramètres à ceux extraits par AST du
+dictionnaire local de set_fes_model. Il vérifie notamment la notation
+Python 10e-2, qui vaut 0,1 et non 0,01.
 
-Attention à la notation Python existante : `10e-2` vaut `0.1`, donc
-`-5.6 * 10e-2` vaut bien `-0.56`. Ce constat n'établit pas une erreur du code;
-il exige une comparaison avec les unités et valeurs de l'annexe avant tout
-changement. Les commentaires de ce fichier décrivent des couplages liés à la
-PCSA et aux fibres; ils ne remplacent pas la vérification de leur source.
+S3 donne 7036,3 et 617 pour le triceps, alors que S4 et le code donnent 4915,5
+et 262. S3 donne également −0,034 et 109,1. Les trois sources ne sont pas
+fusionnées artificiellement; aucun paramètre du RHO public n'est modifié.
 
-Dans ce code, `fmax` est distinct de `a_scale`. Il intervient notamment dans
-les bornes de force du RHO. Le prédicteur compact n'a pas de champ `fmax` :
-varier cette borne n'est pas équivalent à varier la génération de force, et
-un test compact seul ne garantit pas le respect des mêmes bornes que le RHO.
+## Panel élargi
 
-Chaque cas devra conserver les paramètres, leur origine, leurs unités, les
-états initiaux et le profil mécanique. Les variantes modifieront des copies
-explicites des paramètres, pas la configuration publique du modèle.
+Chaque référence contient 69 cas déterministes : le nominal, 64 variations
+indépendantes et quatre interactions. Les variations portent sur quatre
+muscles, quatre paramètres (alpha A, tau de récupération, A au repos, Fmax)
+et les facteurs 0,25; 0,5; 2; 4. Les interactions croisent la fatigabilité du
+deltoïde antérieur et du triceps avec les facteurs 0,5 et 2.
 
-Le dépôt fournit déjà l'efficacité géométrique signée en fonction de l'angle
-dans `cocofest/dynamics/reduced_cycling.py` (`muscle_effectiveness`). Elle
-permettra de construire les indicateurs exacts de l'annexe; sa valeur absolue
-seule ne représente pas la criticité mécanique. L'exemple
-`cycling_bayesian_mhe.py` applique des poids à la perte **relative** de capacité
-au carré, séparément pour chaque muscle. Ce coût ne reproduit donc pas
-automatiquement la racine des pertes **brutes** de l'équation 16.
+Ce sont des perturbations numériques, pas des profils cliniques. Changer A
+et Fmax indépendamment isole leurs effets mais ne représente pas forcément
+un changement physiologique cohérent de taille musculaire. Un panel couplé
+PCSA/fibres viendra après réconciliation de ses relations et paramètres.
 
-## Étape 3 — Séparer deux familles de sensibilité
+Chaque variation de Fmax recalcule les moments avec les contributions
+passives. L'adaptateur CasADi évite de redimensionner indépendamment une
+colonne de moment alors que les autres muscles peuvent aussi être affectés.
 
-### A. Un paramètre à la fois : comprendre le mécanisme
+## Contrôles scientifiques
 
-Premier criblage proposé avant calcul : multiplicateurs 0,9; 1; 1,1 autour
-de chaque valeur nominale non nulle, muscle par muscle. Pour trois paramètres
-et quatre muscles, cela donne 24 perturbations et le cas nominal. Une grille
-plus large de 0,5 à 2 et des interactions ciblées ne viendront qu'ensuite,
-pour les facteurs retenus. Ces amplitudes sont des tests numériques, pas des
-intervalles physiologiques validés.
+Les capacités sont contrôlées avant et après le repos de chaque cycle. Une
+capacité non positive rend les poids inutilisables pour le contrôleur. Le
+résultat historique reste disponible pour audit seulement. L'échec de cette
+calibration à force prescrite ne démontre pas une impossibilité du RHO.
 
-- Intensité de fatigue : varier la magnitude de `alpha_a` en gardant son signe.
-- Récupération : varier `tau_fat`, en séparant état initial au repos et état
-  déjà fatigué. Une constante plus grande signifie une récupération plus lente.
-- Capacité : varier `a_scale` en déclarant explicitement si `fmax` et l'état
-  initial suivent ou restent fixes.
-- Dynamique de fatigue complète : étudier aussi `alpha_tau1`, `alpha_km`,
-  `tau1_rest` et `km_rest`, puisque la force produite dépend de ces états.
-- Recrutement : étudier les paramètres PW si la définition exacte du protocole
-  d'activation fait intervenir la conversion stimulation–activation.
+La cinématique conserve le problème de moindres carrés du code source, ses
+bornes et conventions. La lecture native des bornes provoquant un arrêt du
+processus avec le binding disponible, l'adaptateur les lit dans le bioMod et
+résout le même problème avec des marqueurs et jacobiennes CasADi. Aucune
+dépendance n'est modifiée.
 
-Changer `a_scale` impose un état initial au repos propre au nouveau modèle
-ou un protocole de préparation commun : réutiliser une valeur absolue de A
-issue d'une ancienne archive changerait aussi la fatigue relative initiale.
-Changer `tauc` ou `km_rest` impose de reconstruire les amplitudes et historiques
-calciques. Changer `pd0` ou `pdt` impose de recalculer le recrutement accessible
-sous la borne physique de PW déclarée. Les anciens intervalles pré-calculés
-ne doivent pas être réutilisés aveuglément après ces modifications.
+Les écarts aux marqueurs sont enregistrés. Retrouver les poids publiés ne
+valide pas le contact du véritable RHO. Le sens temporel du « pré-risque »
+et les signes du travail doivent également être confrontés à la cinématique
+exécutée. La grille 120 intervalles reproduit le code; une grille 240 mesure
+la sensibilité des trois cas présélectionnés, sans certificat de convergence.
 
-On ne postulera pas que tous les poids normalisés sont monotones avec chacun
-de ces paramètres : la force produite, la récupération et les autres muscles
-peuvent modifier la réponse. Les tests de monotonie porteront seulement sur
-des situations analytiques à force imposée où cette propriété est démontrée.
+## Comparaison avec les contrôleurs
 
-### B. Paramètres couplés : comparer des profils cohérents
+| Approche | Commande | Poids |
+| --- | --- | --- |
+| RHO normal | Un cycle | Uniformes |
+| RHO physiologique fixe | Un cycle | Recalculés au départ pour ce cas |
+| Approche à deux vitesses | Un cycle et superviseur lent | Même initialisation puis corrections lentes |
+| FHO sur quelques cas | Horizon fini déclaré | Politique de coût explicitement déclarée |
 
-Après validation des relations de mise à l'échelle, faire varier PCSA et
-proportion de fibres, puis recalculer ensemble les paramètres concernés.
-Ajouter des jeux identifiés expérimentalement s'ils sont disponibles.
-Ne pas appeler « profils de patients » une grille synthétique non calibrée.
+L'approche fixe intermédiaire isole l'effet de l'initialisation de celui du
+superviseur. Les trois RHO doivent partager modèle, état initial, charge,
+cadence cible, limites de PW/force, intégrateur et critères de validation.
 
-Séparer les changements de physiologie des changements de tâche : géométrie,
-cadence, assistance/résistance et zones de contribution. L'article utilise
-une assistance de 0,20 N·m; les archives actuelles sélectionnées pour le
-prototype indiquent une résistance de 0,10 N·m. Une identité de paramètres
-musculaires ne suffirait donc pas à garantir les mêmes poids mécaniques.
+Le coût de l'article intègre la RMS de perte de capacité, pas le recrutement
+au carré du premier prototype. Passer aux pertes relatives exige de
+transformer les poids. La gestion des poids nuls reste à ajouter au
+superviseur, actuellement limité aux poids positifs.
 
-Le protocole de 1500 cycles et 80 % sera reproduit d'abord, puis ses propres
-sensibilités seront examinées. Dans l'article, 1500 est choisi à partir des
-endurances déjà observées : ce n'est pas une constante indépendante à
-supposer universelle pour l'usage clinique.
+IPOPT/MA57 reste la référence demandée. Le calcul initial des poids n'ajoute
+aucun OCP ni compilation NLP. Le délai inférieur à une seconde doit encore
+être mesuré sur la boucle RHO complète.
 
-## Étape 4 — Juger si les poids ont du sens
+Le FHO est exclusivement évaluatif. Avant ses résultats, les règles retiennent
+le nominal publié, le premier cas admissible avec triceps positif dans
+l'ordre déclaré, et le cas admissible dont la calibration garde la plus
+petite capacité positive. Ces cas doivent d'abord passer les contrôles du
+RHO. Aucune sortie FHO ne règle les poids ou ne sélectionne les paramètres.
 
-Pour chaque cas, enregistrer séparément fatigabilité brute, contribution
-exclusive, contribution avant la zone critique, score non normalisé et poids
-final. Cela distingue un véritable changement de fatigabilité d'un simple
-changement de normalisation entre muscles.
-
-Figures prévues :
-
-1. Courbes des scores bruts et poids selon chaque paramètre, avec les quatre
-   muscles et le point nominal clairement identifié.
-2. Carte PCSA × proportion de fibres, montrant le poids et les régions où le
-   modèle ou le protocole de calibration sort de son domaine admissible.
-3. Profil angulaire des contributions mécaniques, avec les zones exclusives
-   et la zone déficitaire, pour expliquer les poids faibles ou nuls.
-4. Comparaison de trois politiques : poids uniformes, poids de l'article
-   recalculés, puis ces mêmes poids avec correction lente.
-
-Un poids plausible n'est pas encore une endurance améliorée. La dernière
-comparaison exige le même objectif de perte de capacité que l'article, les
-mêmes bornes, la même charge, le même état initial et les mêmes critères
-d'arrêt. Les PW seront rejouées avec les équations complètes avant une
-conclusion sur le contrôleur. Un arrêt numérique sera distingué d'un manque
-de capacité à produire le moment demandé.
-
-## Lien avec le superviseur à plusieurs minutes
-
-La direction retenue est : **poids calculés à partir du modèle → corrections
-lentes vérifiées → RHO court avec poids fixes pendant chaque résolution**.
-Les coefficients nuls et les rapports de poids de l'article demandent une
-politique de candidats adaptée : les bornes positives 0,25–4 du premier test
-technique ne les représentent pas.
-
-Le module de carte de fatigue à force imposée et le superviseur générique
-sont des briques réutilisables. Ils ne remplacent ni les formules S6 ni la
-validation du coût réel du RHO. En l'absence du supplément, la reproduction
-numérique des poids reste explicitement en attente; aucun résultat de
-sensibilité des poids publiés n'est revendiqué.
+Comparer le temps exécuté, le suivi, les PW, les forces et réserves. Les
+coûts d'optimisation pondérés différemment exigent aussi une métrique commune
+d'évaluation. Un FHO fini ne prouve pas une endurance globalement optimale.
+Rapporter latences RHO médiane/p95/maximum, dépassements de délai, durée du
+superviseur et âge des propositions acceptées.
