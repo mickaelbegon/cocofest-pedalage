@@ -374,11 +374,17 @@ horizon inachevé. Une bande positive change la tâche prédite; elle ne doit pa
 être présentée comme un gain d'endurance à suivi exact, ni comme une tolérance
 clinique validée.
 
-La prochaine décision dépend de la fidélité du prédicteur à la frontière :
-le déficit compact H30 (`1,45e-4 N·m`) est plus petit que le seuil de rejeu
-jusqu'ici utilisé (`1e-3 N·m`). Il faut d'abord rejouer le préfixe réussi avec
-les équations Ding complètes, raffiner l'intégration et reconstruire
-l'enveloppe signée de la phase critique. Un tel rejeu partiel est un diagnostic,
-pas une validation d'un horizon complet. Si la frontière persiste dans le
-modèle complet, on pourra tester une allocation anticipant quelques phases;
-sinon, il faudra d'abord corriger ou borner l'erreur du prédicteur compact.
+Le déficit compact H30 (`1,45e-4 N·m`) étant plus petit que le seuil de rejeu
+jusqu'ici utilisé (`1e-3 N·m`), un diagnostic indépendant a rejoué le préfixe
+réussi avec Ding complet et reconstruit l'enveloppe signée de la phase critique.
+Le déficit reste de `6,51e-5 N·m` après raffinement à 128 sous-pas, avec des
+variations de bornes inférieures à `8,38e-8 N·m`. Les résultats et limites sont
+détaillés dans `compact_rollout_failure_diagnostic.md` : l'erreur de suivi du
+préfixe reste non nulle et ce rejeu partiel ne valide pas un horizon complet.
+
+Le prochain essai sera une allocation future anticipant deux ou trois phases,
+pour tenir compte de la force résiduelle avant les changements de demande.
+Ce petit calcul restera hors du NLP RHO. Il faudra comparer à cible inchangée
+la politique actuelle et cette politique anticipative, puis rejouer leurs PW
+avec Ding complet avant d'accepter une nouvelle valeur H30. Aucune tolérance
+physique supplémentaire ni amélioration d'endurance ne sera présumée.
