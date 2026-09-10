@@ -388,3 +388,63 @@ Ce petit calcul restera hors du NLP RHO. Il faudra comparer à cible inchangée
 la politique actuelle et cette politique anticipative, puis rejouer leurs PW
 avec Ding complet avant d'accepter une nouvelle valeur H30. Aucune tolérance
 physique supplémentaire ni amélioration d'endurance ne sera présumée.
+
+## Expérience : allocation anticipative sur quelques phases
+
+La politique à une phase peut satisfaire la demande actuelle en laissant une
+force résiduelle trop élevée pour la demande suivante. L'expérience suivante
+ne répète donc pas les PW : elle choisit une redistribution sur `K=2` ou `K=3`
+phases, avec `K=1` comme témoin. Quatre muscles donnent au plus 12 recrutements
+dans ce calcul numérique auxiliaire, toujours **hors du NLP RHO**.
+
+Pour une trajectoire nominale d'états lents, la force prédite s'écrit
+
+\[
+F_{i,j+1}=a_{i,j}F_{i,j}+b_{i,j}r_{i,j},\qquad
+0\le r_{i,j}\le r_{i,\max}.
+\]
+
+Le recrutement `r` se convertit analytiquement en PW. Les coefficients sont
+gelés pendant le petit QP, mais la force est propagée d'une phase à l'autre :
+les décisions présentes changent donc les forces résiduelles futures. Le QP
+minimise des écarts quadratiques aux moments musculaires de référence sous
+les égalités de **moment total original** à chaque phase. Il conserve les
+coefficients mécaniques signés et n'introduit pas de bande de suivi.
+
+Le solveur auxiliaire est SLSQP, avec objectif quadratique et dérivées
+analytiques; ce n'est pas le solveur du RHO. Les réglages initiaux sont
+60 itérations au maximum, une régularisation du recrutement de `1e-8` après
+normalisation commune du coût, une tolérance de moment de `1e-8 N·m` et une
+tolérance KKT de `1e-6`. L'audit vérifie séparément faisabilité, stationnarité
+et complémentarité. La limite de `0,5 s` est vérifiée lors des appels à
+l'objectif : elle n'est pas un plafond dur pour la construction, l'audit KKT
+ou le calcul complet d'une valeur locale.
+
+La trajectoire nominale est une aide au calcul, pas une solution certifiée.
+Si sa construction nécessite une projection interne sur une enveloppe,
+celle-ci est comptabilisée et ne change pas les cibles du QP. Après résolution,
+seule la première décision est appliquée avec la carte compacte originale;
+les bornes, le domaine physiologique et le résidu de moment sont contrôlés,
+puis le nominal et le QP sont reconstruits. Le preview est raccourci en fin
+d'horizon pour ne pas imposer de contraintes au-delà de l'horizon annoncé.
+
+Un QP rejeté ne doit pas produire un coût d'horizon partiel. Un repli éventuel
+sur la politique à une phase doit être explicitement activé et comptabilisé;
+il est désactivé dans la comparaison principale. Un arrêt anticipé peut
+signifier que le petit QP ne trouve pas de séquence pour ses prochaines
+phases, sans que la phase actuelle soit impossible. Son index d'arrêt n'est
+donc pas, à lui seul, une mesure d'endurance physique.
+
+L'adaptateur expérimental `preview_endurance_value.py` réutilise le score de
+marges signées et l'audit des enveloppes aux états effectivement appliqués.
+Il conserve l'identité de la politique et ses réglages dans les métadonnées.
+Il est séquentiel : les gains du backend batch à une phase ne lui sont pas
+attribués. Le code des campagnes RHO et le graphe IPOPT/MA57 restent inchangés.
+
+Le protocole compare les mêmes ancres RHO 0 et 112, horizons 10 et 30 cycles,
+conditions initiales, profils et tolérances. Les PW complètes sont rejouées
+indépendamment avec Ding avant toute conclusion sur la fidélité dynamique.
+La latence totale de prédiction et les éventuels échecs sont des critères de
+décision, au même titre que les marges et les différences de fatigue. Un
+meilleur rollout compact seul ne suffit pas à accepter une nouvelle valeur
+terminale ni à revendiquer un gain d'endurance.
