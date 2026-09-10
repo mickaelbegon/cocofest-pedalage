@@ -136,5 +136,15 @@ restera une comparaison de RHO réellement exécutés : davantage de cycles
 réalisables à tâche identique, avec un suivi correct et un temps de calcul
 compatible avec l'utilisation visée.
 
+## Ce que montre le dernier essai
+
+Le déclenchement conditionnel réduit le temps des projections par rapport au
+QP systématique, mais n'a pas changé les PW sur les cas examinés. Le coût
+local est correctement approximé aux points testés, sans apporter de nouvelle
+information par rapport à la politique rapide. Sa construction prend encore
+17–18 secondes : il n'est donc pas activé dans le RHO d'une seconde. Il faut
+tester une anticipation plus précoce et accélérer la mise à jour complète.
+Voir le [rapport de validation](triggered_preview_allocation_validation.md).
+
 Pour les détails d'implémentation et les étapes de validation, voir
 [le plan technique](compact_endurance_approaches.md).

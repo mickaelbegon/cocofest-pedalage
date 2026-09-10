@@ -508,3 +508,37 @@ cette comparaison. Un refus est un résultat à rapporter, pas une raison de
 changer les seuils après observation. Le temps de toutes les évaluations et
 de leur audit sera inclus, sans présenter le temps d'un seul rollout comme
 le coût d'une mise à jour de valeur.
+
+### Résultat et décision après l'essai hybride
+
+Le [rapport de validation](triggered_preview_allocation_validation.md) porte
+sur les mêmes états RHO, sans données FHO. Sur H10, l'hybride au seuil de 1 %
+prend 0,31–0,34 s par projection, contre environ 0,74 s pour le preview
+systématique. Il déclenche zéro QP à l'ancre 0 et dix à l'ancre 112, au lieu
+de 299. Les six trajectoires hybrides complètes passent le contrôle Ding aux
+extrémités des phases; cela ne valide ni tous les instants ni tous les états
+voisins.
+
+Mais ses PW et ses états restent exactement ceux de la politique rapide sur
+les préfixes communs. À l'ancre 112, H30 s'arrête après 606 phases sur 900,
+contre 607 pour la politique rapide et 636 pour le preview systématique.
+L'audit anticipé refuse une phase plus tôt; ce n'est pas une preuve que le
+mouvement est globalement impossible.
+
+Les deux ajustements H10 sont acceptés : 41 évaluations chacun et aucune
+erreur de classement parmi 247 et 208 paires informatives. Toutefois, leurs
+points et valeurs sont exactement identiques à ceux des ajustements greedy
+historiques acceptés. La mise à jour complète coûte 17,02 et 17,69 s, contre
+environ 0,638 s pour l'ancien calcul greedy vectorisé, mesuré séparément.
+La version hybride actuelle n'apporte donc pas de bénéfice observé qui
+justifierait ce surcoût. Elle n'est pas activée dans le RHO public.
+
+La prochaine hypothèse à tester est une anticipation **plus précoce**, par
+exemple quelques QP à des phases fixes du cycle, avant que la réserve ne
+devienne petite. Ce sera une nouvelle expérience déclarée, pas un réglage
+du seuil après coup présenté comme une validation indépendante. En parallèle,
+les évaluations voisines devront utiliser les calculs vectorisés déjà
+disponibles. On conservera le preview systématique comme témoin et les mêmes
+contrôles de suivi et de classement. Une amélioration de la politique et un
+temps de mise à jour compatible avec le cycle sont tous deux nécessaires
+avant l'intégration prospective avec IPOPT/MA57.
