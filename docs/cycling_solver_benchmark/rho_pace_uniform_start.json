@@ -1,0 +1,12 @@
+{
+  "initial_weight_basis": "uniform_start_control; no physiological calibration supplied; no FHO data",
+  "policy": {
+    "update_every_cycles": 5,
+    "smoothing": 0.2,
+    "capacity_gain": 1.0,
+    "min_relative_weight": 0.25,
+    "max_relative_weight": 4.0,
+    "max_log_step": 0.09531017980432493,
+    "max_cycles": 100
+  }
+}
