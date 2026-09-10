@@ -44,13 +44,15 @@ class _AnalyticValueOracle:
     penalty_temperature = .05
     moment_tolerance = 1e-8
 
-    def __init__(self, coordinates, direction):
+    def __init__(self, coordinates, direction, curvature=0.):
         self.coordinates = coordinates
         self.direction = direction
+        self.curvature = curvature
 
     def evaluate(self, xi):
         self.coordinates.decode(xi)
         value = 2 + self.direction * np.sum(xi[len(xi)//2:] - self.coordinates.anchor[len(xi)//2:])
+        value += .5 * np.sum(self.curvature * (xi - self.coordinates.anchor)**2)
         return OracleEvaluation("complete", float(value), 1., 1., 1)
 
 
@@ -106,6 +108,25 @@ def test_rejected_fit_and_changed_coordinate_context_are_never_bound():
     np.testing.assert_allclose(changed.anchor, coordinates.anchor)
     with pytest.raises(ValueError, match="context"):
         LocalEnduranceValueBinding(fit, changed, ["m0"])
+
+
+def test_quadratic_curvature_is_preserved_in_physical_state_derivatives():
+    coordinates = _coordinates()
+    fit = fit_local_endurance_value(
+        _AnalyticValueOracle(coordinates, 1., curvature=np.array([.2, -.4])),
+        trust_radius=[.005, .1], kind="diagonal_quadratic",
+        absolute_tolerance=1e-9, relative_tolerance=0., ranking_tolerance=1e-8,
+    )
+    assert fit.accepted
+    binding = LocalEnduranceValueBinding(fit, coordinates, ["m0"], weight=3.)
+    states = coordinates.decode(coordinates.anchor).ravel()
+    x = SX.sym("x", 5)
+    expression = binding.function(x, binding.values)[0]
+    derivative = Function("curvature_check", [x], [hessian(expression, x)[0]])
+    expected = np.zeros((5, 5))
+    expected[1, 1] = 3. * (-.4) / 100.**2
+    expected[2, 2] = 3. * .2 / 1200.**2
+    np.testing.assert_allclose(derivative(states), expected, atol=1e-11)
 
 
 class _ForceIntegrator(StateDynamics):

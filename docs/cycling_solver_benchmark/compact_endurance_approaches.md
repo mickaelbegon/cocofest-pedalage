@@ -261,7 +261,67 @@ augmentation des cycles RHO physiquement réalisables.
    premier cycle et carte de cycle ensuite. La base doit conserver le moment
    total et les bornes PW; le simple blocage ne garantit pas ces propriétés.
 
-Le code de cette exploration produit le prédicteur et ses audits. Le coût
-terminal local et son raccordement à IPOPT sont la prochaine étape; ils ne sont
-pas encore activés dans le contrôleur. Aucun gain d'endurance clinique n'est
-revendiqué à ce stade.
+## Avancement : coût local et raccordement expérimental
+
+La valeur numérique et son raccordement Bioptim sont maintenant implémentés,
+mais **pas activés automatiquement dans les scripts publics de campagne RHO**.
+Leur validation sur un petit NLP ne vaut pas validation prospective du pédalage.
+
+- `cocofest/optimization/local_endurance_value.py` fournit les huit coordonnées,
+  l'oracle de marge, le polynôme linéaire ou quadratique diagonal et son audit;
+- `cocofest/optimization/local_endurance_value_ocp.py` fournit un raccordement
+  explicite au moment de la construction du NLP et une mise à jour numérique
+  entre résolutions;
+- `tests/test_local_endurance_value.py` et `tests/test_local_endurance_value_ocp.py`
+  vérifient les signes, les cas invalides, les dérivées et la compilation unique.
+
+La valeur est une pénalité softplus de la pire marge lissée. Pour une phase,
+avec une enveloppe de moment total `[L, U]` et une demande `q`, les deux marges
+sont `(q-L)/s` et `(U-q)/s`, où `s` est une échelle positive fixe de la tâche.
+Cela conserve le signe des muscles antagonistes et reste défini lorsque `q=0`.
+La soft-min utilisée est conservatrice; son biais dépend du nombre de phases
+et du choix de température. **Comparer des valeurs d'horizons différents exige
+donc de traiter ce biais**, même si les variables du NLP restent identiques.
+
+Un échec de la politique future, un état invalide ou une extrémité de
+l'enveloppe hors domaine ne produit aucune valeur de remplacement arbitraire.
+L'ajustement est alors refusé. Le premier prototype exige des rayons symétriques
+strictement positifs : une force résiduelle exactement nulle n'est pas traitée,
+et une force presque nulle impose un très petit rayon dans cette direction.
+Cette limitation peut rendre le voisinage trop restrictif en pratique.
+
+Les différences centrales utilisent 17 simulations pour huit coordonnées.
+Les vérifications supplémentaires utilisent des points distincts : axes,
+coins conjoints et directions liées au gradient, notamment les coins où un
+objectif linéaire est susceptible d'envoyer le solveur. Les erreurs et le
+classement de toutes les paires informatives doivent satisfaire les seuils.
+Une valeur plate sans paire informative est refusée. Il s'agit d'un audit
+échantillonné, **pas d'une preuve de validité sur toute la boîte**.
+
+Le raccordement transmet, pour quatre muscles, **58 paramètres fixes**,
+16 marges de voisinage et 12 résidus de contexte bornés des deux côtés,
+indépendamment du nombre de cycles simulés. Il n'ajoute ni état musculaire
+futur ni PW future libre. Une empreinte relie chaque ajustement à ses paramètres
+musculaires, son centre, ses forces normalisées, son calcium et ses écarts
+initiaux : mélanger un ajustement et un autre contexte est refusé avant toute
+modification des buffers.
+
+Le contexte calcique doit provenir de la discrétisation réelle. Dans l'archive
+Radau5 examinée, le calcium terminal vaut environ `0,16295396`, contre
+`0,16298216` pour le point fixe analytique; l'écart `2,82e-5` dépasse une garde
+de `1e-7`. Les écarts lents calculés à partir de la trajectoire restent conservés.
+Les autres caractéristiques de la tâche (phase, vitesse, période, charge et
+cinématique) doivent être vérifiées par le contrôleur appelant : le raccordement
+musculaire seul ne les certifie pas.
+
+Le test d'intégration compilée utilise **IPOPT/MA57** avec la bibliothèque HSL
+de l'environnement. Trois résolutions du même petit problème synthétique
+vérifient successivement les coefficients puis le contexte numérique et
+l'échelle des forces. Leurs forces terminales `15`, `25` puis `22,5 N` suivent
+la solution analytique attendue. L'identité du solveur, les buffers de paramètres
+et la date du fichier C restent inchangés. Ce test utilise `F'=u`, pas le modèle
+physiologique : il isole volontairement le raccordement et les mises à jour.
+
+Les résultats sur les ancres RHO réelles et les prochaines limites à lever sont
+consignés dans `local_endurance_value_validation.md`. Aucun gain d'endurance
+clinique n'est revendiqué à ce stade.
