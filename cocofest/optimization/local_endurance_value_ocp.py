@@ -40,7 +40,7 @@ class LocalEnduranceValueBinding:
     """
 
     def __init__(self, fit, coordinates, muscle_names, *, weight=1.0,
-                 use_sx=True, context_tolerance=1e-7):
+                 use_sx=True, context_tolerance=1e-7, allow_tracking_band=False):
         self.muscle_names = tuple(muscle_names)
         self.muscle_count = len(self.muscle_names)
         if not self.muscle_count or len(set(self.muscle_names)) != self.muscle_count:
@@ -53,6 +53,11 @@ class LocalEnduranceValueBinding:
             raise ValueError("context_tolerance must be finite and positive.")
         self.dimension = 2 * self.muscle_count
         self.parameter_size = 2 + 14 * self.muscle_count
+        self._allow_tracking_band = bool(allow_tracking_band)
+        self._tracking_contract = self._tracking_settings(fit)
+        if self._tracking_contract[0] > 0 and not self._allow_tracking_band:
+            raise ValueError("A relaxed future task requires explicit allow_tracking_band=True.")
+        self._value_context = fit.metadata.get("value_context")
         self.values = self._pack(fit, coordinates, weight)
         self.function = self._build_function(use_sx=use_sx)
         self._ocp = None
@@ -62,11 +67,23 @@ class LocalEnduranceValueBinding:
         self.successful_solve_count = 0
         self.update_count = 0
 
+    @staticmethod
+    def _tracking_settings(fit):
+        context = fit.metadata.get("value_context") or {}
+        settings = tuple(float(context.get(key, 0.)) for key in ("tracking_band_nm", "tracking_penalty_weight"))
+        if not np.all(np.isfinite(settings)) or min(settings) < 0:
+            raise ValueError("Tracking band and penalty settings must be finite and nonnegative.")
+        # With a zero band the batch oracle disables the tracking penalty, so
+        # switching scalar/batch exact backends must not change this contract.
+        return settings[0], settings[1] if settings[0] > 0 else 0.
+
     def _pack(self, fit, coordinates, weight):
         if not fit.accepted or fit.model is None:
             raise ValueError("Only an accepted, independently audited local fit can be bound.")
         if fit.metadata.get("coordinate_context_sha256") != coordinates.context_signature:
             raise ValueError("The fitted value and supplied coordinate context do not match.")
+        if self._tracking_settings(fit) != self._tracking_contract:
+            raise ValueError("A local-value update cannot silently change the future tracking task.")
         if tuple(coordinates.parameters) != self.parameters:
             raise ValueError("An update cannot change muscle parameters or order.")
         if not np.isfinite(weight) or weight < 0:
@@ -192,6 +209,7 @@ class LocalEnduranceValueBinding:
         bounds.min[...] = values[:, None]
         bounds.max[...] = values[:, None]
         self.values = values
+        self._value_context = fit.metadata.get("value_context")
         self.update_count += 1
 
     def audit_terminal_state(self, states, *, tolerance=1e-8):
@@ -246,4 +264,6 @@ class LocalEnduranceValueBinding:
                 "successful_compiled_solves": self.successful_solve_count,
                 "same_compiled_solver_verified": self.successful_solve_count >= 2,
                 "parameters_sha256": sha256(self.values.tobytes()).hexdigest(),
+                "future_value_context": self._value_context,
+                "tracking_band_explicitly_allowed": self._allow_tracking_band,
                 "requires_external_task_and_kinematic_context_validation": True}

@@ -133,6 +133,25 @@ class CompactEnduranceValueOracle:
         if not np.isfinite(self.margin_target):
             raise ValueError("margin_target must be finite.")
 
+    @property
+    def value_context_metadata(self):
+        """Snapshot all numerical task data, independent of evaluation backend."""
+        task = {
+            "muscles": [asdict(p) for p in self.predictor.parameters],
+            "durations": [it.duration for it in self.predictor.intervals],
+            "calcium": [list(it.calcium_amplitudes) for it in self.predictor.intervals],
+            "coefficients": [list(it.moment_coefficients) for it in self.predictor.intervals],
+            "targets": [list(it.target_moments) for it in self.predictor.intervals],
+            "sampled_gains": self.predictor.gains.tolist(),
+        }
+        digest = hashlib.sha256(json.dumps(task, sort_keys=True, allow_nan=False,
+                                           separators=(",", ":")).encode()).hexdigest()
+        return {"task_sha256": digest, "horizon_cycles": self.horizon_cycles,
+                "moment_scale": self.moment_scale, "moment_tolerance": self.moment_tolerance,
+                "softmin_temperature": self.softmin_temperature, "margin_target": self.margin_target,
+                "penalty_temperature": self.penalty_temperature,
+                "tracking_band_nm": 0., "tracking_penalty_weight": 0.}
+
     def evaluate(self, xi):
         try:
             state = self.coordinates.decode(xi)
@@ -253,11 +272,18 @@ def audit_local_endurance_value(model, oracle, heldout_points, *, absolute_toler
             predicted.append(model.evaluate(point))
         except ValueError as error:
             return LocalEnduranceAudit(False, str(error), count)
-        result = oracle.evaluate(point)
-        records.append({"coordinates": point.tolist(), "prediction": predicted[-1],
+    # Validate all coordinates before dispatch. The optional batch backend
+    # evaluates the same points, with no change to the fit or ranking gates.
+    evaluator = getattr(oracle, "evaluate_many", None)
+    results = tuple(evaluator(points) if callable(evaluator) else (oracle.evaluate(point) for point in points))
+    if len(results) != count:
+        raise ValueError("The batched oracle returned the wrong number of held-out results.")
+    for point, prediction, result in zip(points, predicted, results):
+        records.append({"coordinates": point.tolist(), "prediction": prediction,
                         "value": result.value, "status": result.status,
                         "minimum_signed_margin": result.minimum_signed_margin,
                         "soft_minimum_margin": result.soft_minimum_margin})
+    for result in results:
         if result.status != "complete" or result.value is None or not np.isfinite(result.value):
             return LocalEnduranceAudit(False, f"Held-out oracle {result.status}: {result.message}", count,
                                        records=tuple(records))
@@ -307,6 +333,8 @@ def fit_local_endurance_value(oracle, *, trust_radius, fd_step=None, kind="linea
         "policy_conditional": True, "whole_box_certified": False, "training_records": [],
         "trust_radius": radius.tolist(), "finite_difference_step": step.tolist(),
         "coordinate_context_sha256": oracle.coordinates.context_signature,
+        "value_context": getattr(oracle, "value_context_metadata", None),
+        "evaluation_backend": "batch" if callable(getattr(oracle, "evaluate_many", None)) else "scalar",
     }
 
     def failure(reason):
@@ -321,12 +349,26 @@ def fit_local_endurance_value(oracle, *, trust_radius, fd_step=None, kind="linea
         return failure(f"Trust domain invalid: {error}")
     values = []
     points = np.r_[center[None, :], center + np.diag(step), center - np.diag(step)]
-    for point in points:
-        sample = oracle.evaluate(point)
+    def record(point, sample):
         metadata["training_evaluations"] += 1
         metadata["training_records"].append({"coordinates": point.tolist(), "value": sample.value,
                                              "status": sample.status,
                                              "minimum_signed_margin": sample.minimum_signed_margin})
+
+    # A failed center is detected before dispatching any additional candidates.
+    sample = oracle.evaluate(points[0])
+    record(points[0], sample)
+    if sample.status != "complete" or sample.value is None or not np.isfinite(sample.value):
+        return failure(f"Training oracle {sample.status}: {sample.message}")
+    values.append(sample.value)
+    evaluator = getattr(oracle, "evaluate_many", None)
+    samples = tuple(evaluator(points[1:]) if callable(evaluator)
+                    else (oracle.evaluate(point) for point in points[1:]))
+    if len(samples) != len(points) - 1:
+        raise ValueError("The batched oracle returned the wrong number of training results.")
+    for point, sample in zip(points[1:], samples):
+        record(point, sample)
+    for sample in samples:
         if sample.status != "complete" or sample.value is None or not np.isfinite(sample.value):
             return failure(f"Training oracle {sample.status}: {sample.message}")
         values.append(sample.value)
