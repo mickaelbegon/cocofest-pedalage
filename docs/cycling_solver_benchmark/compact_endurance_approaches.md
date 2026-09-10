@@ -1,5 +1,9 @@
 # Anticiper l'endurance avec un RHO compact
 
+Pour une lecture sans équations, commencer par
+[Comprendre le coût d'endurance](endurance_objective_explained.md). Le présent
+document conserve les détails techniques et l'historique des essais.
+
 ## Choix proposé au 10 septembre 2026
 
 Conserver le RHO physique d'un cycle et construire **un coût terminal local à
@@ -474,3 +478,33 @@ la politique prédite et devra être comparée au preview systématique, à cibl
 et tolérances inchangées. Le critère de décision sera le temps **total** de
 calcul et d'audit de la valeur locale, avec le suivi Ding et le classement
 des valeurs, avant une comparaison RHO prospective avec IPOPT/MA57.
+
+## Étape hybride : le preview devient conditionnel
+
+La politique rapide propose d'abord une commande pour la phase courante. Le
+détecteur regarde l'état musculaire que cette commande laisserait, puis les
+limites de moment de la phase suivante. Il vérifie à la fois le risque de
+manquer de force et celui de conserver trop de force résiduelle. Lorsque la
+réserve est suffisante, il garde la commande rapide; sinon, il fait appel au
+preview à deux phases déjà audité.
+
+Deux seuils sont annoncés avant les calculs : zéro et 1 % d'une échelle fixe
+du moment demandé par la tâche. Ils ne modifient pas la précision du suivi.
+Le choix de la voie rapide n'est pas un repli après échec du QP : les deux
+sont comptabilisés séparément, et aucun repli après refus du QP n'est activé.
+La dernière phase d'un horizon n'impose pas de nouvelle contrainte au-delà de
+celui-ci.
+
+Le contexte d'un ajustement de valeur contient désormais la règle de
+déclenchement, son seuil, son échelle et tous les réglages du preview. Une
+modification de ces choix pendant l'ajustement invalide l'oracle. Les passages
+d'une branche à l'autre peuvent rendre la valeur plus difficile à approximer;
+les tests de résidu et de classement ne sont donc pas allégés.
+
+L'essai compare les mêmes ancres et horizons que le preview systématique,
+puis mesure réellement un ajustement H10 complet pour l'hybride au seuil de
+1 %. Les rayons de l'ancien ajustement physique accepté sont conservés pour
+cette comparaison. Un refus est un résultat à rapporter, pas une raison de
+changer les seuils après observation. Le temps de toutes les évaluations et
+de leur audit sera inclus, sans présenter le temps d'un seul rollout comme
+le coût d'une mise à jour de valeur.

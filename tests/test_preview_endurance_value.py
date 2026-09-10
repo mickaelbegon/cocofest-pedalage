@@ -85,11 +85,14 @@ def test_changed_policy_is_rejected_before_rollout_and_tolerances_must_agree(set
     assert oracle.value_context_metadata["allocation_policy"]["preview_phases"] == 2
 
 
-def test_two_phase_oracle_can_fit_audited_polynomial_without_future_nlp_variables():
+@pytest.mark.parametrize("triggered", [False, True])
+def test_two_phase_oracle_can_fit_audited_polynomial_without_future_nlp_variables(triggered):
     from cocofest.optimization.preview_muscle_allocation import PreviewMuscleAllocation
+    from cocofest.optimization.triggered_preview_allocation import TriggeredPreviewMuscleAllocation
 
     predictor, coordinates = _problem()
-    policy = PreviewMuscleAllocation(predictor, preview_phases=2)
+    policy = (TriggeredPreviewMuscleAllocation(predictor, moment_scale=1., trigger_margin_fraction=.01)
+              if triggered else PreviewMuscleAllocation(predictor, preview_phases=2))
     oracle = PreviewEnduranceValueOracle(policy, coordinates, horizon_cycles=3, moment_scale=1.)
     # A small synthetic local box tests the adapter, not clinical latency or
     # an endurance benefit. Its informative-pair threshold is explicit.
@@ -100,3 +103,36 @@ def test_two_phase_oracle_can_fit_audited_polynomial_without_future_nlp_variable
     assert binding.audit_terminal_state(coordinates.decode(coordinates.anchor))["valid"]
     assert fit.metadata["value_context"]["allocation_policy"]["preview_phases"] == 2
     assert fit.metadata["evaluation_backend"] == "scalar"
+    if triggered:
+        context = fit.metadata["value_context"]["allocation_policy"]
+        assert context["kind"] == "triggered_preview_signed_next_margin_v1"
+        assert context["trigger_margin_fraction"] == .01
+        assert context["moment_scale"] == 1.
+
+
+def test_trigger_context_is_snapshotted_and_changes_refuse_a_stale_oracle():
+    predictor, coordinates = _problem()
+    metadata = {"kind": "triggered_preview_test", "trigger_margin_fraction": .01,
+                "moment_scale": 1., "screening_depth": 1, "diagnostic": {"version": 1}}
+    policy = _stub_policy(predictor, allocation_policy_metadata=metadata)
+    oracle = PreviewEnduranceValueOracle(policy, coordinates, moment_scale=1.)
+    exposed = oracle.value_context_metadata["allocation_policy"]
+    exposed["diagnostic"]["version"] = 999
+    assert oracle.value_context_metadata["allocation_policy"]["diagnostic"]["version"] == 1
+    metadata["trigger_margin_fraction"] = .02
+    result = oracle.evaluate(coordinates.anchor)
+    assert result.status == "domain_invalid" and result.value is None
+    assert "settings changed" in result.message
+    assert oracle.value_context_metadata["allocation_policy"]["trigger_margin_fraction"] == .01
+
+
+@pytest.mark.parametrize("metadata", [
+    {"kind": "triggered", "moment_tolerance": 1e-4},
+    {"kind": "triggered", "trigger_margin_fraction": np.nan},
+    {"trigger_margin_fraction": .01},
+])
+def test_inconsistent_or_invalid_policy_metadata_cannot_enter_a_fit(metadata):
+    predictor, coordinates = _problem()
+    policy = _stub_policy(predictor, allocation_policy_metadata=metadata)
+    with pytest.raises(ValueError, match="metadata"):
+        PreviewEnduranceValueOracle(policy, coordinates, moment_scale=1.)

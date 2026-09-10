@@ -5,11 +5,14 @@ graph. Only an independently audited polynomial may subsequently be bound to
 the NLP. This adapter does not activate any public RHO campaign option.
 """
 
+from copy import deepcopy
+import json
+
 from .local_endurance_value import CompactEnduranceValueOracle
 
 
 def _policy_context(policy):
-    return {
+    context = {
         "kind": "frozen_slow_force_coupled_preview_v1",
         "preview_phases": policy.preview_phases,
         "moment_tolerance": policy.moment_tolerance,
@@ -19,6 +22,21 @@ def _policy_context(policy):
         "recruitment_regularization": policy.recruitment_regularization,
         "max_solve_time_s": policy.max_solve_time_s,
     }
+    extra = getattr(policy, "allocation_policy_metadata", None)
+    if extra is not None:
+        if not isinstance(extra, dict) or not isinstance(extra.get("kind"), str) or not extra["kind"]:
+            raise ValueError("Allocation policy metadata requires a nonempty kind and a dictionary.")
+        for key, value in context.items():
+            if key != "kind" and key in extra and extra[key] != value:
+                raise ValueError(f"Allocation policy metadata conflicts with configured {key}.")
+        context.update(extra)
+    # A detached, JSON-safe snapshot keeps a fitted value tied to the actual
+    # policy, including any event trigger. It is not an automatic RHO option.
+    try:
+        json.dumps(context, allow_nan=False)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Allocation policy metadata must be finite JSON data.") from error
+    return deepcopy(context)
 
 
 class _PreviewPredictorView:
@@ -63,6 +81,6 @@ class PreviewEnduranceValueOracle(CompactEnduranceValueOracle):
     def value_context_metadata(self):
         return {
             **super().value_context_metadata,
-            "allocation_policy": dict(self.predictor.context),
+            "allocation_policy": deepcopy(self.predictor.context),
             "evaluation_backend": "sequential_preview_qp",
         }
