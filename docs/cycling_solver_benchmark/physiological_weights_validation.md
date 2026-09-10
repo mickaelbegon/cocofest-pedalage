@@ -2,10 +2,11 @@
 
 ## Résultat principal
 
-Le calcul reproduit les poids et les facteurs intermédiaires de la figure S4.
-Chaque cas reçoit des poids recalculés, sans donnée FHO. Sur 69 cas construits
+Le calcul reproduit les facteurs intermédiaires et conserve les poids min–max
+de la figure S4 pour audit. Pour le contrôleur, chaque cas reçoit désormais
+des poids bruts divisés par le plus grand poids brut, sans donnée FHO. Sur 69 cas construits
 à partir des paramètres publiés, 52 restent admissibles pour la calibration
-à force prescrite. Un de ces cas donne un poids triceps strictement positif,
+à force prescrite. Neuf de ces cas donnent un poids triceps strictement positif,
 sans régularisation ni plancher. Les 69 cas construits à partir des paramètres
 actuels du dépôt sortent tous du domaine de cette calibration.
 
@@ -29,26 +30,28 @@ machine : les contrôles utilisent donc sa précision d'affichage.
 
 Le protocole conserve les 1500 cycles d'une seconde, 80 % de Fmax imposé,
 les 90° de pré-risque, le seuil de somme de moments positifs de 0,20 N·m,
-les contributions moyennées sur les cycles et la normalisation min–max.
+les contributions moyennées sur les cycles. La reproduction min–max est
+archivée; la normalisation utilisée pour les poids contrôleur divise par le
+score brut maximal.
 Les équations lentes à force prescrite sont composées analytiquement; aucune
 PW future ni solution OCP n'est supposée connue.
 
 ## Un triceps non nul sans plancher
 
-Le cas `published_code--ofat--biceps--fmax--x0p25` donne :
+Le cas `published_code--ofat--biceps--alpha_a--x4` donne :
 
-| Muscle | Poids nominal | Poids avec Fmax du biceps à 25 % |
+| Muscle | Poids nominal | Poids avec alpha A du biceps ×4 |
 | --- | ---: | ---: |
-| Deltoïde antérieur | 1 | 1 |
-| Deltoïde postérieur | 0,0943161 | 0,0581240 |
-| Biceps | 0,3892687 | 0 |
-| Triceps | 0 | 0,00365875 |
+| Deltoïde antérieur | 1 | 0,558948 |
+| Deltoïde postérieur | 0,0943161 | 0,128413 |
+| Biceps | 0,3892687 | 1 |
+| Triceps | 0 | 0,0308463 |
 
-La criticité du triceps passe de zéro à 0,444651. Le biceps affaibli modifie
-les régions à risque et la contribution attribuée au triceps. Sa fatigabilité
-intrinsèque est inchangée. Le zéro se déplace vers le biceps, conformément à
-la normalisation min–max. Cela confirme l'intérêt de modifier les paramètres
-des autres muscles, pas seulement ceux du triceps.
+Une fatigabilité du biceps quatre fois plus marquée modifie les régions à
+risque et la contribution attribuée au triceps. Avec la normalisation par le
+maximum, ce triceps reste strictement positif et aucun muscle à score brut
+positif n'est artificiellement mis à zéro. Cela confirme l'intérêt de
+modifier les paramètres des autres muscles, pas seulement ceux du triceps.
 
 Dans ce panel, les variations isolées des paramètres du triceps ne lui donnent
 pas de poids positif admissible. Le poids non nul obtenu reste faible; un
@@ -106,10 +109,10 @@ n'a pas été corrigée silencieusement dans cette reproduction.
 | Cas | Poids à 120 intervalles | Poids à 240 intervalles |
 | --- | --- | --- |
 | Nominal | 1; 0,094316; 0,389269; 0 | 1; 0,095209; 0,379410; 0 |
-| Biceps Fmax ×0,25 | 1; 0,058124; 0; 0,003659 | 1; 0,059269; 0; 0,003479 |
+| Biceps alpha A ×4 | 0,558948; 0,128413; 1; 0,030846 | 0,553067; 0,127383; 1; 0,029529 |
 | Deltoïde postérieur Fmax ×2 | 1; 0,388819; 0,389269; 0 | 1; 0,395871; 0,379410; 0 |
 
-Les trois cas restent admissibles, et le triceps reste positif dans le cas
+Les cas raffinés restent admissibles, et le triceps reste positif dans le cas
 prévu. Le changement maximal de poids est environ 0,00986 pour le nominal :
 les poids sont sensibles au maillage et ne sont pas certifiés convergés.
 

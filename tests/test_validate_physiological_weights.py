@@ -8,14 +8,15 @@ from cocofest.optimization.physiological_weight_cases import MUSCLE_NAMES, list_
 from scripts.validate_physiological_weights import _case_report, _comparison_candidates, _jsonable
 
 
-def test_comparison_selection_uses_declared_order_and_admissible_cases_only():
-    def record(name, valid, positive, margin):
+def test_comparison_selection_uses_largest_admissible_triceps_weight_only():
+    def record(name, valid, positive, margin, triceps_weight=0.):
         return {"case": {"case_id": name}, "calibration_admissible": valid,
-                "triceps_positive_weight": positive, "minimum_capacity_ratio": margin}
+                "triceps_positive_weight": positive, "minimum_capacity_ratio": margin,
+                "weights": {"Triceps": triceps_weight}}
     rows = [record("nominal", True, False, .5), record("invalid", False, True, -8.),
-            record("first", True, True, .3), record("later", True, True, .1)]
+            record("first", True, True, .3, .01), record("later", True, True, .1, .02)]
     result = _comparison_candidates(rows)
-    assert result["first_admissible_positive_triceps_in_declared_order"] == "first"
+    assert result["largest_admissible_triceps_weight"] == "later"
     assert result["smallest_positive_calibration_capacity_margin"] == "later"
     assert result["selection_uses_fho"] is False
     assert result["must_validate_actual_rho_before_fho_comparison"] is True
@@ -24,7 +25,7 @@ def test_comparison_selection_uses_declared_order_and_admissible_cases_only():
 def test_all_invalid_panel_has_no_positive_or_boundary_candidate():
     result = _comparison_candidates([{"case": {"case_id": "nominal"},
                                       "calibration_admissible": False}])
-    assert result["first_admissible_positive_triceps_in_declared_order"] is None
+    assert result["largest_admissible_triceps_weight"] is None
     assert result["smallest_positive_calibration_capacity_margin"] is None
 
 

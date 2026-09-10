@@ -27,19 +27,21 @@ accompagnent ce protocole.
    Intégrer la contribution positive exclusive et celle des 90° avant une
    entrée dans la zone à risque. Moyenner ces contributions sur les cycles.
 6. Multiplier cette criticité mécanique par la fatigabilité au carré, puis
-   appliquer la normalisation min–max du code.
+   diviser chaque score brut par le score brut maximal. La normalisation
+   min–max du code est calculée séparément uniquement pour reproduire S4.
 
 Cette calibration n'est ni 80 % de PW ni le modèle Ding complet. Le risque du
 code est une somme de moments positifs inférieure à 0,20 N·m; il ne signifie
 pas exclusivement que tous les moments sont négatifs. Ce seuil ne remplace
 pas automatiquement l'assistance ou la résistance réelle du RHO.
 
-## Comprendre le poids nul
+## Normalisation retenue
 
-La normalisation min–max impose un zéro au score brut minimal. Un triceps
-devenu non minimal reçoit donc un poids positif, mais un autre muscle reçoit
-le zéro. Un plancher positif ou une division par le maximum serait une
-variante différente, pas la reproduction publiée.
+La normalisation par le maximum conserve le rapport entre chaque score brut
+et le score dominant. Un muscle n'obtient un poids nul que si son score brut
+est réellement nul. La normalisation min–max publiée impose au contraire un
+zéro au score brut minimal; elle est conservée dans les résultats d'audit,
+mais n'est pas celle proposée au contrôleur.
 
 Dans la référence nominale reproduite, la criticité du triceps vaut aussi
 zéro. Changer seulement sa fatigabilité ne suffit donc pas. Il faut examiner

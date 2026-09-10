@@ -68,20 +68,21 @@ def test_1500_cycle_calculation_matches_independent_published_source_loop():
     np.testing.assert_array_equal(actual["risk_mask"], risk)
     np.testing.assert_array_equal(actual["pre_risk_mask"], pre)
     np.testing.assert_allclose(list(actual["raw_weights"].values()), raw, rtol=1e-10)
-    np.testing.assert_allclose(list(actual["normalized_weights"].values()), normalized, atol=1e-10)
+    np.testing.assert_allclose(list(actual["legacy_normalized_weights"].values()), normalized, atol=1e-10)
+    np.testing.assert_allclose(list(actual["normalized_weights"].values()), raw / raw.max(), atol=1e-10)
     assert actual["context"]["cycle_duration_seconds"] == 1.
-    assert actual["context"]["published_normalization"]
+    assert not actual["context"]["published_normalization"]
 
 
-def test_minmax_zero_is_preserved_even_when_every_raw_weight_is_positive():
+def test_max_normalization_preserves_all_strictly_positive_raw_weights():
     theta, profiles, params, names = case()
     result = calculate_physiological_muscle_weights(theta, profiles, params, muscle_names=names, case_id="positive")
     assert result["min_raw_weight"] > 0.
-    assert min(result["normalized_weights"].values()) == 0.
+    assert min(result["normalized_weights"].values()) > 0.
     variant = calculate_physiological_muscle_weights(theta, profiles, params, muscle_names=names,
-                                                    case_id="positive", normalization="max")
-    assert min(variant["normalized_weights"].values()) > 0.
-    assert not variant["context"]["published_normalization"]
+                                                    case_id="positive", normalization="minmax")
+    assert min(variant["normalized_weights"].values()) == 0.
+    assert variant["context"]["published_normalization"]
     assert variant["legacy_normalized_weights"] == result["legacy_normalized_weights"]
 
 
@@ -98,16 +99,16 @@ def test_duplicate_nonuniform_angular_samples_use_source_trapezoid_without_closu
     np.testing.assert_allclose(list(result["raw_weights"].values()), expected[5], rtol=1e-10)
 
 
-def test_triceps_weight_changes_from_zero_by_raw_ranking_without_artificial_floor():
+def test_triceps_positive_raw_score_is_not_zeroed_by_normalization():
     theta, profiles, params, names = case()
     params["Triceps"]["alpha_a"] = -.001
     initial = calculate_physiological_muscle_weights(theta, profiles, params, muscle_names=names, case_id="weak_fatigue")
     assert initial["raw_weights"]["Triceps"] > 0.
-    assert initial["normalized_weights"]["Triceps"] == 0.
+    assert initial["normalized_weights"]["Triceps"] > 0.
     params["Triceps"]["alpha_a"] = -.05
     changed = calculate_physiological_muscle_weights(theta, profiles, params, muscle_names=names, case_id="strong_fatigue")
     assert changed["normalized_weights"]["Triceps"] > 0.
-    assert min(changed["normalized_weights"].values()) == 0.
+    assert min(changed["normalized_weights"].values()) > 0.
 
 
 def test_muscle_permutation_keeps_named_results_and_explicit_case_parameters():

@@ -128,7 +128,7 @@ def build_pre_risk_mask(theta_deg, risk_mask, *, pre_risk_width_deg=90.):
 def calculate_physiological_muscle_weights(
     theta, torque_profiles, parameters, *, muscle_names, case_id,
     target_cycles=1500, rho=.8, pre_risk_width_deg=90., task_torque_threshold=.20,
-    normalization="minmax",
+    normalization="max",
 ):
     """Reproduce source factors and expose controller eligibility separately.
 
@@ -138,14 +138,16 @@ def calculate_physiological_muscle_weights(
     averages pre-risk support plus unique support over every fatigue cycle.
     Raw weights equal mechanical contribution times squared fatigability.
 
-    Published min-max normalization deliberately gives a zero to a minimum
-    raw weight even when all raw weights are positive. Zero weights are kept.
+    By default, weights are divided by their largest raw weight. This retains
+    a strictly positive value for every muscle whose raw contribution is
+    strictly positive; only a physically zero raw score stays zero.
     ``normalized_weights`` is None if fatigue leaves its physical domain or
     the raw weights are degenerate. ``legacy_normalized_weights`` always
     retains the source calculation for audit (never controller authorization).
     ``usable_for_controller`` means the calibration is admissible; it does
     not certify closed-loop RHO feasibility, endurance, or improvement.
-    The optional max normalization is a separately named, unpublished variant.
+    ``minmax`` remains available only to reproduce the published display and
+    is stored in ``legacy_normalized_weights`` for audit.
     Arrays include all intermediate per-cycle factors and masks. ``context``
     is JSON-compatible and records exact per-case inputs and source semantics.
     """
@@ -168,7 +170,7 @@ def calculate_physiological_muscle_weights(
     if threshold < 0.:
         raise ValueError("task_torque_threshold must be nonnegative.")
     if normalization not in ("minmax", "max"):
-        raise ValueError("normalization must be 'minmax' or the explicit 'max' variant.")
+        raise ValueError("normalization must be 'max' or the legacy 'minmax' variant.")
     support = profiles > SUPPORT_THRESHOLD
     duty = np.mean(support, axis=1)
     fatigue = simulate_fatigue_ratios(duty, params, muscle_names=names, target_cycles=cycles, rho=rho)
@@ -189,7 +191,8 @@ def calculate_physiological_muscle_weights(
     raw = mechanical * fatigability**2
     minimum, maximum = float(np.min(raw)), float(np.max(raw))
     legacy = np.zeros_like(raw) if maximum == minimum else (raw - minimum) / (maximum - minimum)
-    normalized = legacy if normalization == "minmax" else (np.zeros_like(raw) if maximum == 0. else raw / maximum)
+    max_normalized = np.zeros_like(raw) if maximum == 0. else raw / maximum
+    normalized = max_normalized if normalization == "max" else legacy
     degenerate = not np.all(np.isfinite(normalized)) or not np.any(normalized > 0.)
     valid = fatigue["domain_valid"]
     usable = valid and not degenerate

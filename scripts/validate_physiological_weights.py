@@ -68,13 +68,14 @@ def _case_report(case, result, geometry_audit, elapsed):
 
 
 def _comparison_candidates(records):
-    """Select by frozen parameter-panel rules, never by an FHO result."""
+    """Select clinically legible panel representatives, never by an FHO result."""
     valid = [record for record in records if record["calibration_admissible"]]
-    positive = next((record for record in valid if record["triceps_positive_weight"]), None)
+    positive = max((record for record in valid if record["triceps_positive_weight"]),
+                   key=lambda record: record["weights"]["Triceps"], default=None)
     boundary = min(valid, key=lambda record: record["minimum_capacity_ratio"], default=None)
     return {
         "nominal": records[0]["case"]["case_id"],
-        "first_admissible_positive_triceps_in_declared_order": None if positive is None else positive["case"]["case_id"],
+        "largest_admissible_triceps_weight": None if positive is None else positive["case"]["case_id"],
         "smallest_positive_calibration_capacity_margin": None if boundary is None else boundary["case"]["case_id"],
         "selection_uses_fho": False,
         "must_validate_actual_rho_before_fho_comparison": True,
@@ -93,7 +94,7 @@ def _plot_panel(records, output, baseline_id):
     plot = axes[0].imshow(np.ma.masked_invalid(matrix.T), aspect="auto", vmin=0, vmax=1, cmap=cmap)
     axes[0].set_yticks(range(4), names)
     axes[0].set_ylabel("Muscle")
-    fig.colorbar(plot, ax=axes[0], label="Recalculated min-max weight")
+    fig.colorbar(plot, ax=axes[0], label="Recalculated weight / maximum raw weight")
     axes[1].plot([row["minimum_capacity_ratio"] for row in records], ".-", markersize=3)
     axes[1].axhline(0, color="red", linestyle="--")
     axes[1].set(xlabel="Declared case index (0 = nominal)", ylabel="Minimum A / A_rest")
@@ -124,7 +125,7 @@ def _plot_panel(records, output, baseline_id):
         if not any(row["calibration_admissible"] for row in selected):
             axes[0, column].text(.5, .5, "No admissible calibration", transform=axes[0, column].transAxes,
                                  ha="center", va="center", fontsize=9)
-    axes[0, 0].set_ylabel("Admissible normalized weights")
+    axes[0, 0].set_ylabel("Admissible weights / maximum raw weight")
     axes[1, 0].set_ylabel("Triceps mechanical contribution")
     axes[0, -1].legend(fontsize=8)
     fig.suptitle(f"{baseline_id}: wide triceps OFAT sensitivity (no weight floor)")
@@ -134,13 +135,14 @@ def _plot_panel(records, output, baseline_id):
 
 def _plot_positive_triceps(records, arrays, theta, output):
     import matplotlib.pyplot as plt
-    changed = next((record for record in records if record["triceps_positive_weight"]), None)
+    changed = max((record for record in records if record["triceps_positive_weight"]),
+                  key=lambda record: record["weights"]["Triceps"], default=None)
     if changed is None:
         return
     nominal = records[0]
     fig, axes = plt.subplots(1, 3, figsize=(14, 4.5), constrained_layout=True)
     x = np.arange(len(MUSCLE_NAMES))
-    for offset, record, label in ((-.18, nominal, "Nominal"), (.18, changed, "First positive-triceps case")):
+    for offset, record, label in ((-.18, nominal, "Nominal"), (.18, changed, "Largest positive-triceps case")):
         for axis, key in zip(axes[:2], ("weights", "mechanical_contribution")):
             axis.bar(x + offset, [record[key][name] for name in MUSCLE_NAMES], width=.36, label=label)
             axis.set_xticks(x, MUSCLE_NAMES, rotation=25)
@@ -149,7 +151,7 @@ def _plot_positive_triceps(records, arrays, theta, output):
         ratios = arrays[f"{case_id}__capacity_ratios"][:, -1]
         total_positive = np.maximum(profiles * ratios[:, None], 0).sum(axis=0)
         axes[2].plot(np.degrees(theta), total_positive, label=label)
-    axes[0].set(title="Recalculated weights", ylabel="Min-max weight")
+    axes[0].set(title="Recalculated weights", ylabel="Weight / maximum raw weight")
     axes[0].annotate(f"Triceps = {changed['weights']['Triceps']:.5f}",
                      xy=(3.18, changed["weights"]["Triceps"]), xytext=(1.6, .45),
                      arrowprops={"arrowstyle": "->"})
@@ -166,7 +168,7 @@ def _plot_reference(result, theta, profiles, output):
     import matplotlib.pyplot as plt
     fig, axes = plt.subplots(1, 4, figsize=(16, 4), constrained_layout=True)
     for axis, key, title in zip(axes[:3], ("fatigability", "mechanical_contribution", "normalized_weights"),
-                               ("Fatigability", "Mechanical criticality", "Min-max weight")):
+                               ("Fatigability", "Mechanical criticality", "Weight / maximum raw weight")):
         axis.bar(MUSCLE_NAMES, [result[key][name] for name in MUSCLE_NAMES])
         axis.set_title(title)
         axis.tick_params(axis="x", rotation=30)
@@ -201,7 +203,7 @@ def main(argv=None):
         "uses_fho_data": False, "public_rho_modified": False,
         "actual_controller_comparison_run": False,
         "settings": {"target_cycles": args.target_cycles, "rho": .8, "pre_risk_width_deg": 90.,
-                     "risk_threshold_nm": .2, "normalization": "minmax", "factors": OFAT_FACTORS,
+                     "risk_threshold_nm": .2, "normalization": "max", "factors": OFAT_FACTORS,
                      "case_families_frozen_before_results": True},
         "geometry": geometry.metadata, "panels": [],
     }

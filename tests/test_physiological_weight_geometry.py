@@ -39,7 +39,7 @@ def test_published_nominal_geometry_recovers_source_rounded_factors(published_ge
     assert result["status"] == "ok"
     comparisons = (
         (
-            tuple(result["normalized_weights"].values()),
+            tuple(result["legacy_normalized_weights"].values()),
             (1.0, 0.0943, 0.389, 0.0),
             (1e-12, 5e-5, 5e-4, 1e-12),
         ),
