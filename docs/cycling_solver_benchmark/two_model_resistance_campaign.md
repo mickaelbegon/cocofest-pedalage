@@ -152,6 +152,22 @@ a reviewed nonempty physical prefix may advance only with the explicit
 `numerical_or_unresolved_stop` classification. Numerical failure is never
 called fatigue. Completing a finite cycle budget is not an endurance limit.
 
+If the next invocation reports `Existing unreviewed result requires attention`,
+the prior wave has saved artifacts that require review. Inspect them with:
+
+```bash
+python scripts/run_two_model_campaign_wave.py \
+  --manifest /absolute/campaign.json --reviews /absolute/reviews.json --status
+```
+
+This read-only diagnostic lists every result, configuration audit, journal,
+launcher log and receipt, plus reported cycle counts and process exit codes.
+It handles incomplete JSON outputs and identifies receipts from another job or
+manifest. Reported solver success is not a scientific review. Validate the
+saved result and required evidence, then add its bound review before invoking
+the launcher again; preserve the existing output directory. The launcher
+does not restart a completed arm or silently approve it.
+
 `cores-per-job` counts logical OS CPU IDs. Select one ID per physical core if
 SMT isolation is required; no physical-topology inference is performed.
 `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`, and `MKL_NUM_THREADS` equal
