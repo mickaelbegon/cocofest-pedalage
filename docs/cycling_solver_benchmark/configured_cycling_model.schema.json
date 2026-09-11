@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Explicit configured cycling Ding model",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "case_id", "provenance", "muscles"],
+  "properties": {
+    "schema_version": {"type": "integer", "const": 1},
+    "case_id": {"type": "string", "pattern": "\\S"},
+    "provenance": {"type": "string", "pattern": "\\S"},
+    "muscles": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"pattern": "\\S"},
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["Fmax", "a_scale", "alpha_a", "tau_fat"],
+        "properties": {
+          "Fmax": {"type": "number", "exclusiveMinimum": 0},
+          "a_scale": {"type": "number", "exclusiveMinimum": 0},
+          "alpha_a": {"type": "number", "maximum": 0},
+          "tau_fat": {"type": "number", "exclusiveMinimum": 0},
+          "alpha_tau1": {"type": "number", "minimum": 0},
+          "alpha_km": {"type": "number", "minimum": 0},
+          "tau1_rest": {"type": "number", "exclusiveMinimum": 0},
+          "km_rest": {"type": "number", "exclusiveMinimum": 0},
+          "tauc": {"type": "number", "exclusiveMinimum": 0},
+          "tau2": {"type": "number", "exclusiveMinimum": 0},
+          "pd0": {"type": "number", "minimum": 0},
+          "pdt": {"type": "number", "exclusiveMinimum": 0}
+        }
+      }
+    }
+  }
+}

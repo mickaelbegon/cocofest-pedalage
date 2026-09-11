@@ -13,6 +13,12 @@ its stopping/physical validation logic. It supports IPOPT only, with C
 compilation disabled and compact output enabled. No pre-existing source
 file is modified by this integration.
 
+The same adapter supports **RHO-Physio**, the static initial-physiological
+condition, with `policy.adaptation_enabled=false`. Explicit named initial
+weights and their provenance are mandatory; the cost is applied once and
+then held. The configured four-condition runner, schemas and model/seed
+compatibility rules are described in `configured_cycling_conditions.md`.
+
 ## Declared physiological policy
 
 Every five certified cycles by default, target log weights are

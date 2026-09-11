@@ -87,6 +87,43 @@ def test_duplicate_and_maximum_cycle_are_rejected():
         RhoPaceConfig(max_cycles=101)
 
 
+def test_static_physio_applies_initial_weights_once_even_at_update_boundaries(tmp_path):
+    policy = controller(tmp_path, initial_weights=(.5, 2.),
+                        config=RhoPaceConfig(adaptation_enabled=False, update_every_cycles=1))
+    calls = []
+    def writer(weights):
+        calls.append(weights)
+        return apply(weights)
+    assert boundary(policy, 0, apply_weights=writer)["status"] == "applied"
+    initial = policy.weights
+    for cycle in (1, 2, 5, 20, 99):
+        event = boundary(policy, cycle, ratios=(.01, .9), apply_weights=writer)
+        assert event["status"] == "held"
+        assert event["reasons"] == ["static_physiological_weights"]
+        assert event["arm"] == "RHO-Physio"
+        assert policy.weights == initial
+    assert calls == [initial]
+    assert policy.events[0]["uses_fho_data"] is False
+
+
+@pytest.mark.parametrize("declared", [
+    {"initial_weight_basis": "fixture"},
+    {"initial_weights": {"m0": 1.}, "initial_weight_basis": " "},
+    {"initial_weights": {"m0": 0.}, "initial_weight_basis": "fixture"},
+    {"initial_weights": {"m0": float("nan")}, "initial_weight_basis": "fixture"},
+])
+def test_static_physio_requires_named_positive_weights_and_provenance(declared):
+    from scripts.run_rho_pace_benchmark import validate_weight_configuration
+    with pytest.raises(ValueError):
+        validate_weight_configuration(declared, RhoPaceConfig(adaptation_enabled=False))
+
+
+@pytest.mark.parametrize("enabled", [0, 1, "false", None])
+def test_adaptation_switch_must_be_boolean(enabled):
+    with pytest.raises(ValueError, match="boolean"):
+        RhoPaceConfig(adaptation_enabled=enabled)
+
+
 def test_symbolic_cost_and_gradient_really_use_relative_weights():
     capacity = ca.SX.sym("capacity", 2)
     fake = SimpleNamespace(

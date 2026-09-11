@@ -15,6 +15,7 @@ arm. The benchmark's unweighted fatigue metrics remain comparison metrics.
 import argparse
 from dataclasses import asdict
 import json
+import math
 import os
 from pathlib import Path
 import sys
@@ -46,7 +47,21 @@ def validate_benchmark_arguments(args, config):
     return torque
 
 
-def main(argv=None):
+def validate_weight_configuration(declared, config):
+    basis = declared.get("initial_weight_basis")
+    if not isinstance(basis, str) or not basis.strip():
+        raise ValueError("Physiological weights require nonempty initial_weight_basis provenance")
+    if not config.adaptation_enabled:
+        weights = declared.get("initial_weights")
+        if not isinstance(weights, dict) or not weights:
+            raise ValueError("RHO-Physio requires explicit named initial_weights")
+        for name, weight in weights.items():
+            if (not isinstance(name, str) or not name.strip() or isinstance(weight, bool)
+                    or not isinstance(weight, (int, float)) or not math.isfinite(weight) or weight <= 0):
+                raise ValueError("RHO-Physio requires finite positive weights for named muscles")
+
+
+def main(argv=None, *, adaptation_enabled=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pace-journal", type=Path, required=True)
     parser.add_argument("--pace-config", type=Path, required=True)
@@ -76,9 +91,11 @@ def main(argv=None):
     unexpected = set(declared) - {"policy", "initial_weights", "initial_weight_basis"}
     if unexpected:
         raise ValueError(f"Unknown PACE configuration fields: {sorted(unexpected)}")
-    if not declared.get("initial_weight_basis"):
-        raise ValueError("PACE configuration needs initial_weight_basis")
-    config = RhoPaceConfig(**declared.get("policy", {}))
+    policy = dict(declared.get("policy", {}))
+    if adaptation_enabled is not None:
+        policy["adaptation_enabled"] = adaptation_enabled
+    config = RhoPaceConfig(**policy)
+    validate_weight_configuration(declared, config)
     parsed = benchmark.build_cli().parse_args(benchmark_argv)
     torque = validate_benchmark_arguments(parsed, config)
     original = FesNmpcMsk.solve_fes_nmpc

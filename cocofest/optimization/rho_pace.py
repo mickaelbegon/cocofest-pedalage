@@ -21,6 +21,7 @@ from cocofest.optimization.endurance_weight_supervisor import (
 
 @dataclass(frozen=True)
 class RhoPaceConfig:
+    adaptation_enabled: bool = True
     update_every_cycles: int = 5
     smoothing: float = 0.2
     capacity_gain: float = 1.0
@@ -30,6 +31,8 @@ class RhoPaceConfig:
     max_cycles: int = 100
 
     def __post_init__(self):
+        if not isinstance(self.adaptation_enabled, bool):
+            raise ValueError("adaptation_enabled must be boolean")
         for name in ("update_every_cycles", "max_cycles"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -57,6 +60,7 @@ class RhoPaceController:
     def __init__(self, muscle_names, initial_weights, *, signed_crank_torque_nm,
                  parameters, initial_weight_basis, config=None, journal_path=None):
         self.config = config or RhoPaceConfig()
+        self.arm = "RHO-PACE" if self.config.adaptation_enabled else "RHO-Physio"
         self.muscle_names = tuple(muscle_names)
         if (not self.muscle_names or len(set(self.muscle_names)) != len(self.muscle_names)
                 or any(not isinstance(n, str) or not n for n in self.muscle_names)):
@@ -72,7 +76,7 @@ class RhoPaceController:
         self.signed_crank_torque_nm = float(signed_crank_torque_nm)
         if not math.isfinite(self.signed_crank_torque_nm) or self.signed_crank_torque_nm <= 0:
             raise ValueError("Negative crank rotation requires positive constant resistive torque")
-        if not initial_weight_basis:
+        if not isinstance(initial_weight_basis, str) or not initial_weight_basis.strip():
             raise ValueError("An explicit initial_weight_basis is required")
         if set(parameters) != set(self.muscle_names):
             raise ValueError("parameters must identify every muscle")
@@ -87,8 +91,9 @@ class RhoPaceController:
             # An existing journal belongs to a previous run: never mix arms.
             with self.journal_path.open("x", encoding="utf-8"):
                 pass
-        self._record({"event": "configuration", "arm": "RHO-PACE",
-                      "policy": "causal_capacity_feedback_v1", "config": asdict(self.config),
+        self._record({"event": "configuration", "arm": self.arm,
+                      "policy": ("causal_capacity_feedback_v1" if self.config.adaptation_enabled
+                                 else "static_initial_physiological_cost_v1"), "config": asdict(self.config),
                       "muscle_names": self.muscle_names, "parameters": self.parameters,
                       "initial_weights": self.initial_weights,
                       "supplied_initial_weights": supplied_weights,
@@ -103,7 +108,7 @@ class RhoPaceController:
                       "endurance_improvement_validated": False})
 
     def _record(self, event):
-        event = {"signed_crank_torque_nm": self.signed_crank_torque_nm,
+        event = {"arm": self.arm, "signed_crank_torque_nm": self.signed_crank_torque_nm,
                  "weights": self.weights, "ocp_cost_connected": self.connected, **event}
         encoded = json.dumps(event, allow_nan=False, sort_keys=True)
         self.events.append(json.loads(encoded))
@@ -146,6 +151,9 @@ class RhoPaceController:
             reasons.append("invalid_capacity_ratios")
         if reasons:
             return self._record({**event, "status": "refused"})
+        if self.connected and not self.config.adaptation_enabled:
+            self.last_cycle = cycle_index
+            return self._record({**event, "status": "held", "reasons": ["static_physiological_weights"]})
         if self.connected and cycle_index % self.config.update_every_cycles:
             self.last_cycle = cycle_index
             return self._record({**event, "status": "held", "reasons": ["slow_update_not_due"]})
