@@ -94,6 +94,11 @@ weights are not silently floored: choose and document an admissible positive
 weight family before this protocol. The seed certificate is not a certification
 of the scientific validity of that choice.
 
+Ready-to-use experimental inputs for the Triceps `alpha_a` x0.5 and x2
+variants, including independently recalculated positive raw/max weights, are
+in `examples/fes_multibody/cycling/two_model_ding_campaign/`. Their source
+calibration is declared inside each weight file and does not use FHO data.
+
 Example declaration (replace paths and CPU IDs with verified local values):
 
 ```bash
@@ -109,6 +114,8 @@ directory and environment for each job, distinct result/configuration-audit
 paths, weighted-condition journal paths, and disjoint `taskset` CPU masks.
 MA57's explicit library path and SHA-256, Python, taskset, inputs, seed evidence
 and relevant implementation files are sealed. Changes require a new manifest.
+The default sealed NLP tolerance is `1e-8`; declaring another tolerance creates
+a distinct manifest.
 
 `next_jobs(manifest, reviews, running_job_ids=...)` returns at most two eligible
 jobs, minus the slots occupied by reported running jobs. Its review mapping is
@@ -119,12 +126,14 @@ need `outcome` and `certified_executed_cycles`. Require the exact result,
 configured-model audit, and weighted journal where applicable in the evidence.
 Initial review also checks variant weights were not calibrated from FHO.
 
-A caller launches returned argv with its supplied environment and working
-directory, reports **all** running jobs, then physically reviews each finished
-job before requesting successors. This is a planner, not an OS scheduler:
-unreported/manual processes cannot be constrained. At most one job per model
-is eligible, in the order above. The two independent chains need not wait at
-a global stage barrier. A zero-cycle or unreviewed failure blocks its chain;
+A caller may use `scripts/run_two_model_campaign_wave.py` with the sealed
+manifest and review JSON to launch the one or two eligible jobs and wait for
+their process exits. It uses the manifest's exact `taskset`, environment,
+working directory and argv; `--dry-run` prints the exact next wave. It never
+launches a successor in that invocation. Its `launcher-receipt.json` records
+only a process exit, never a physical outcome. Unreported/manual processes
+remain outside this guard. At most one job per model is eligible, in the order
+above. The two independent chains need not wait at a global stage barrier. A zero-cycle or unreviewed failure blocks its chain;
 a reviewed nonempty physical prefix may advance only with the explicit
 `numerical_or_unresolved_stop` classification. Numerical failure is never
 called fatigue. Completing a finite cycle budget is not an endurance limit.

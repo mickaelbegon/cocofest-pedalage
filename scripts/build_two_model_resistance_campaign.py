@@ -105,7 +105,7 @@ def _seed_preparation_inputs(variant, model_file, model, resistance_nm):
 def build_two_model_manifest(*, campaign_id, resistance_nm, cycles, variants,
                              output_directory, hsl_library, cores_per_job,
                              numeric_threads=1, cpu_ids=None, python=sys.executable,
-                             max_iterations=2000, taskset=None):
+                             max_iterations=2000, nlp_tolerance=1e-8, taskset=None):
     """Build a sealed two-chain DAG. CPU IDs denote logical OS CPUs.
 
     Select one CPU ID per physical core explicitly when SMT isolation is
@@ -138,7 +138,7 @@ def build_two_model_manifest(*, campaign_id, resistance_nm, cycles, variants,
             seed=variant["seed"], reduced_profile=variant["reduced_profile"],
             pace_config=weights_file["path"], output_directory=directory, python=python,
             linear_solver="ma57", hsl_library=hsl_library,
-            max_iterations=max_iterations, threads=workers,
+            max_iterations=max_iterations, nlp_tolerance=nlp_tolerance, threads=workers,
         )
         if manifest is None:
             manifest = deepcopy(original)
@@ -288,6 +288,7 @@ def main(argv=None):
     parser.add_argument("--cpu-ids", type=lambda text: tuple(int(item) for item in text.split(",")))
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--max-iterations", type=int, default=2000)
+    parser.add_argument("--nlp-tolerance", type=float, default=1e-8)
     args = vars(parser.parse_args(argv))
     destination, descriptor = args.pop("manifest"), args.pop("variants").resolve(strict=True)
     variants = json.loads(descriptor.read_text())

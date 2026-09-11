@@ -37,7 +37,8 @@ def _digest(value):
 
 def build_manifest(*, campaign_id, resistance_nm, cycles, seed, reduced_profile,
                    pace_config, output_directory, python=sys.executable,
-                   linear_solver="ma57", hsl_library=None, max_iterations=2000, threads=1):
+                   linear_solver="ma57", hsl_library=None, max_iterations=2000, threads=1,
+                   nlp_tolerance=1e-8):
     """Declare three arms without launching them or certifying their inputs."""
     if not isinstance(campaign_id, str) or not campaign_id.strip():
         raise ValueError("campaign_id must be nonempty")
@@ -50,6 +51,9 @@ def build_manifest(*, campaign_id, resistance_nm, cycles, seed, reduced_profile,
             raise ValueError(f"Invalid {label}; cycles are limited to 1–100")
     if linear_solver not in ("ma57", "mumps"):
         raise ValueError("linear_solver must be ma57 or mumps")
+    if (isinstance(nlp_tolerance, bool) or not math.isfinite(nlp_tolerance)
+            or nlp_tolerance <= 0):
+        raise ValueError("nlp_tolerance must be finite and positive")
     inputs = {"seed": artifact(seed), "reduced_profile": artifact(reduced_profile),
               "pace_config": artifact(pace_config), "python": artifact(python)}
     if linear_solver == "ma57":
@@ -79,6 +83,7 @@ def build_manifest(*, campaign_id, resistance_nm, cycles, seed, reduced_profile,
               "--ipopt-collocation-method", "radau", "--stimulations-per-cycle", "30",
               "--ipopt-use-sx", "--ipopt-linear-solver", linear_solver,
               "--ipopt-max-iter", str(max_iterations), "--n-threads", str(threads),
+              "--nlp-tolerance", str(float(nlp_tolerance)),
               "--max-consecutive-failing", "1"]
     environment = {"OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1",
                    "MKL_NUM_THREADS": "1", "MPLBACKEND": "Agg"}
@@ -204,6 +209,7 @@ def main(argv=None):
                         help="Required existing HSL library for MA57; path and SHA-256 are sealed")
     parser.add_argument("--max-iterations", type=int, default=2000)
     parser.add_argument("--threads", type=int, default=1)
+    parser.add_argument("--nlp-tolerance", type=float, default=1e-8)
     args = vars(parser.parse_args(argv))
     target = args.pop("manifest")
     manifest = build_manifest(**args)

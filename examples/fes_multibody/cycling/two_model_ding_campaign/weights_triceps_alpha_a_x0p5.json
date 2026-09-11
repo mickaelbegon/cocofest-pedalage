@@ -1,0 +1,18 @@
+{
+  "initial_weight_basis": "article_formula_raw_max; case=repository_current--ofat--triceps--alpha_a--x0p5; source_commit=31e064f4d80741c8b5444e6ce4d91bfe4eb78c3d; source_geometry_n_shooting=960; calibration_cycles=45; rho=0.8; task_torque_threshold_nm=0.2; pre_risk_width_deg=90; no_FHO_data; experimental_source_calibration",
+  "initial_weights": {
+    "Delt_ant": 0.9321318435501275,
+    "Delt_post": 0.0406448004345675,
+    "Biceps": 1.0,
+    "Triceps": 0.00044211934615436216
+  },
+  "policy": {
+    "update_every_cycles": 5,
+    "smoothing": 0.2,
+    "capacity_gain": 1.0,
+    "min_relative_weight": 0.001,
+    "max_relative_weight": 64.0,
+    "max_log_step": 0.09531017980432493,
+    "max_cycles": 100
+  }
+}
