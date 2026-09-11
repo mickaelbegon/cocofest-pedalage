@@ -290,14 +290,31 @@ def main(argv=None):
     parser.add_argument("--max-iterations", type=int, default=2000)
     parser.add_argument("--nlp-tolerance", type=float, default=1e-8)
     args = vars(parser.parse_args(argv))
-    destination, descriptor = args.pop("manifest"), args.pop("variants").resolve(strict=True)
-    variants = json.loads(descriptor.read_text())
+    destination, descriptor = args.pop("manifest"), args.pop("variants").expanduser().resolve()
+    if not descriptor.is_file():
+        parser.error(
+            f"Variants descriptor not found: {descriptor}. Create it first with "
+            "scripts/prepare_two_model_variants.py --run-directory RUN "
+            "--reduced-profile PROFILE --output VARIANTS_JSON. "
+            "Seeds and their physical-review certificates are separate prerequisites."
+        )
+    try:
+        variants = json.loads(descriptor.read_text())
+    except (OSError, ValueError) as exc:
+        parser.error(f"Cannot read variants descriptor {descriptor}: {exc}")
     if isinstance(variants, list):
         for variant in variants:
+            if not isinstance(variant, dict):
+                parser.error("Each entry in the variants descriptor must be a JSON object")
             for key in ("model_config", "seed", "seed_certificate", "reduced_profile", "weights_config"):
+                if key in variant and not isinstance(variant[key], str):
+                    parser.error(f"Variant field {key} must be a path string")
                 if key in variant and not Path(variant[key]).is_absolute():
                     variant[key] = str(descriptor.parent / variant[key])
-    manifest = build_two_model_manifest(variants=variants, **args)
+    try:
+        manifest = build_two_model_manifest(variants=variants, **args)
+    except (OSError, ValueError) as exc:
+        parser.error(f"Cannot build campaign: {exc}")
     manifest["inputs"]["variant_descriptor"] = artifact(descriptor)
     manifest.pop("manifest_sha256")
     manifest["manifest_sha256"] = _digest(manifest)

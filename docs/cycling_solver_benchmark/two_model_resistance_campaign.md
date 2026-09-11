@@ -101,6 +101,20 @@ calibration is declared inside each weight file and does not use FHO data.
 
 Example declaration (replace paths and CPU IDs with verified local values):
 
+First write the descriptor; this only records the declared locations and never
+creates a seed or its scientific certificate:
+
+```bash
+python scripts/prepare_two_model_variants.py \
+  --run-directory /absolute/run-directory \
+  --reduced-profile /absolute/profile.npz
+```
+
+By default it expects `x0p5/seed.npz`, `x0p5/seed-certificate.json`, and the
+equivalent `x2/` files beneath that run directory. It prints missing
+prerequisites but intentionally still writes `variants.json`, so the path is
+declared before creating a sealed campaign.
+
 ```bash
 MPLBACKEND=Agg python scripts/build_two_model_resistance_campaign.py \
   --campaign-id ding-comparison --resistance-nm 0.10 --cycles 100 \
