@@ -98,6 +98,7 @@ try:
         set_fes_model,
         validate_and_clip_pulse_width_seed,
     )
+        MyCyclicNMPC,
 except ImportError:
     from cycling_pulse_width_mhe import (
         prepare_nmpc,
@@ -105,6 +106,7 @@ except ImportError:
         set_fes_model,
         validate_and_clip_pulse_width_seed,
     )
+        MyCyclicNMPC,
 
 OBJECTIVE_TO_WEIGHT_INDEX = {"force": 0, "fatigue": 1, "control": 2}
 DEFAULT_CRANK_ASSISTANCE_NM = 0.2
@@ -16769,6 +16771,12 @@ def finalize_absolute_wheel_q_initial_guess(
         ]
     )
     periodic_nmpc._correct_init_guess_to_fit_bounds(corrected_input="states")
+    # Loading a transported RHO seed can shift every absolute crank angle.
+    # Single-shot FHO does not advance a window, so recenter its internal
+    # cycle seams here as well, before synchronizing the solver bounds.
+    MyCyclicNMPC._recenter_wheel_cycle_boundary_constraints(
+        periodic_nmpc, first_wheel_q=initial_wheel_q, cycle_shift=cycle_shift
+    )
     terminal_after_clip = float(
         np.asarray(periodic_nmpc.nlp[0].x_init[position_key].init, dtype=float)[
             wheel_index, -1

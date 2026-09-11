@@ -18,11 +18,13 @@ def inputs(tmp_path):
     seed, profile, config = (tmp_path / name for name in ("seed.npz", "profile.npz", "pace.json"))
     seed.write_bytes(b"fixture: certification is supplied separately")
     profile.write_bytes(b"fixture geometry")
+    library = tmp_path / "libcoinhsl.so"
+    library.write_bytes(b"fixture: not an actual HSL shared library")
     config.write_text(json.dumps({"initial_weight_basis": "uniform_start_test_control",
                                   "policy": {"max_cycles": 100}}))
     return dict(campaign_id="fixed-R-test", resistance_nm=.22, cycles=3,
                 seed=seed, reduced_profile=profile, pace_config=config,
-                output_directory=tmp_path / "campaign", python=sys.executable)
+                output_directory=tmp_path / "campaign", python=sys.executable, hsl_library=library)
 
 
 def initial_review(manifest, tmp_path):
@@ -64,6 +66,9 @@ def test_three_arms_lock_dynamics_resistance_initial_inputs_and_horizon(inputs):
         assert "isokinetic" not in argv and "--crank-assistance" not in argv
         assert value(argv, "--n-windows") == "3"
         assert value(argv, "--ipopt-linear-solver") == "ma57"
+        assert value(argv, "--ipopt-hsl-library") == str(inputs["hsl_library"])
+    assert manifest["environment"]["IPOPT_HSL_LIBRARY"] == str(inputs["hsl_library"])
+    assert manifest["inputs"]["hsl_library"] == artifact(inputs["hsl_library"])
     assert [value(a["argv"], "--cycles-per-window") for a in manifest["arms"]] == ["1", "1", "3"]
     assert "--single-shot" in manifest["arms"][2]["argv"]
     assert all("--single-shot" not in a["argv"] for a in manifest["arms"][:2])
@@ -93,6 +98,33 @@ def test_commands_use_existing_benchmark_flags_without_importing_solver(inputs):
         argv = arm["argv"]
         argv = argv[argv.index("--") + 1:] if "--" in argv else argv[2:]
         assert {item for item in argv if item.startswith("--")} <= flags
+
+
+def test_ma57_requires_explicit_existing_file_not_ambient_environment(inputs, monkeypatch):
+    monkeypatch.setenv("IPOPT_HSL_LIBRARY", str(inputs["hsl_library"]))
+    with pytest.raises(ValueError, match="explicit existing --hsl-library"):
+        build_manifest(**{**inputs, "hsl_library": None})
+    with pytest.raises(FileNotFoundError):
+        build_manifest(**{**inputs, "hsl_library": inputs["hsl_library"].with_name("absent.so")})
+    with pytest.raises(ValueError, match="Expected file"):
+        build_manifest(**{**inputs, "hsl_library": inputs["hsl_library"].parent})
+
+
+def test_hsl_content_change_refuses_next_arm(inputs, tmp_path):
+    manifest = build_manifest(**inputs)
+    reviews = initial_review(manifest, tmp_path)
+    inputs["hsl_library"].write_bytes(b"different HSL build")
+    with pytest.raises(ValueError, match="input or code changed"):
+        next_command(manifest, reviews)
+
+
+def test_mumps_has_no_hsl_dependency_or_claim(inputs):
+    manifest = build_manifest(**{**inputs, "linear_solver": "mumps", "hsl_library": None})
+    assert "hsl_library" not in manifest["inputs"]
+    assert "IPOPT_HSL_LIBRARY" not in manifest["environment"]
+    assert all("--ipopt-hsl-library" not in arm["argv"] for arm in manifest["arms"])
+    with pytest.raises(ValueError, match="only valid for an MA57"):
+        build_manifest(**{**inputs, "linear_solver": "mumps"})
 
 
 def test_sequential_gates_require_initial_then_rho_then_pace_with_journal(inputs, tmp_path):
@@ -162,6 +194,7 @@ def test_cli_only_creates_manifest_and_refuses_overwrite(inputs, tmp_path, capsy
     argv = ["--campaign-id", "test", "--resistance-nm", ".22", "--cycles", "3",
             "--seed", str(inputs["seed"]), "--reduced-profile", str(inputs["reduced_profile"]),
             "--pace-config", str(inputs["pace_config"]),
+            "--hsl-library", str(inputs["hsl_library"]),
             "--output-directory", str(inputs["output_directory"]), "--manifest", str(target)]
     main(argv)
     assert "no solver started" in capsys.readouterr().out

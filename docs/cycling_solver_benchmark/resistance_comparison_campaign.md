@@ -23,6 +23,7 @@ python scripts/build_resistance_comparison_campaign.py \
   --seed /absolute/path/certified-common-seed.npz \
   --reduced-profile /absolute/path/reduced-profile.npz \
   --pace-config /absolute/path/pace-config.json \
+  --hsl-library /absolute/path/libcoinhsl.so \
   --output-directory /absolute/path/new-campaign \
   --manifest /absolute/path/new-campaign-manifest.json
 ```
@@ -39,8 +40,16 @@ la résistance, la transcription Radau de degré 5, les 30 stimulations par
 cycle et le solveur IPOPT/MA57. MUMPS peut être demandé explicitement pour
 une campagne distincte. Les fichiers d'entrée et d'implémentation sont
 empreintés. Changer ces fichiers ou une commande rend le manifeste invalide.
-L'environnement numérique et les bibliothèques du solveur restent à
-consigner dans les résultats effectifs.
+Pour MA57, `--hsl-library` est obligatoire et doit désigner un fichier
+existant. Son chemin résolu et son SHA-256 font partie du manifeste ; les
+trois commandes transmettent exactement ce chemin par `--ipopt-hsl-library`,
+et l'environnement déclaré fixe aussi `IPOPT_HSL_LIBRARY`. Une bibliothèque
+ambiante ne remplace pas cette entrée explicite. Tout changement de son
+contenu bloque la progression. Une campagne MUMPS refuse cette option.
+L'empreinte n'établit pas la compatibilité ABI ni la disponibilité effective
+de MA57 : un essai du solveur et sa provenance restent nécessaires dans
+la revue initiale. Les autres dépendances numériques et variables de
+l'environnement doivent être consignées dans les résultats effectifs.
 
 ## Gates et progression
 

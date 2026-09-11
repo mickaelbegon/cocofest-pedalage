@@ -81,7 +81,7 @@ class RhoPaceController:
         self.connected = False
         self.last_cycle = -1
         self.events = []
-        self.journal_path = None if journal_path is None else Path(journal_path)
+        self.journal_path = None if journal_path is None else Path(journal_path).expanduser().resolve()
         if self.journal_path:
             self.journal_path.parent.mkdir(parents=True, exist_ok=True)
             # An existing journal belongs to a previous run: never mix arms.

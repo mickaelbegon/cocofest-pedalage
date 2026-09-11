@@ -52,6 +52,12 @@ def main(argv=None):
     parser.add_argument("--pace-config", type=Path, required=True)
     parser.add_argument("benchmark_args", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
+    # The benchmark changes cwd to its example directory. Bind all PACE
+    # paths to the caller's cwd before entering it, just as it does for its
+    # own output paths; otherwise a successful run hides the sidecar there.
+    caller_directory = Path.cwd()
+    args.pace_config = args.pace_config.expanduser().resolve()
+    args.pace_journal = args.pace_journal.expanduser().resolve()
     benchmark_argv = args.benchmark_args
     if benchmark_argv[:1] == ["--"]:
         benchmark_argv = benchmark_argv[1:]
@@ -159,6 +165,7 @@ def main(argv=None):
             controller._record({"event": "launcher_failed", "error": f"{type(error).__name__}: {error}"})
         raise
     finally:
+        os.chdir(caller_directory)
         FesNmpcMsk.solve_fes_nmpc = original
 
 

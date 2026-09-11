@@ -37,7 +37,7 @@ def _digest(value):
 
 def build_manifest(*, campaign_id, resistance_nm, cycles, seed, reduced_profile,
                    pace_config, output_directory, python=sys.executable,
-                   linear_solver="ma57", max_iterations=2000, threads=1):
+                   linear_solver="ma57", hsl_library=None, max_iterations=2000, threads=1):
     """Declare three arms without launching them or certifying their inputs."""
     if not isinstance(campaign_id, str) or not campaign_id.strip():
         raise ValueError("campaign_id must be nonempty")
@@ -52,6 +52,12 @@ def build_manifest(*, campaign_id, resistance_nm, cycles, seed, reduced_profile,
         raise ValueError("linear_solver must be ma57 or mumps")
     inputs = {"seed": artifact(seed), "reduced_profile": artifact(reduced_profile),
               "pace_config": artifact(pace_config), "python": artifact(python)}
+    if linear_solver == "ma57":
+        if hsl_library is None:
+            raise ValueError("MA57 requires an explicit existing --hsl-library file")
+        inputs["hsl_library"] = artifact(hsl_library)
+    elif hsl_library is not None:
+        raise ValueError("--hsl-library is only valid for an MA57 campaign")
     config = json.loads(Path(inputs["pace_config"]["path"]).read_text())
     if not isinstance(config, dict) or not config.get("initial_weight_basis"):
         raise ValueError("PACE config needs an explicit initial_weight_basis")
@@ -74,6 +80,12 @@ def build_manifest(*, campaign_id, resistance_nm, cycles, seed, reduced_profile,
               "--ipopt-use-sx", "--ipopt-linear-solver", linear_solver,
               "--ipopt-max-iter", str(max_iterations), "--n-threads", str(threads),
               "--max-consecutive-failing", "1"]
+    environment = {"OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1",
+                   "MKL_NUM_THREADS": "1", "MPLBACKEND": "Agg"}
+    if linear_solver == "ma57":
+        library = inputs["hsl_library"]["path"]
+        common += ["--ipopt-hsl-library", library]
+        environment["IPOPT_HSL_LIBRARY"] = library
     benchmark = "examples/fes_multibody/cycling/cycling_fes_solver_comparison.py"
     launcher = "scripts/run_rho_pace_benchmark.py"
     arms = []
@@ -111,8 +123,7 @@ def build_manifest(*, campaign_id, resistance_nm, cycles, seed, reduced_profile,
                 "inputs": inputs, "code": [artifact(ROOT / path) for path in code_paths],
                 "initial_weight_basis": config["initial_weight_basis"],
                 "initial_required_review_gates": list(INITIAL_GATES), "arms": arms,
-                "environment": {"OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1",
-                                "MKL_NUM_THREADS": "1", "MPLBACKEND": "Agg"},
+                "environment": environment,
                 "comparison": {"common_metrics": ["certified_executed_cycles", "tracking_error",
                                 "unweighted_capacity_loss", "pw_force_bounds", "solver_latency"],
                                "fho_used_for_pace_calibration": False,
@@ -189,6 +200,8 @@ def main(argv=None):
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--python", default=sys.executable)
     parser.add_argument("--linear-solver", choices=("ma57", "mumps"), default="ma57")
+    parser.add_argument("--hsl-library", type=Path,
+                        help="Required existing HSL library for MA57; path and SHA-256 are sealed")
     parser.add_argument("--max-iterations", type=int, default=2000)
     parser.add_argument("--threads", type=int, default=1)
     args = vars(parser.parse_args(argv))

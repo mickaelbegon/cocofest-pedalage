@@ -159,12 +159,16 @@ def test_real_bioptim_objective_replacement_changes_two_successive_solves():
     solver = Solver.IPOPT(show_online_optim=False)
     solver.set_print_level(0)
     solver.set_linear_solver("mumps")
+    baseline = ocp.solve(solver)
     receipt = update_bioptim_fatigue_cost(ocp, (1.,))
     assert receipt["ocp_cost_updated"] is True
     first = ocp.solve(solver)
     update_bioptim_fatigue_cost(ocp, (2.,))
     second = ocp.solve(solver)
-    assert first.status == second.status == 0
+    assert baseline.status == first.status == second.status == 0
+    # A unit-weight PACE attachment must preserve the original objective,
+    # including Bioptim's time integration and original global multiplier.
+    assert float(first.cost) == pytest.approx(float(baseline.cost), rel=1e-13)
     assert float(second.cost) == pytest.approx(2 * float(first.cost))
     assert len(ocp.nlp[0].J) == 1
 
@@ -182,6 +186,8 @@ def test_launcher_restricts_to_supported_real_dynamic_rho():
 
 
 def test_launcher_executes_patched_canonical_cycling_class_and_writes_journal(tmp_path, monkeypatch):
+    import os
+    from pathlib import Path
     from scripts.run_rho_pace_benchmark import main
     from examples.fes_multibody.cycling import cycling_fes_solver_comparison as benchmark
     from examples.fes_multibody.cycling.cycling_pulse_width_mhe import MyCyclicNMPC
@@ -200,9 +206,20 @@ def test_launcher_executes_patched_canonical_cycling_class_and_writes_journal(tm
     monkeypatch.setattr(FesNmpcMsk, "solve_fes_nmpc", lambda self, callback, **kw: callback(self, 0, None))
     patched_original = FesNmpcMsk.solve_fes_nmpc
     monkeypatch.setattr(rho_pace, "update_bioptim_fatigue_cost", lambda ocp, weights: apply(weights))
-    monkeypatch.setattr(benchmark, "main", lambda **kwargs: nmpc.solve_fes_nmpc(lambda *a: True))
-    main(["--pace-config", str(config), "--pace-journal", str(journal), "--", "--solvers", "ipopt",
+    backend_directory = tmp_path / "backend"
+    backend_directory.mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    def benchmark_with_directory_change(**kwargs):
+        # The actual cycling main changes cwd to EXAMPLE_DIR before solving.
+        os.chdir(backend_directory)
+        return nmpc.solve_fes_nmpc(lambda *a: True)
+
+    monkeypatch.setattr(benchmark, "main", benchmark_with_directory_change)
+    main(["--pace-config", config.name, "--pace-journal", journal.name, "--", "--solvers", "ipopt",
           "--mechanical-formulation", "reduced", "--compact-rho-output", "--signed-crank-torque", ".22"])
+    assert Path.cwd() == tmp_path
+    assert not (backend_directory / journal.name).exists()
     rows = [json.loads(line) for line in journal.read_text().splitlines()]
     assert rows[-1]["event"] == "launcher_completed"
     assert any(row.get("status") == "applied" for row in rows)

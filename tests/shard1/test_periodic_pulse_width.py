@@ -10205,6 +10205,70 @@ def test_absolute_terminal_reference_spans_the_complete_single_shot_horizon():
     np.testing.assert_allclose(theta_bounds.max[0, 2], target + 0.002)
 
 
+@pytest.mark.parametrize("position_key,wheel_index", [("theta", 0), ("q", 2)])
+@pytest.mark.parametrize("cycle_shift", [-2.0 * np.pi, 2.0 * np.pi])
+def test_loaded_single_shot_seed_recenters_internal_cycle_boundary(
+    position_key, wheel_index, cycle_shift
+):
+    # A transported two-cycle RHO seed starts one revolution after the
+    # original OCP. Its internal seam must move with its first/terminal state.
+    original_start = -0.04
+    loaded_start = original_start + cycle_shift
+    original_seam = original_start + cycle_shift
+    slack = 0.002
+    seam = SimpleNamespace(
+        extra_parameters={
+            "boundary_cycle_index": 1,
+            "wheel_cycle_boundary_slack": slack,
+        },
+        min_bound=original_seam - slack,
+        max_bound=original_seam + slack,
+        bounds=Bounds("seam", [original_seam - slack], [original_seam + slack]),
+    )
+    unrelated = SimpleNamespace(extra_parameters={}, min_bound=-5.0, max_bound=5.0)
+    initial_states = np.zeros((wheel_index + 1, 3))
+    initial_states[wheel_index] = loaded_start + np.arange(3) * cycle_shift
+    state_bounds = SimpleNamespace(
+        min=np.full((wheel_index + 1, 3), -100.0),
+        max=np.full((wheel_index + 1, 3), 100.0),
+    )
+    nmpc = SimpleNamespace(
+        anchor_wheel_q_to_absolute_reference=True,
+        position_state_key=position_key,
+        wheel_state_index=wheel_index,
+        absolute_wheel_q_reference=original_start,
+        absolute_wheel_q_cycle_shift=cycle_shift,
+        absolute_wheel_q_cycle_index=1,
+        _cocofest_cycles_per_window=2,
+        terminal_state_slack={position_key: np.full(wheel_index + 1, slack)},
+        nlp=[
+            SimpleNamespace(
+                x_init={position_key: SimpleNamespace(init=initial_states)},
+                x_bounds={position_key: state_bounds},
+                g=[unrelated, None, seam],
+            )
+        ],
+        _sync_acados_state_bounds=lambda: None,
+    )
+
+    assert periodic_example.recenter_absolute_wheel_q_reference_from_initial_guess(
+        nmpc
+    )
+
+    expected_seam = initial_states[wheel_index, 1]
+    assert seam.min_bound <= expected_seam <= seam.max_bound
+    np.testing.assert_allclose(seam.bounds.min, expected_seam - slack)
+    np.testing.assert_allclose(seam.bounds.max, expected_seam + slack)
+    np.testing.assert_allclose(
+        state_bounds.min[wheel_index, 2], initial_states[wheel_index, -1] - slack
+    )
+    np.testing.assert_allclose(
+        state_bounds.max[wheel_index, 2], initial_states[wheel_index, -1] + slack
+    )
+    assert nmpc.absolute_wheel_q_reference == pytest.approx(original_start)
+    assert (unrelated.min_bound, unrelated.max_bound) == (-5.0, 5.0)
+
+
 def test_final_seed_is_recentered_clipped_and_reprojected_after_last_seed_source(
     monkeypatch,
 ):
