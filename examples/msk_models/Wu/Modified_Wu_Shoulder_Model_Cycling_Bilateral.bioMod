@@ -1,0 +1,293 @@
+version 4
+
+// Bilateral hand-cycling reference model used to construct the reduced
+// theta/omega dynamics.  It deliberately has two independent arm chains and
+// one crank; it is not a duplicated Fourier-profile surrogate.  The online
+// OCP never solves these five coordinates: they are sampled offline and
+// reduced to a one-degree-of-freedom contact manifold.
+//
+// The two arms are a planar, symmetric specialization of the active Wu arm
+// chain (humerus, ulna, Biceps, Triceps, anterior/posterior deltoid).  Their
+// masses and muscle parameters are copied from the unilateral reference.
+
+gravity 0 0 -9.8
+
+segment thorax
+    parent ground
+    RT 0 0 0 xyz 0 0 0
+    mass 20
+    inertia
+        1.4745 0 0
+        0 0.7555 0
+        0 0 1.4314
+    com 0 -0.0024948851425305404 0
+endsegment
+
+// Right arm.  The left chain below is its reflection in the x-z plane.
+segment right_humerus
+    parent thorax
+    RT 0 0 0 xyz 0 0.10 0
+    mass 2.0325
+    inertia
+        0.011946 0 0
+        0 0.004121 0
+        0 0 0.013409
+    com 0 -0.164502 0
+    rotations z
+    ranges -3 3
+endsegment
+
+segment right_ulna
+    parent right_humerus
+    RT 0 0 0 xyz 0 -0.2904 0
+    mass 0.6075
+    inertia
+        0.002962 0 0
+        0 0.000618 0
+        0 0 0.003213
+    com 0 -0.120525 0
+    rotations z
+    ranges -1 3
+endsegment
+
+segment left_humerus
+    parent thorax
+    RT 0 0 0 xyz 0 -0.10 0
+    mass 2.0325
+    inertia
+        0.011946 0 0
+        0 0.004121 0
+        0 0 0.013409
+    com 0 0.164502 0
+    rotations z
+    ranges -3 3
+endsegment
+
+segment left_ulna
+    parent left_humerus
+    RT 0 0 0 xyz 0 0.2904 0
+    mass 0.6075
+    inertia
+        0.002962 0 0
+        0 0.000618 0
+        0 0 0.003213
+    com 0 0.120525 0
+    rotations z
+    ranges -1 3
+endsegment
+
+variables
+    $wheel_radius 0.10
+    $wheel_x_position 0.35
+    $wheel_y_position 0.0
+endvariables
+
+// The crank is parented to thorax, not to either arm.  This makes the shared
+// crank explicit and leaves each hand-to-handle relation to the offline IK.
+segment wheel_rotation
+    parent thorax
+    RT 0 0 0 xyz $wheel_x_position $wheel_y_position 0
+    rotations z
+    rangesQ -40*pi 4*pi
+endsegment
+
+segment wheel
+    parent wheel_rotation
+    RT 0 0 0 xyz 0 0 0
+    mass 0.5
+    inertia
+        0.001254 0 0
+        0 0.001254 0
+        0 0 0.0025
+    com 0 0 0
+endsegment
+
+// Retained for FesMskModel construction compatibility.  The bilateral path
+// is used only with reduced mechanics; hand-to-handle closure is enforced
+// offline by solve_bilateral_cycling_kinematics, not by this contact.
+contact Wheel_center_contact
+    parent wheel
+    position 0 0 0
+    axis xy
+endcontact
+
+marker wheel_center
+    parent wheel
+    position 0 0 0
+endmarker
+
+marker right_handle
+    parent wheel
+    position -$wheel_radius 0 0
+endmarker
+
+marker left_handle
+    parent wheel
+    position $wheel_radius 0 0
+endmarker
+
+marker right_hand
+    parent right_ulna
+    position 0 -0.25 0
+endmarker
+
+marker left_hand
+    parent left_ulna
+    position 0 0.25 0
+endmarker
+
+// Right-muscle geometry (same Ding scaling is selected by the Python layer).
+musclegroup right_shoulder_to_humerus
+    OriginParent thorax
+    InsertionParent right_humerus
+endmusclegroup
+
+muscle right_Delt_ant
+    type degroote
+    statetype degroote
+    musclegroup right_shoulder_to_humerus
+    OriginPosition -0.05 0.05 0
+    InsertionPosition 0 -0.12 0
+    optimalLength 0.1752
+    maximalForce 556.8
+    tendonSlackLength 0.0313
+    pennationAngle 0.383972435439
+endmuscle
+
+muscle right_Delt_post
+    type degroote
+    statetype degroote
+    musclegroup right_shoulder_to_humerus
+    OriginPosition 0.05 0.05 0
+    InsertionPosition 0 -0.11 0
+    optimalLength 0.1228
+    maximalForce 944.7
+    tendonSlackLength 0.0975
+    pennationAngle 0.314159265359
+endmuscle
+
+musclegroup right_shoulder_to_ulna
+    OriginParent thorax
+    InsertionParent right_ulna
+endmusclegroup
+
+muscle right_Biceps
+    type degroote
+    statetype degroote
+    musclegroup right_shoulder_to_ulna
+    OriginPosition -0.04 0.04 0
+    InsertionPosition 0 -0.10 0
+    optimalLength 0.165
+    maximalForce 624.3
+    tendonSlackLength 0.27563
+    pennationAngle 0
+endmuscle
+
+viapoint right_Biceps_elbow
+    parent right_humerus
+    muscle right_Biceps
+    musclegroup right_shoulder_to_ulna
+    position -0.025 -0.19 0
+endviapoint
+
+musclegroup right_humerus_to_ulna
+    OriginParent right_humerus
+    InsertionParent right_ulna
+endmusclegroup
+
+muscle right_Triceps
+    type degroote
+    statetype degroote
+    musclegroup right_humerus_to_ulna
+    OriginPosition 0 -0.08 0
+    InsertionPosition 0 -0.03 0
+    optimalLength 0.165
+    maximalForce 798.52
+    tendonSlackLength 0.1484
+    pennationAngle 0.2094
+endmuscle
+
+viapoint right_Triceps_elbow
+    parent right_humerus
+    muscle right_Triceps
+    musclegroup right_humerus_to_ulna
+    position 0.025 -0.25 0
+endviapoint
+
+// Left-muscle geometry is the y-reflection of the right chain.
+musclegroup left_shoulder_to_humerus
+    OriginParent thorax
+    InsertionParent left_humerus
+endmusclegroup
+
+muscle left_Delt_ant
+    type degroote
+    statetype degroote
+    musclegroup left_shoulder_to_humerus
+    OriginPosition -0.05 -0.05 0
+    InsertionPosition 0 0.12 0
+    optimalLength 0.1752
+    maximalForce 556.8
+    tendonSlackLength 0.0313
+    pennationAngle 0.383972435439
+endmuscle
+
+muscle left_Delt_post
+    type degroote
+    statetype degroote
+    musclegroup left_shoulder_to_humerus
+    OriginPosition 0.05 -0.05 0
+    InsertionPosition 0 0.11 0
+    optimalLength 0.1228
+    maximalForce 944.7
+    tendonSlackLength 0.0975
+    pennationAngle 0.314159265359
+endmuscle
+
+musclegroup left_shoulder_to_ulna
+    OriginParent thorax
+    InsertionParent left_ulna
+endmusclegroup
+
+muscle left_Biceps
+    type degroote
+    statetype degroote
+    musclegroup left_shoulder_to_ulna
+    OriginPosition -0.04 -0.04 0
+    InsertionPosition 0 0.10 0
+    optimalLength 0.165
+    maximalForce 624.3
+    tendonSlackLength 0.27563
+    pennationAngle 0
+endmuscle
+
+viapoint left_Biceps_elbow
+    parent left_humerus
+    muscle left_Biceps
+    musclegroup left_shoulder_to_ulna
+    position -0.025 0.19 0
+endviapoint
+
+musclegroup left_humerus_to_ulna
+    OriginParent left_humerus
+    InsertionParent left_ulna
+endmusclegroup
+
+muscle left_Triceps
+    type degroote
+    statetype degroote
+    musclegroup left_humerus_to_ulna
+    OriginPosition 0 0.08 0
+    InsertionPosition 0 0.03 0
+    optimalLength 0.165
+    maximalForce 798.52
+    tendonSlackLength 0.1484
+    pennationAngle 0.2094
+endmuscle
+
+viapoint left_Triceps_elbow
+    parent left_humerus
+    muscle left_Triceps
+    musclegroup left_humerus_to_ulna
+    position 0.025 0.25 0
+endviapoint
