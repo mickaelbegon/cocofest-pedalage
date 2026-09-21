@@ -36,6 +36,28 @@ if [[ -z "$python_executable" ]]; then
   exit 2
 fi
 
+# IDE callers keep the fourteen-position protocol; extras are data, not shell code.
+extra_arguments_json="${BENCHMARK_EXTRA_ARGUMENTS_JSON:-[]}"
+"$python_executable" -c 'import json, sys
+values = json.loads(sys.argv[1])
+if not isinstance(values, list) or any(not isinstance(v, str) or "\0" in v for v in values):
+    raise SystemExit("BENCHMARK_EXTRA_ARGUMENTS_JSON must contain a list of strings without NUL")
+' "$extra_arguments_json"
+mapfile -d '' -t extra_arguments < <("$python_executable" -c 'import json, sys
+for value in json.loads(sys.argv[1]):
+    sys.stdout.buffer.write(value.encode() + b"\0")
+' "$extra_arguments_json")
+stimulations_per_cycle="${BENCHMARK_STIMULATIONS_PER_CYCLE:-30}"
+if ! [[ "$stimulations_per_cycle" =~ ^[1-9][0-9]*$ ]]; then
+  echo "BENCHMARK_STIMULATIONS_PER_CYCLE must be a positive integer" >&2
+  exit 2
+fi
+torque_options=(--crank-assistance "${BENCHMARK_ASSISTANCE:-0}")
+if [[ -n "${BENCHMARK_SIGNED_CRANK_TORQUE:-}" ]]; then
+  "$python_executable" -c 'import math, sys; raise SystemExit(0 if math.isfinite(float(sys.argv[1])) else 2)' "$BENCHMARK_SIGNED_CRANK_TORQUE"
+  torque_options=(--signed-crank-torque "$BENCHMARK_SIGNED_CRANK_TORQUE")
+fi
+
 is_finite_number() {
   "$python_executable" -c 'import math, sys
 try:
@@ -137,6 +159,7 @@ ipopt_fast_max_iterations="${IPOPT_FAST_MAX_ITERATIONS:-200}"
 ipopt_linear_solver="${IPOPT_LINEAR_SOLVER:-mumps}"
 warmup_ipopt_linear_solver="${WARMUP_IPOPT_LINEAR_SOLVER:-${ipopt_linear_solver}}"
 ipopt_hsl_library="${IPOPT_HSL_LIBRARY:-}"
+ipopt_ding_local_reduction="${BENCHMARK_IPOPT_DING_LOCAL_REDUCTION:-false}"
 ipopt_madnlp_recovery_max_iterations="${IPOPT_MADNLP_RECOVERY_MAX_ITERATIONS:-${BENCHMARK_MAX_ITER}}"
 ipopt_madnlp_recovery_max_wall_time="${IPOPT_MADNLP_RECOVERY_MAX_WALL_TIME:-none}"
 ipopt_madnlp_recovery_linear_solver="${IPOPT_MADNLP_RECOVERY_LINEAR_SOLVER:-mumps}"
@@ -197,6 +220,16 @@ case "$parametric_kkt_dual_mode" in
   reset|preserve|predict) ;;
   *) echo "PARAMETRIC_KKT_DUAL_MODE must be reset, preserve, or predict." >&2; exit 2 ;;
 esac
+case "$ipopt_ding_local_reduction" in
+  true|false) ;;
+  *) echo "BENCHMARK_IPOPT_DING_LOCAL_REDUCTION must be true or false." >&2; exit 2 ;;
+esac
+if [[ "$ipopt_ding_local_reduction" == "true" ]]; then
+  if [[ "$solver" != "ipopt" || "$mechanics" != "reduced" || "$benchmark_formulation" != "dynamic" || "$ode_solver" != "collocation" || "$collocation_degree" != "5" || "$compile_mode" != "false" || "$stimulations_per_cycle" != "30" || "${BENCHMARK_CYCLES_PER_WINDOW:-}" != "1" ]]; then
+    echo "The experimental IPOPT Ding reduction requires IPOPT/SX, reduced dynamic one-cycle Radau-5, 30 controls and no C compilation." >&2
+    exit 2
+  fi
+fi
 if [[ "$parametric_kkt_predictor" == "true" ]]; then
   if [[ "$solver" != "ipopt" && "$solver" != "madnlp" ]]; then
     echo "The parametric KKT predictor is available only for IPOPT/MadNLP." >&2
@@ -451,16 +484,20 @@ heartbeat() {
 }
 heartbeat &
 heartbeat_pid=$!
-"$python_executable" "$workspace/examples/fes_multibody/cycling/cycling_fes_solver_comparison.py" \
+entrypoint=("$python_executable" "$workspace/examples/fes_multibody/cycling/cycling_fes_solver_comparison.py")
+if [[ "$ipopt_ding_local_reduction" == "true" ]]; then
+  entrypoint=("$python_executable" "$workspace/scripts/benchmark_ding_radau5_local_ab.py" local --)
+fi
+"${entrypoint[@]}" \
   --solvers "$solver" \
   --objective fatigue \
   --ipopt-profile "$ipopt_profile" \
   --ipopt-enforce-start-constraints \
   --cycles-per-window "$BENCHMARK_CYCLES_PER_WINDOW" \
-  --stimulations-per-cycle 30 \
+  --stimulations-per-cycle "$stimulations_per_cycle" \
   --n-windows "$case_windows" \
   --n-threads "$BENCHMARK_THREADS" \
-  --crank-assistance "$BENCHMARK_ASSISTANCE" \
+  "${torque_options[@]}" \
   --nlp-tolerance "$solver_tolerance" \
   --primal-feasibility-threshold 1e-5 \
   --max-consecutive-failing 2 \
@@ -486,6 +523,7 @@ heartbeat_pid=$!
   --output-json "$result" \
   "${trajectory_options[@]+"${trajectory_options[@]}"}" \
   "${solver_options[@]}" \
+  "${extra_arguments[@]}" \
   2>&1 | tee "$case_dir/solver.log"
 solver_exit="${PIPESTATUS[0]}"
 kill "$heartbeat_pid" 2>/dev/null || true
@@ -561,7 +599,8 @@ then
     --arg solver "$solver" \
     --arg profile "$normalized_profile" \
     --arg status "$scientific_status" \
-    --argjson degree "$collocation_degree" '
+    --argjson degree "$collocation_degree" \
+    --argjson stimulation_count "$stimulations_per_cycle" '
     .configurations[$solver] |
     (.benchmark_profile == $profile) and
     (.profile_integrity == true) and
@@ -569,7 +608,7 @@ then
     (.collocation_degree == $degree) and
     (.enforce_start_constraints == true) and
     (.activate_passive_force_relationship == true) and
-    (.control_decisions_per_cycle == 30)
+    (.control_decisions_per_cycle == $stimulation_count)
   ' "$result" >/dev/null
   then
     echo "The $normalized_profile result does not satisfy its serialized contract." >&2

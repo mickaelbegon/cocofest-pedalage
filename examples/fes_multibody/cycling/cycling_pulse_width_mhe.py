@@ -59,6 +59,28 @@ from cocofest.optimization.muscle_reserve import DEFAULT_SMOOTH_MIN_TEMPERATURE
 from cocofest.optimization.endurance_rollout_ocp import (
     EnduranceRolloutBinding,
 )
+from cocofest.optimization.muscle_horizon_ocp import MuscleHorizonBinding
+from cocofest.optimization.pulse_width_slew import (
+    PREFIX as PW_SLEW_PREFIX,
+    add_auxiliary_bounds_and_guesses,
+    add_direct_slew_constraints,
+    add_slew_constraints,
+    add_slew_regularization,
+    advance_auxiliary_bounds,
+    advance_direct_slew_bounds,
+    auxiliary_keys as pulse_width_slew_auxiliary_keys,
+    validate_max_step,
+    validate_slew_formulation,
+    validate_slew_regularization,
+)
+from cocofest.optimization.pulse_width_interpolation import (
+    odd_interpolation_constraints, validate_odd_interpolation,
+)
+from cocofest.optimization.pulse_width_rate import (
+    CONTROL_MODE as PW_RATE_MODE,
+    promote_pulse_width_to_state,
+    validate_rate_mode,
+)
 
 
 # ACADOS rejects infinite x bounds. This value is deliberately many orders of
@@ -155,6 +177,13 @@ def project_full_first_node_initial_guess_to_contact(
 
 
 class MyCyclicNMPC(FesNmpcMsk):
+    def _initialize_state_idx_to_cycle(self, options):
+        super()._initialize_state_idx_to_cycle(options)
+        self.state_idx_to_cycle = {
+            key: value for key, value in self.state_idx_to_cycle.items()
+            if not key.startswith(PW_SLEW_PREFIX)
+        }
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.nodes_per_cycle = self.cycle_len * (
@@ -386,7 +415,11 @@ class MyCyclicNMPC(FesNmpcMsk):
                 }
 
         # --- States are bounded to match the last node of the cycle to ensure continuity between window --- #
+        advance_auxiliary_bounds(self, sol)
+        advance_direct_slew_bounds(self, sol)
         for key in states_keys:
+            if key.startswith(PW_SLEW_PREFIX):
+                continue
             isokinetic_config = getattr(self, "isokinetic_config", None)
             if key == "E_prod" and isokinetic_config is not None:
                 energy_target = isokinetic_config.energy_target_j
@@ -605,10 +638,28 @@ class MyCyclicNMPC(FesNmpcMsk):
         continuous_keys = [
             s
             for s in states
-            if any(s.startswith(prefix) for prefix in ("A_", "Tau1_", "Km_"))
+            if any(
+                s.startswith(prefix)
+                for prefix in ("A_", "Tau1_", "Km_", "last_pulse_width_")
+            )
         ]
         # --- Set initial guesses for cyclical and continuous states --- #
         for key in states_keys:
+            if (
+                key.startswith("last_pulse_width_")
+                and getattr(
+                    self, "_cocofest_preserve_common_applied_pw_seed", False
+                )
+            ):
+                values = np.asarray(states[key], dtype=float)
+                target = self.nlp[0].x_init[key].init
+                if values.shape != target.shape:
+                    raise ValueError(
+                        f"Common applied-PW seed {key} has shape {values.shape}, "
+                        f"expected {target.shape}."
+                    )
+                target[:, :] = values
+                continue
             isokinetic_config = getattr(self, "isokinetic_config", None)
             if key == "E_prod" and isokinetic_config is not None:
                 energy_guess = self.nlp[0].x_init[key].init
@@ -683,6 +734,8 @@ class MyCyclicNMPC(FesNmpcMsk):
         self._correct_init_guess_to_fit_bounds(
             corrected_input="controls"
         )  # This function is called to move init guess within the bounds if not in bounds
+        MyCyclicNMPC._rebuild_pulse_width_rate_initial_guess(self)
+        self._rebuild_pulse_width_slew_initial_guess()
 
         # --- Print bounds and initial guesses for debugg purpose --- #
         if self.debugg_bounds:
@@ -694,6 +747,103 @@ class MyCyclicNMPC(FesNmpcMsk):
                     key=key,
                 )
         return True
+
+    def _rebuild_pulse_width_rate_initial_guess(self):
+        """Make transferred rate controls exactly match the clipped PW state."""
+
+        nlp = self.nlp[0]
+        model = getattr(nlp, "model", None)
+        if getattr(model, "pulse_width_control_mode", "direct") != PW_RATE_MODE:
+            return
+        stride = (
+            int(nlp.dynamics_type.ode_solver.polynomial_degree) + 1
+            if nlp.dynamics_type.ode_solver.is_direct_collocation
+            else 1
+        )
+        dt = float(model.pulse_width_interval_s)
+        maximum_rate = float(model.pulse_width_max_rate_s_per_s)
+        for muscle in model.muscles_dynamics_model:
+            pw_key = f"last_pulse_width_{muscle.muscle_name}"
+            rate_key = f"pulse_width_rate_{muscle.muscle_name}"
+            state = np.asarray(nlp.x_init[pw_key].init, dtype=float)
+            shooting = state[:, ::stride]
+            rates = np.diff(shooting, axis=1) / dt
+            if rates.shape != nlp.u_init[rate_key].init.shape:
+                raise ValueError(
+                    f"Transferred {rate_key} has shape {rates.shape}, expected "
+                    f"{nlp.u_init[rate_key].init.shape}."
+                )
+            tolerance = max(1e-12, 1e-9 * maximum_rate)
+            exceeds_bound = (
+                float(np.max(np.abs(rates))) > maximum_rate + tolerance
+            )
+            preserve_common_seed = bool(
+                getattr(self, "_cocofest_preserve_common_applied_pw_seed", False)
+            )
+            if exceeds_bound and not preserve_common_seed:
+                raise ValueError(
+                    f"Transferred {pw_key} requires a rate above its physical bound."
+                )
+            if preserve_common_seed:
+                # The direct reference starts from this exact applied-PW trace.
+                # Preserve it for the A/B while projecting only the dynamically
+                # distinct rate-control seed into its admissible box.
+                nlp.u_init[rate_key].init[:, :] = np.clip(
+                    rates, -maximum_rate, maximum_rate
+                )
+                continue
+            if stride > 1:
+                from casadi import collocation_points
+
+                fractions = np.asarray(
+                    [0.0]
+                    + list(
+                        collocation_points(
+                            nlp.dynamics_type.ode_solver.polynomial_degree,
+                            nlp.dynamics_type.ode_solver.method,
+                        )
+                    ),
+                    dtype=float,
+                )
+                for interval in range(rates.shape[1]):
+                    start = shooting[:, interval : interval + 1]
+                    delta = (
+                        shooting[:, interval + 1 : interval + 2] - start
+                    )
+                    columns = slice(interval * stride, (interval + 1) * stride)
+                    state[:, columns] = start + delta * fractions[np.newaxis, :]
+                nlp.x_init[pw_key].init[:, :] = state
+            nlp.u_init[rate_key].init[:, :] = rates
+
+    def _rebuild_pulse_width_slew_initial_guess(self):
+        """Rebuild the exact auxiliary lift after the physical PW prediction.
+
+        The predictor is unchanged: its possible slew/seam inequality defects
+        remain for the NLP to resolve. The carrier/increment equalities must not
+        acquire additional defects from stale or independently shifted values.
+        """
+        nlp = self.nlp[0]
+        model = getattr(nlp, "model", None)
+        if not getattr(model, "uses_pulse_width_slew_lifting", False):
+            return
+        for muscle in model.muscles_dynamics_model:
+            carrier, increment = pulse_width_slew_auxiliary_keys(muscle.muscle_name)
+            physical = np.asarray(nlp.u_init[f"last_pulse_width_{muscle.muscle_name}"].init, dtype=float)
+            n_controls = physical.shape[1]
+            state_grid = state_initial_guess_time_grid(
+                n_shooting=n_controls, turn_number=1,
+                ode_solver=nlp.dynamics_type.ode_solver,
+                window_duration_s=float(n_controls),
+            )
+            endpoints = np.concatenate((physical, physical[:, -1:]), axis=1)
+            values = np.interp(state_grid, np.arange(n_controls + 1), endpoints[0])[None, :]
+            target = nlp.x_init[carrier].init
+            if target.shape != values.shape:
+                raise ValueError(f"PW-slew carrier '{carrier}' has shape {target.shape}, expected {values.shape}.")
+            target[:, :] = values
+            # The final increment is free; initialize it to zero.
+            # Never close the horizon artificially onto its first control.
+            nlp.u_init[increment].init[:, :] = np.diff(endpoints, axis=1)
 
     def set_init_cyclical_controls(self, controls, key, i):
         """Shift controls and predict the appended cycle phase by phase.
@@ -1127,6 +1277,8 @@ def prepare_nmpc(
     )
     endurance_rollout_options = simulation_conditions.get("endurance_rollout_options")
     rollout_binding = None
+    muscle_horizon_options = simulation_conditions.get("muscle_horizon_options")
+    muscle_horizon_binding = None
     control_regularization_weight = simulation_conditions.get(
         "control_regularization_weight", 0.0
     )
@@ -1154,6 +1306,9 @@ def prepare_nmpc(
             "enforce_reduced_internal_crank_velocity_guard", False
         )
     )
+    reduced_internal_crank_velocity_rk4_fraction = simulation_conditions.get(
+        "reduced_internal_crank_velocity_rk4_fraction"
+    )
     terminal_qdot_regularization_weight = simulation_conditions.get(
         "terminal_qdot_regularization_weight", 0.0
     )
@@ -1162,6 +1317,40 @@ def prepare_nmpc(
     )
     state_scaling = simulation_conditions.get("state_scaling", "none")
     pulse_width_scaling = simulation_conditions.get("pulse_width_scaling", 1 / 400)
+    pulse_width_control_mode = simulation_conditions.get(
+        "pulse_width_control_mode", "direct"
+    )
+    pulse_width_max_rate_s_per_s = validate_rate_mode(
+        pulse_width_control_mode,
+        simulation_conditions.get("pulse_width_max_rate_s_per_s"),
+    )
+    pulse_width_max_step_s = validate_max_step(simulation_conditions.get("pulse_width_max_step_s"))
+    pulse_width_slew_formulation = validate_slew_formulation(
+        simulation_conditions.get("pulse_width_slew_formulation")
+    )
+    pulse_width_odd_interpolation = validate_odd_interpolation(
+        simulation_conditions.get("pulse_width_odd_interpolation", False),
+        max_step_s=pulse_width_max_step_s,
+        mechanical_formulation=simulation_conditions.get("mechanical_formulation", "full"),
+        cycles_per_window=n_cycles_simultaneous, stimulations_per_cycle=cycle_len,
+    )
+    pulse_width_slew_weight, pulse_width_slew_reference_us = validate_slew_regularization(
+        simulation_conditions.get("pulse_width_slew_weight", 0.0),
+        simulation_conditions.get("pulse_width_slew_reference_us", 100.0),
+        max_step_s=pulse_width_max_step_s,
+    )
+    if (
+        pulse_width_slew_formulation == "direct_constraints"
+        and pulse_width_slew_weight != 0.0
+    ):
+        raise ValueError(
+            "pulse_width_slew_weight is not yet available with direct PW "
+            "constraints; use the hard bound alone or the legacy lifting formulation."
+        )
+    if pulse_width_max_step_s is not None and (
+        n_cycles_simultaneous != 1 or simulation_conditions.get("mechanical_formulation", "full") != "reduced"
+    ):
+        raise ValueError("The successive-control PW slew constraint requires reduced mechanics and one-cycle windows.")
     pulse_width_active_set_mode = simulation_conditions.get(
         "pulse_width_active_set_mode", "none"
     )
@@ -1174,11 +1363,33 @@ def prepare_nmpc(
     pulse_width_active_reference = simulation_conditions.get(
         "pulse_width_active_reference"
     )
-    wheel_cycle_boundary_slack = simulation_conditions.get(
-        "wheel_cycle_boundary_slack"
-    )
     mechanical_formulation = simulation_conditions.get(
         "mechanical_formulation", "full"
+    )
+    if pulse_width_control_mode == PW_RATE_MODE:
+        if mechanical_formulation != "reduced":
+            raise ValueError("PW rate-state control requires reduced mechanics.")
+        if pulse_width_max_step_s is not None:
+            raise ValueError(
+                "PW rate-state control and the auxiliary delta-PW lift are mutually exclusive."
+            )
+        if pulse_width_active_set_mode != "none":
+            raise ValueError("PW rate-state control requires pulse_width_active_set_mode='none'.")
+        if control_regularization_weight:
+            raise ValueError(
+                "Direct pulse-width control regularization is unavailable in rate_state mode."
+            )
+        if minimize_control:
+            raise ValueError(
+                "The direct pulse-width control objective is unavailable in rate_state mode."
+            )
+        if endurance_rollout_options is not None or muscle_horizon_options is not None:
+            raise ValueError(
+                "Endurance and muscle-horizon terminal policies are not yet wired "
+                "to PW state-rate bounds."
+            )
+    wheel_cycle_boundary_slack = simulation_conditions.get(
+        "wheel_cycle_boundary_slack"
     )
     if mechanical_formulation not in ("full", "reduced"):
         raise ValueError("mechanical_formulation must be 'full' or 'reduced'.")
@@ -1244,63 +1455,32 @@ def prepare_nmpc(
         ode_solver=ode_solver,
     )
 
-    # --- Set states --- #
-    # --- Set q (position and speed) initial guesses --- #
-    full_mechanical_init = set_q_qdot_init(
-        n_shooting=window_n_shooting,
-        pedal_config=pedal_config,
-        turn_number=turn_number,
-        ode_solver=ode_solver,
-        init_file_path=initial_guess_path,
-        window_duration_s=window_cycle_duration,
-    )
-
     # --- Set bounds and FES initial guesses --- #
     if mechanical_formulation == "reduced":
         if reduced_dynamics is None:
             raise ValueError(
                 "reduced_cycling_dynamics is required for the reduced formulation."
             )
-        theta_init, omega_init, projection_audit = (
-            reduced_dynamics.kinematics.project_generalized_trajectory(
-                np.asarray(full_mechanical_init["q"].init, dtype=float),
-                np.asarray(full_mechanical_init["qdot"].init, dtype=float),
-            )
+        # The reduced OCP has no q/qdot state.  Seed theta and omega directly
+        # from the exact reduced manifold rather than running the historical
+        # full multibody inverse-kinematics warm start.  This is essential for
+        # the bilateral bioMod, whose two hand constraints are used only while
+        # constructing the offline Fourier profile.
+        seed_times = state_initial_guess_time_grid(
+            n_shooting=window_n_shooting,
+            turn_number=turn_number,
+            ode_solver=ode_solver,
+            window_duration_s=window_cycle_duration,
         )
-        state_nodes_per_cycle = cycle_len * (
-            ode_solver.polynomial_degree + 1
-            if ode_solver.is_direct_collocation
-            else 1
-        )
-        theta_init, omega_init, recenter_audit = recenter_reduced_theta_seed(
+        progress_rate = 2.0 * np.pi * turn_number / window_cycle_duration
+        theta_init = (
+            reduced_dynamics.kinematics.theta_origin
+            + reduced_dynamics.kinematics.direction * progress_rate * seed_times
+        )[np.newaxis, :]
+        omega_init = np.full_like(
             theta_init,
-            omega_init,
-            nodes_per_cycle=state_nodes_per_cycle,
-            cycles=n_cycles_simultaneous,
-            node_time_grid_s=state_initial_guess_time_grid(
-                n_shooting=window_n_shooting,
-                turn_number=turn_number,
-                ode_solver=ode_solver,
-                window_duration_s=window_cycle_duration,
-            ),
+            reduced_dynamics.kinematics.direction * progress_rate,
         )
-        if recenter_audit["maximum_theta_change_rad"] > 1e-4:
-            warnings.warn(
-                "The reduced mechanical warm-start contained cycle-boundary "
-                f"drift of {recenter_audit['maximum_boundary_error_before_rad']:.3e} rad. "
-                "Theta was recentered to the absolute ±2*pi cycle targets "
-                f"(maximum correction {recenter_audit['maximum_theta_change_rad']:.3e} rad).",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-        if projection_audit["maximum_configuration_projection_error_rad"] > 1e-4:
-            warnings.warn(
-                "Full warm-start mechanics were projected onto the reduced "
-                "contact manifold with a maximum configuration correction of "
-                f"{projection_audit['maximum_configuration_projection_error_rad']:.3e} rad.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
         x_init = InitialGuessList()
         mechanical_interpolation = (
             InterpolationType.ALL_POINTS
@@ -1313,9 +1493,27 @@ def prepare_nmpc(
         x_init.add(
             "omega", omega_init, interpolation=mechanical_interpolation
         )
+        bilateral_reduced = bool(
+            simulation_conditions.get("bilateral_reduced", False)
+        )
+        if bilateral_reduced and mechanical_formulation != "reduced":
+            raise ValueError("bilateral_reduced requires reduced mechanics.")
+        if bilateral_reduced:
+            expected_prefixes = {"right_", "left_"}
+            prefixes = {
+                name.split("_", 1)[0] + "_"
+                for name in reduced_dynamics.muscle_names
+                if "_" in name
+            }
+            if not expected_prefixes.issubset(prefixes):
+                raise ValueError(
+                    "bilateral_reduced requires the bilateral bioMod profile; "
+                    "the former phase-shifted unilateral surrogate is no longer used."
+                )
+        reduced_muscles = model.muscles_dynamics_model
         model = ReducedFesCyclingModel(
             reduced_dynamics=reduced_dynamics,
-            muscles_model=model.muscles_dynamics_model,
+            muscles_model=reduced_muscles,
             external_crank_torque=(
                 0.0
                 if isokinetic_config is not None
@@ -1330,6 +1528,11 @@ def prepare_nmpc(
             activate_force_length_relationship=model.activate_force_length_relationship,
             activate_force_velocity_relationship=model.activate_force_velocity_relationship,
             activate_passive_force_relationship=model.activate_passive_force_relationship,
+            pulse_width_max_step_s=pulse_width_max_step_s,
+            pulse_width_slew_formulation=pulse_width_slew_formulation,
+            pulse_width_interval_s=cycle_duration / cycle_len,
+            pulse_width_control_mode=pulse_width_control_mode,
+            pulse_width_max_rate_s_per_s=pulse_width_max_rate_s_per_s,
         )
         x_bounds, x_init = set_reduced_x_bounds(
             model=model,
@@ -1343,6 +1546,14 @@ def prepare_nmpc(
             isokinetic_config=isokinetic_config,
         )
     else:
+        full_mechanical_init = set_q_qdot_init(
+            n_shooting=window_n_shooting,
+            pedal_config=pedal_config,
+            turn_number=turn_number,
+            ode_solver=ode_solver,
+            init_file_path=initial_guess_path,
+            window_duration_s=window_cycle_duration,
+        )
         x_init = full_mechanical_init
         coordinate_qdot_bounds = None
         if reduced_dynamics is not None:
@@ -1381,11 +1592,52 @@ def prepare_nmpc(
         active_reference=pulse_width_active_reference,
     )
 
+    if pulse_width_control_mode == PW_RATE_MODE:
+        u_bounds, u_init, u_scaling = promote_pulse_width_to_state(
+            model,
+            x_bounds,
+            x_init,
+            x_scaling,
+            u_bounds,
+            u_init,
+            u_scaling,
+            n_shooting=window_n_shooting,
+            scale=pulse_width_scaling,
+            ode_solver=ode_solver,
+        )
+
+    if (
+        pulse_width_max_step_s is not None
+        and pulse_width_slew_formulation == "lifting"
+    ):
+        add_auxiliary_bounds_and_guesses(
+            model, x_bounds, x_init, x_scaling, u_bounds, u_init, u_scaling,
+            n_shooting=window_n_shooting, scale=pulse_width_scaling, ode_solver=ode_solver,
+        )
+
     # --- Set constraints --- #
+    if (
+        endurance_rollout_options is not None
+        and endurance_rollout_options.weight > 0.0
+        and muscle_horizon_options is not None
+        and muscle_horizon_options.weight > 0.0
+    ):
+        raise ValueError("Select either the frozen endurance rollout or the muscle horizon, not both.")
     if endurance_rollout_options is not None and endurance_rollout_options.weight > 0.0:
         endurance_rollout_options.profile.validate_model(model, control_bounds=u_bounds)
         rollout_binding = EnduranceRolloutBinding(endurance_rollout_options, use_sx=use_sx)
         rollout_binding.validate_context(
+            cycle_period_s=cycle_duration,
+            signed_crank_torque_nm=constant_crank_torque,
+            mechanical_formulation=mechanical_formulation,
+            formulation=formulation,
+        )
+    if muscle_horizon_options is not None and muscle_horizon_options.weight > 0.0:
+        muscle_horizon_options.profile.validate_model(model, control_bounds=u_bounds)
+        muscle_horizon_binding = MuscleHorizonBinding(
+            muscle_horizon_options, use_sx=use_sx
+        )
+        muscle_horizon_binding.validate_context(
             cycle_period_s=cycle_duration,
             signed_crank_torque_nm=constant_crank_torque,
             mechanical_formulation=mechanical_formulation,
@@ -1422,6 +1674,9 @@ def prepare_nmpc(
             enforce_reduced_internal_crank_velocity_guard
         ),
         shooting_interval_duration=cycle_duration / cycle_len,
+        reduced_internal_crank_velocity_rk4_fraction=(
+            reduced_internal_crank_velocity_rk4_fraction
+        ),
         physical_crank_terminal_angle=cycling_info.get(
             "physical_crank_terminal_angle"
         ),
@@ -1438,6 +1693,41 @@ def prepare_nmpc(
             min_bound=rollout_binding.domain_lower_bounds,
             max_bound=np.inf,
         )
+    if muscle_horizon_binding is not None:
+        total_minimum, total_maximum = muscle_horizon_binding.total_moment_bounds
+        constraints.add(
+            CustomObjective.terminal_muscle_horizon_total_moment,
+            node=Node.END,
+            binding=muscle_horizon_binding,
+            min_bound=total_minimum,
+            max_bound=total_maximum,
+        )
+        constraints.add(
+            CustomObjective.terminal_muscle_horizon_domain,
+            node=Node.END,
+            binding=muscle_horizon_binding,
+            min_bound=muscle_horizon_binding.domain_lower_bounds,
+            max_bound=np.inf,
+        )
+    if (
+        pulse_width_max_step_s is not None
+        and pulse_width_slew_formulation == "lifting"
+    ):
+        add_slew_constraints(constraints, model.muscles_dynamics_model,
+                             max_step_s=pulse_width_max_step_s, scale=pulse_width_scaling)
+    elif pulse_width_max_step_s is not None:
+        add_direct_slew_constraints(
+            constraints,
+            model.muscles_dynamics_model,
+            max_step_s=pulse_width_max_step_s,
+            scale=pulse_width_scaling,
+            n_shooting=window_n_shooting,
+        )
+    if pulse_width_odd_interpolation:
+        odd_interpolation_constraints(
+            model.muscles_dynamics_model, scale=pulse_width_scaling, n_shooting=window_n_shooting,
+            constraints=constraints,
+        )
     objective_functions = set_objective_functions(
         model,
         minimize_force,
@@ -1453,6 +1743,7 @@ def prepare_nmpc(
         terminal_reserve_weight=terminal_reserve_weight,
         terminal_reserve_temperature=terminal_reserve_temperature,
         endurance_rollout_binding=rollout_binding,
+        muscle_horizon_binding=muscle_horizon_binding,
         control_regularization_weight=control_regularization_weight,
         control_regularization_target=control_regularization_target,
         wheel_qdot_regularization_weight=wheel_qdot_regularization_weight,
@@ -1472,6 +1763,12 @@ def prepare_nmpc(
             "omega" if mechanical_formulation == "reduced" else "qdot"
         ),
         velocity_state_index=0 if mechanical_formulation == "reduced" else 2,
+    )
+
+    add_slew_regularization(
+        objective_functions, model, weight=pulse_width_slew_weight,
+        reference_us=pulse_width_slew_reference_us,
+        n_shooting=window_n_shooting, interval_s=cycle_duration / cycle_len,
     )
 
     # --- Update model for resistive torque --- #
@@ -1509,10 +1806,15 @@ def prepare_nmpc(
         nmpc_options["ordering_strategy"] = mhe_info["ordering_strategy"]
     if rollout_binding is not None:
         nmpc_options.update(rollout_binding.parameter_options(use_sx=use_sx))
+    if muscle_horizon_binding is not None:
+        nmpc_options.update(muscle_horizon_binding.parameter_options(use_sx=use_sx))
     nmpc = MyCyclicNMPC(**nmpc_options)
     if rollout_binding is not None:
         rollout_binding.attach(nmpc)
         nmpc.endurance_rollout_binding = rollout_binding
+    if muscle_horizon_binding is not None:
+        muscle_horizon_binding.attach(nmpc)
+        nmpc.muscle_horizon_binding = muscle_horizon_binding
     nmpc.isokinetic_config = isokinetic_config
     if isokinetic_config is not None:
         nmpc._isokinetic_energy_seed_fraction = (
@@ -1878,9 +2180,16 @@ def set_reduced_x_bounds(
         with open(init_file_path, "rb") as file:
             data = pickle.load(file)
     for key in default_fes_init.keys():
+        source_key = key
+        if data is not None and source_key not in data:
+            # A unilateral historical warm start is a valid *numerical* seed
+            # for either side of the symmetric V1 model, but never evidence
+            # of an exact bilateral solve.  Exact seed provenance is enforced
+            # at the benchmark layer.
+            source_key = key.replace("_right_", "_", 1).replace("_left_", "_", 1)
         initial_guess = (
-            np.asarray(data[key], dtype=float)
-            if data is not None
+            np.asarray(data[source_key], dtype=float)
+            if data is not None and source_key in data
             else np.full(
                 (1, state_intervals + 1),
                 float(default_fes_init[key].init[0][0]),
@@ -2215,7 +2524,7 @@ def set_u_bounds_and_init(
     u_bounds, u_init = OcpFesMsk.set_u_bounds_fes(bio_model)
     u_init = InitialGuessList()  # Controls initial guess
     if active_set_mode != "none":
-        if not init_file_path:
+        if active_set_mode == "historical" and not init_file_path:
             raise ValueError(
                 "The pulse-width active set requires an initial-guess file."
             )
@@ -2231,18 +2540,41 @@ def set_u_bounds_and_init(
 
     for model in models:
         key = "last_pulse_width_" + str(model.muscle_name)
+        reference = None
+        if active_set_mode == "warmup":
+            if key not in active_reference:
+                raise KeyError(
+                    f"Pulse-width seed '{key}' is missing from warmup active-set reference."
+                )
+            reference = validate_and_clip_pulse_width_seed(
+                active_reference[key],
+                key=key,
+                pd0=float(model.pd0),
+                maximum=0.0006,
+                source="warmup active-set reference",
+            ).reshape((1, -1))
+            if reference.shape[1] != n_shooting:
+                raise ValueError(
+                    f"{key} has {reference.shape[1]} warmup reference controls; "
+                    f"expected {n_shooting}."
+                )
         if init_file_path:
-            if key not in data:
+            source_key = key
+            if source_key not in data:
+                source_key = key.replace("_right_", "_", 1).replace("_left_", "_", 1)
+            if source_key not in data:
                 raise KeyError(
                     f"Pulse-width seed '{key}' is missing from {init_file_path}."
                 )
             initial_guess = validate_and_clip_pulse_width_seed(
-                data[key],
+                data[source_key],
                 key=key,
                 pd0=float(model.pd0),
                 maximum=0.0006,
                 source=init_file_path,
             ).reshape((1, -1))
+        elif active_set_mode == "warmup":
+            initial_guess = reference.copy()
         else:
             initial_guess = np.array([[model.pd0] * n_shooting])
         if initial_guess.shape[1] != n_shooting:
@@ -2251,17 +2583,8 @@ def set_u_bounds_and_init(
                 f"expected {n_shooting}."
             )
         if active_set_mode != "none":
-            reference = (
-                validate_and_clip_pulse_width_seed(
-                    active_reference[key],
-                    key=key,
-                    pd0=float(model.pd0),
-                    maximum=0.0006,
-                    source="warmup active-set reference",
-                ).reshape((1, -1))
-                if active_set_mode == "warmup"
-                else initial_guess
-            )
+            if active_set_mode == "historical":
+                reference = initial_guess
             active = periodic_pulse_width_activity_mask(
                 reference,
                 pd0=float(model.pd0),
@@ -2398,6 +2721,64 @@ def reduced_internal_crank_velocity_constraint(
     return omega + 0.5 * float(shooting_interval_duration) * omega_dot
 
 
+def reduced_internal_crank_velocity_rk4_constraint(
+    controller,
+    shooting_interval_duration: float,
+    fraction: float,
+    substeps: int = 5,
+):
+    """Predict reduced cadence with a full-state RK4 map at ``fraction`` of an interval.
+
+    Unlike :func:`reduced_internal_crank_velocity_constraint`, this prototype
+    evolves every Ding state, so force is not frozen while the crank moves.
+    The periodic-node numerical time series and zero-order-held controls are
+    taken from the same shooting node as the OCP dynamics.  It is deliberately
+    opt-in until map-vs-DOP853 and ACADOS code-generation costs are certified.
+    """
+
+    if (
+        not np.isfinite(shooting_interval_duration)
+        or shooting_interval_duration <= 0.0
+    ):
+        raise ValueError("shooting_interval_duration must be finite and positive.")
+    if not np.isfinite(fraction) or not 0.0 < float(fraction) <= 1.0:
+        raise ValueError("fraction must be finite and lie in (0, 1].")
+    if isinstance(substeps, bool) or int(substeps) != substeps or substeps < 1:
+        raise ValueError("substeps must be an integer >= 1.")
+    reduced_model = getattr(controller.model, "bio_model", controller.model)
+    if not isinstance(reduced_model, ReducedFesCyclingModel):
+        raise TypeError("The internal RK4 cadence guard requires ReducedFesCyclingModel.")
+
+    h = float(shooting_interval_duration) * float(fraction) / int(substeps)
+    predicted = controller.states.cx
+    nlp = controller.get_nlp
+
+    def rhs(time, states):
+        return reduced_model.dynamics(
+            time,
+            states,
+            controller.controls.cx,
+            controller.parameters.cx,
+            controller.algebraic_states.cx,
+            controller.numerical_timeseries.cx,
+            nlp,
+        ).dxdt
+
+    start_time = controller.time.cx
+    for step in range(int(substeps)):
+        time = start_time + step * h
+        k1 = rhs(time, predicted)
+        k2 = rhs(time + 0.5 * h, predicted + 0.5 * h * k1)
+        k3 = rhs(time + 0.5 * h, predicted + 0.5 * h * k2)
+        k4 = rhs(time + h, predicted + h * k3)
+        predicted = predicted + h / 6.0 * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+    # Optional PW-slew auxiliary states follow omega; its physical index is
+    # invariant for all reduced Ding models (five states per muscle, theta,
+    # omega, then auxiliaries).
+    omega_index = 5 * len(reduced_model.muscles_dynamics_model) + 1
+    return predicted[omega_index]
+
+
 def reduced_isokinetic_load_torque_constraint(controller):
     """Return the analytically eliminated isokinetic load torque."""
 
@@ -2499,6 +2880,7 @@ def set_constraints(
     physical_crank_velocity_slow_margin: float | None = None,
     enforce_reduced_internal_crank_velocity_guard: bool = False,
     shooting_interval_duration: float | None = None,
+    reduced_internal_crank_velocity_rk4_fraction: float | None = None,
     physical_crank_terminal_angle: float | None = None,
     enforce_isokinetic_equilibrium: bool = False,
     isokinetic_config: IsokineticCyclingConfig | None = None,
@@ -2714,6 +3096,21 @@ def set_constraints(
                 + physical_crank_velocity_slow_margin
             ),
         )
+        if reduced_internal_crank_velocity_rk4_fraction is not None:
+            constraints.add(
+                reduced_internal_crank_velocity_rk4_constraint,
+                node=Node.ALL_SHOOTING,
+                shooting_interval_duration=float(shooting_interval_duration),
+                fraction=float(reduced_internal_crank_velocity_rk4_fraction),
+                min_bound=(
+                    physical_crank_velocity_target
+                    - physical_crank_velocity_fast_margin
+                ),
+                max_bound=(
+                    physical_crank_velocity_target
+                    + physical_crank_velocity_slow_margin
+                ),
+            )
 
     if wheel_cycle_boundary_slack is None or n_cycles_simultaneous <= 1:
         return constraints
@@ -2767,6 +3164,7 @@ def set_objective_functions(
     velocity_state_key: str = "qdot",
     velocity_state_index: int = 2,
     endurance_rollout_binding=None,
+    muscle_horizon_binding=None,
 ):
     try:
         terminal_reserve_weight = float(terminal_reserve_weight)
@@ -2785,6 +3183,15 @@ def set_objective_functions(
         raise ValueError("terminal_reserve_temperature must be finite and positive.")
 
     objective_functions = ObjectiveList()
+    if muscle_horizon_binding is not None and muscle_horizon_binding.options.weight > 0.0:
+        objective_functions.add(
+            CustomObjective.minimize_terminal_muscle_horizon,
+            custom_type=ObjectiveFcn.Mayer,
+            node=Node.END,
+            weight=10000.0 * muscle_horizon_binding.options.weight,
+            quadratic=False,
+            binding=muscle_horizon_binding,
+        )
     if endurance_rollout_binding is not None and endurance_rollout_binding.options.weight > 0.0:
         objective_functions.add(
             CustomObjective.minimize_terminal_endurance_rollout,
@@ -3024,11 +3431,25 @@ def set_fes_model(
 
     for model in muscles_model:
         muscle_name = model.muscle_name
-        model.a_scale = parameter_dict[muscle_name]["a_scale"]
-        model.a_rest = parameter_dict[muscle_name]["a_scale"]
-        model.fmax = parameter_dict[muscle_name]["Fmax"]
-        model.alpha_a = parameter_dict[muscle_name]["alpha_a"]
-        model.tau_fat = parameter_dict[muscle_name]["tau_fat"]
+        # Bilateral bioMod muscles retain their anatomical name after a
+        # right_/left_ prefix, so both sides share the historical Ding scaling.
+        # Only bilateral models prepend an anatomical side.  Splitting every
+        # underscore would turn the ordinary ``Delt_ant``/``Delt_post`` names
+        # into ``ant``/``post``, which is not a key in ``parameter_dict``.
+        parameter_name = muscle_name
+        for side_prefix in ("right_", "left_"):
+            if parameter_name.startswith(side_prefix):
+                parameter_name = parameter_name[len(side_prefix) :]
+                break
+        if parameter_name not in parameter_dict:
+            raise ValueError(
+                f"No Ding parameter scaling is defined for muscle '{muscle_name}'."
+            )
+        model.a_scale = parameter_dict[parameter_name]["a_scale"]
+        model.a_rest = parameter_dict[parameter_name]["a_scale"]
+        model.fmax = parameter_dict[parameter_name]["Fmax"]
+        model.alpha_a = parameter_dict[parameter_name]["alpha_a"]
+        model.tau_fat = parameter_dict[parameter_name]["tau_fat"]
 
     # Create MSK FES-driven model
     fes_model = FesMskModel(

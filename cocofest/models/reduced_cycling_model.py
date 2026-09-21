@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from copy import deepcopy
+
+import numpy as np
 
 from casadi import MX, SX, vertcat
 from bioptim import (
@@ -15,16 +18,107 @@ from bioptim import (
     StateDynamics,
 )
 
-from cocofest.dynamics.reduced_cycling import ReducedCyclingDynamics
+from cocofest.dynamics.reduced_cycling import PeriodicFourierSeries, ReducedCyclingDynamics
 from cocofest.models.ding2007.ding2007 import DingModelPulseWidthFrequency
 from cocofest.models.fes_model import FesModel
 from cocofest.models.state_configure import StateConfigure
+from cocofest.optimization.pulse_width_slew import (
+    LIFTING_FORMULATION, auxiliary_configuration, auxiliary_rhs,
+    validate_max_step, validate_slew_formulation,
+)
+from cocofest.optimization.pulse_width_rate import (
+    CONTROL_MODE as PW_RATE_MODE, validate_rate_mode, rate_configuration,
+    rate_rhs, rate_keys, sampled_pulse_width,
+)
+
+
+def _bilateral_muscle_names(names: Sequence[str]) -> tuple[str, ...]:
+    names = tuple(names)
+    if len(names) != 4 or len(set(names)) != 4 or any(
+        not isinstance(name, str) or not name or name.startswith(("right_", "left_"))
+        for name in names
+    ):
+        raise ValueError("Bilateral duplication requires four unique, unsided muscle names.")
+    return tuple(f"{side}_{name}" for side in ("right", "left") for name in names)
+
+
+def duplicate_bilateral_muscles(muscles_model: Sequence[FesModel]) -> list[FesModel]:
+    """Clone a configured arm into independent right/left Ding models.
+
+    Copying the objects retains their exact class, effective parameters and
+    stimulation history, including periodic Ding variants. No state, control or
+    mutable stimulation history is shared between the two arms.
+    """
+    muscles = list(muscles_model)
+    names = _bilateral_muscle_names([muscle.muscle_name for muscle in muscles])
+    result = []
+    for index, name in enumerate(names):
+        muscle = deepcopy(muscles[index % len(muscles)])
+        muscle._muscle_name = name
+        result.append(muscle)
+    return result
+
+
+def make_bilateral_reduced_dynamics(
+    reduced_dynamics: ReducedCyclingDynamics, *, phase_offset_rad: float = math.pi,
+) -> ReducedCyclingDynamics:
+    """Add a phase-shifted symmetric arm to a shared reduced mechanical profile.
+
+    Right-arm effectiveness and Hill geometry use ``theta``; the left uses
+    ``theta + phase_offset_rad`` with the same angular velocity and torque sign.
+    The default puts the two handles half a revolution apart. Fourier shifting
+    is exact and preserves smooth numeric and symbolic dynamics.
+
+    This first approximation retains the original inertia, gravity, quadratic
+    velocity term, external torque and reference-arm kinematics ONCE. It models
+    two active arms acting on shared reference mechanics, not the full mass and
+    gravity of a bilateral multibody assembly. Replace these mechanics with a
+    calibrated bilateral profile for biomechanical validation. In particular,
+    ``kinematics`` remains the reference arm used by existing trajectory plots.
+    """
+    names = _bilateral_muscle_names(reduced_dynamics.muscle_names)
+    if not math.isfinite(phase_offset_rad):
+        raise ValueError("The bilateral phase offset must be finite.")
+
+    def expanded_series(series, rows, shifted_rows):
+        offset = series.offset[rows].copy()
+        cosine = series.cosine[rows].copy()
+        sine = series.sine[rows].copy()
+        phase = reduced_dynamics.kinematics.direction * float(phase_offset_rad)
+        angles = np.arange(1, series.order + 1) * phase
+        for row in shifted_rows:
+            original_cosine = cosine[row].copy()
+            original_sine = sine[row].copy()
+            cosine[row] = original_cosine * np.cos(angles) + original_sine * np.sin(angles)
+            sine[row] = original_sine * np.cos(angles) - original_cosine * np.sin(angles)
+        return PeriodicFourierSeries(offset, cosine, sine)
+
+    # Shared M/g/c, four right muscles, four left muscles, one external load.
+    coefficients = expanded_series(
+        reduced_dynamics.coefficients, [0, 1, 2, 3, 4, 5, 6, 3, 4, 5, 6, 7], range(7, 11),
+    )
+    geometry = None
+    if reduced_dynamics.muscle_geometry is not None:
+        # All normalized lengths followed by all velocities per crank speed.
+        geometry = expanded_series(
+            reduced_dynamics.muscle_geometry,
+            [0, 1, 2, 3, 0, 1, 2, 3, 4, 5, 6, 7, 4, 5, 6, 7],
+            [4, 5, 6, 7, 12, 13, 14, 15],
+        )
+    return ReducedCyclingDynamics(
+        kinematics=reduced_dynamics.kinematics,
+        coefficients=coefficients,
+        muscle_names=names,
+        crank_torque_dof_index=reduced_dynamics.crank_torque_dof_index,
+        muscle_geometry=geometry,
+        source_model_sha256=reduced_dynamics.source_model_sha256,
+    )
 
 
 class ReducedFesCyclingModel(StateDynamics):
     """Ding states plus the physical crank mechanics.
 
-    The four five-state Ding models and their pulse-width controls are retained
+    The five-state Ding models and their pulse-width controls are retained
     exactly.  The three-coordinate constrained multibody subsystem is replaced
     by the tangent-projected two-state system ``theta_dot = omega`` and
     ``omega_dot = f(theta, omega, muscle forces)``.
@@ -35,6 +129,10 @@ class ReducedFesCyclingModel(StateDynamics):
     at every integrator stage. ``E_prod`` integrates the net work produced
     against that load. The default remains the original 22-state
     forward-dynamics model.
+
+    Optional PW slew carriers and bounded delta_pw controls only constrain
+    successive physical PW controls. Ding dynamics keep using the physical
+    zero-order-held controls, never the carrier or its increment.
     """
 
     def __init__(
@@ -49,6 +147,11 @@ class ReducedFesCyclingModel(StateDynamics):
         activate_force_velocity_relationship: bool = True,
         activate_passive_force_relationship: bool = True,
         name: str = "reduced_fes_cycling",
+        pulse_width_max_step_s: float | None = None,
+        pulse_width_slew_formulation: str = LIFTING_FORMULATION,
+        pulse_width_interval_s: float | None = None,
+        pulse_width_control_mode: str = "direct",
+        pulse_width_max_rate_s_per_s: float | None = None,
     ):
         super().__init__()
         self.reduced_dynamics = reduced_dynamics
@@ -66,6 +169,29 @@ class ReducedFesCyclingModel(StateDynamics):
             activate_passive_force_relationship
         )
         self._name = str(name)
+        self.pulse_width_max_step_s = validate_max_step(pulse_width_max_step_s)
+        self.pulse_width_slew_formulation = validate_slew_formulation(
+            pulse_width_slew_formulation
+        )
+        self.pulse_width_interval_s = pulse_width_interval_s
+        self.pulse_width_control_mode = pulse_width_control_mode
+        self.pulse_width_max_rate_s_per_s = validate_rate_mode(
+            pulse_width_control_mode, pulse_width_max_rate_s_per_s
+        )
+        if pulse_width_control_mode == PW_RATE_MODE:
+            from cocofest.models.ding2007.ding2007_with_fatigue_periodic_node import (
+                DingModelPulseWidthFrequencyWithFatiguePeriodicNode,
+            )
+            if self.pulse_width_max_step_s is not None:
+                raise ValueError("PW rate-state mode and auxiliary slew lift are mutually exclusive.")
+            if not all(isinstance(m, DingModelPulseWidthFrequencyWithFatiguePeriodicNode)
+                       for m in self.muscles_dynamics_model):
+                raise ValueError("PW rate-state mode requires periodic-node Ding models with interval-local timing.")
+        if (self.pulse_width_max_step_s is not None or pulse_width_control_mode == PW_RATE_MODE) and (
+            pulse_width_interval_s is None or not math.isfinite(pulse_width_interval_s)
+            or pulse_width_interval_s <= 0
+        ):
+            raise ValueError("The PW slew lift requires a finite positive stimulation interval.")
 
         if not math.isfinite(self.isokinetic_omega):
             raise ValueError("isokinetic_omega must be finite.")
@@ -89,11 +215,13 @@ class ReducedFesCyclingModel(StateDynamics):
                 f"ordering; received {model_names} and "
                 f"{self.reduced_dynamics.muscle_names}."
             )
-        if len(model_names) != 4:
+        if len(model_names) not in (4, 8):
             raise ValueError(
-                "The cycling reduction currently expects four muscles "
-                f"(20 Ding states), received {len(model_names)}."
+                "The cycling reduction expects four unilateral or eight bilateral "
+                f"muscles, received {len(model_names)}."
             )
+        if len(set(model_names)) != len(model_names):
+            raise ValueError("Reduced cycling muscle names must be unique.")
         invalid_state_models = [
             f"{model.muscle_name}:{model.nb_state}"
             for model in self.muscles_dynamics_model
@@ -126,7 +254,18 @@ class ReducedFesCyclingModel(StateDynamics):
 
     @property
     def nb_state(self) -> int:
-        return 23 if self.isokinetic else 22
+        return 5 * len(self.muscles_dynamics_model) + 2 + int(self.isokinetic) + (
+            len(self.muscles_dynamics_model)
+            if self.uses_pulse_width_slew_lifting or self.pulse_width_control_mode == PW_RATE_MODE else 0
+        )
+
+    @property
+    def uses_pulse_width_slew_lifting(self) -> bool:
+        """Whether this model carries the historical auxiliary ΔPW variables."""
+        return (
+            self.pulse_width_max_step_s is not None
+            and self.pulse_width_slew_formulation == LIFTING_FORMULATION
+        )
 
     @property
     def contact_types(self) -> tuple:
@@ -168,10 +307,16 @@ class ReducedFesCyclingModel(StateDynamics):
                     "E_prod", ["net_external_work"], ocp, nlp, as_states=True
                 )
             )
+        if self.uses_pulse_width_slew_lifting:
+            functions.extend(auxiliary_configuration(self.muscles_dynamics_model, states=True))
+        if self.pulse_width_control_mode == PW_RATE_MODE:
+            functions.extend(rate_configuration(self.muscles_dynamics_model, states=True))
         return functions
 
     @property
     def control_configuration_functions(self):
+        if self.pulse_width_control_mode == PW_RATE_MODE:
+            return rate_configuration(self.muscles_dynamics_model, states=False)
         functions = []
         for muscle_model in self.muscles_dynamics_model:
             if isinstance(muscle_model, DingModelPulseWidthFrequency):
@@ -182,6 +327,8 @@ class ReducedFesCyclingModel(StateDynamics):
                         ocp, nlp, muscle_model.muscle_name
                     )
                 )
+        if self.uses_pulse_width_slew_lifting:
+            functions.extend(auxiliary_configuration(self.muscles_dynamics_model, states=False))
         return functions
 
     @property
@@ -209,6 +356,11 @@ class ReducedFesCyclingModel(StateDynamics):
                 "activate_force_velocity_relationship": self.activate_force_velocity_relationship,
                 "activate_passive_force_relationship": self.activate_passive_force_relationship,
                 "name": self._name,
+                "pulse_width_max_step_s": self.pulse_width_max_step_s,
+                "pulse_width_slew_formulation": self.pulse_width_slew_formulation,
+                "pulse_width_interval_s": self.pulse_width_interval_s,
+                "pulse_width_control_mode": self.pulse_width_control_mode,
+                "pulse_width_max_rate_s_per_s": self.pulse_width_max_rate_s_per_s,
             },
         )
 
@@ -304,7 +456,15 @@ class ReducedFesCyclingModel(StateDynamics):
                 ]
             )
             control_key = f"last_pulse_width_{muscle_model.muscle_name}"
-            pulse_width = DynamicsFunctions.get(nlp.controls[control_key], controls)
+            if self.pulse_width_control_mode == PW_RATE_MODE:
+                _, rate_key = rate_keys(muscle_model.muscle_name)
+                pulse_width = sampled_pulse_width(
+                    DynamicsFunctions.get(nlp.states[control_key], states),
+                    DynamicsFunctions.get(nlp.controls[rate_key], controls),
+                    time, numerical_data_timeseries[1],
+                )
+            else:
+                pulse_width = DynamicsFunctions.get(nlp.controls[control_key], controls)
             muscle_derivatives.append(
                 muscle_model.dynamics(
                     time,
@@ -365,6 +525,10 @@ class ReducedFesCyclingModel(StateDynamics):
                 self.external_crank_torque,
             )
             dxdt = vertcat(*muscle_derivatives, omega, omega_dot)
+        if self.uses_pulse_width_slew_lifting:
+            dxdt = vertcat(dxdt, auxiliary_rhs(self, states, controls, nlp))
+        if self.pulse_width_control_mode == PW_RATE_MODE:
+            dxdt = vertcat(dxdt, rate_rhs(self, controls, nlp))
         defects = None
         if isinstance(nlp.dynamics_type.ode_solver, OdeSolver.COLLOCATION):
             defects = (

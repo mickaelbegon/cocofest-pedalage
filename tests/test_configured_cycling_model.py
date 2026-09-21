@@ -7,7 +7,8 @@ import pytest
 
 from cocofest.optimization.configured_cycling_model import (
     FIELD_ATTRIBUTES, FINGERPRINT_KEY, annotate_generated_seed, apply_model_config,
-    configured_model_factories, require_seed_fingerprint, resolve_model_config,
+    WARMUP_CACHE_FINGERPRINT_ENV, configured_model_factories,
+    require_seed_fingerprint, resolve_model_config,
 )
 
 
@@ -46,8 +47,11 @@ def test_all_factory_aliases_apply_real_ding_parameters_and_restore_on_failure()
     factory = lambda *a, **kw: model()
     modules = (SimpleNamespace(set_fes_model=factory), SimpleNamespace(set_fes_model=factory))
     records = []
+    import os
+    prior = os.environ.get(WARMUP_CACHE_FINGERPRINT_ENV)
     with pytest.raises(RuntimeError, match="stop"):
         with configured_model_factories(config, records, modules=modules):
+            assert os.environ[WARMUP_CACHE_FINGERPRINT_ENV] == config[FINGERPRINT_KEY]
             for module in modules:
                 muscle = module.set_fes_model().muscles_dynamics_model[0]
                 assert muscle.alpha_a == -.12
@@ -57,6 +61,7 @@ def test_all_factory_aliases_apply_real_ding_parameters_and_restore_on_failure()
     assert all(module.set_fes_model is factory for module in modules)
     assert len(records) == 2
     assert all(record[FINGERPRINT_KEY] == config[FINGERPRINT_KEY] for record in records)
+    assert os.environ.get(WARMUP_CACHE_FINGERPRINT_ENV) == prior
 
 
 def test_model_muscle_names_must_match_before_mutation():
@@ -112,6 +117,7 @@ def test_seed_requires_exact_fingerprint_and_generated_annotation_preserves_data
 def test_common_runner_applies_same_model_to_rho_and_fho(tmp_path, monkeypatch, condition, single_shot):
     from scripts.run_configured_cycling_benchmark import main
     from examples.fes_multibody.cycling import cycling_fes_solver_comparison as benchmark
+    from examples.fes_multibody.cycling import cycling_pulse_width_mhe_acados_periodic as periodic
     from examples.fes_multibody.cycling import cycling_pulse_width_mhe as mhe
     from examples.fes_multibody.cycling import cycling_pulse_width_mhe_acados_periodic as periodic
     model_path = tmp_path / "model.json"
@@ -158,6 +164,77 @@ def test_common_runner_rejects_unfingerprinted_seed_before_solver(tmp_path, monk
               "--mechanical-formulation", "reduced", "--signed-crank-torque", ".1",
               "--output-json", str(tmp_path / "result.json"), "--common-initial-solution", str(seed_path)])
     assert not called
+
+
+def test_common_runner_allows_only_certified_configured_acados_rti(tmp_path, monkeypatch):
+    """RTI keeps the configured Ding variant and an IPOPT cycle-1 seed."""
+
+    from scripts.run_configured_cycling_benchmark import main
+    from examples.fes_multibody.cycling import cycling_fes_solver_comparison as benchmark
+    from examples.fes_multibody.cycling import cycling_pulse_width_mhe_acados_periodic as periodic
+
+    model_path = tmp_path / "model.json"
+    model_path.write_text(json.dumps(declared(-.12)))
+    config = resolve_model_config(declared(-.12))
+    seed_path = tmp_path / "ipopt-cycle1.npz"
+    np.savez(
+        seed_path,
+        states__A_Triceps=np.array([[1.0]]),
+        metadata__json=np.asarray(json.dumps({"producer_solver": "ipopt", "cycles_per_window": 1})),
+    )
+    annotate_generated_seed(seed_path, config, condition="rho")
+    result_path = tmp_path / "result.json"
+    captured = {}
+
+    def fake_benchmark(**kwargs):
+        captured.update(kwargs)
+        assert periodic.set_fes_model().muscles_dynamics_model[0].alpha_a == -.12
+        result_path.write_text("{}")
+
+    monkeypatch.setattr(benchmark, "main", fake_benchmark)
+    monkeypatch.setattr(periodic, "set_fes_model", lambda *args, **kwargs: model())
+    main([
+        "--model-config", str(model_path), "--condition", "rho", "--",
+        "--solvers", "acados", "--experimental-reduced-acados",
+        "--acados-nlp-solver-type", "SQP_RTI",
+        "--mechanical-formulation", "reduced", "--formulation", "dynamic",
+        "--signed-crank-torque", ".1", "--common-initial-solution", str(seed_path),
+        "--output-json", str(result_path),
+    ])
+
+    assert captured["solvers"] == ("acados",)
+    audit = json.loads(result_path.with_suffix(".configuration.json").read_text())
+    assert audit["online_rti"] is True
+    assert audit["acados_rti_seed_provenance"]["producer_solver"] == "ipopt"
+
+
+@pytest.mark.parametrize("solver", ["madnlp", "fatrop"])
+def test_common_runner_accepts_configured_optional_nlp_backends(tmp_path, monkeypatch, solver):
+    from scripts.run_configured_cycling_benchmark import main
+    from examples.fes_multibody.cycling import cycling_fes_solver_comparison as benchmark
+    from examples.fes_multibody.cycling import cycling_pulse_width_mhe as mhe
+    from examples.fes_multibody.cycling import cycling_pulse_width_mhe_acados_periodic as periodic
+
+    model_path = tmp_path / "model.json"
+    model_path.write_text(json.dumps(declared()))
+    result_path = tmp_path / "result.json"
+    captured = {}
+
+    def fake_benchmark(**kwargs):
+        captured.update(kwargs)
+        periodic.set_fes_model()
+        result_path.write_text("{}")
+
+    monkeypatch.setattr(benchmark, "main", fake_benchmark)
+    monkeypatch.setattr(mhe, "set_fes_model", lambda *args, **kwargs: model())
+    monkeypatch.setattr(periodic, "set_fes_model", lambda *args, **kwargs: model())
+    main([
+        "--model-config", str(model_path), "--condition", "rho", "--",
+        "--solvers", solver, "--mechanical-formulation", "reduced",
+        "--formulation", "dynamic", "--signed-crank-torque", ".1",
+        "--output-json", str(result_path),
+    ])
+    assert captured["solvers"] == (solver,)
 
 
 @pytest.mark.parametrize("condition,adaptive", [("rho-physio", False), ("rho-pace", True)])

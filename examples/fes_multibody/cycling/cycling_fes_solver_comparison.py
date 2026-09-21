@@ -37,7 +37,10 @@ from bioptim import SolutionMerge
 
 from cocofest.optimization.muscle_reserve import DEFAULT_SMOOTH_MIN_TEMPERATURE
 from cocofest.optimization.endurance_rollout_ocp import add_endurance_rollout_cli
+from cocofest.optimization.muscle_horizon_ocp import add_muscle_horizon_cli
+from cocofest.optimization.pulse_width_slew import add_pulse_width_slew_cli
 from cocofest.optimization.solver_backends import (
+    add_ipopt_performance_arguments,
     effective_ipopt_options,
     file_provenance,
     ipopt_hsl_diagnostics,
@@ -112,6 +115,17 @@ BENCHMARK_CONFIGURATION_FIELDS = (
     "terminal_reserve_weight",
     "terminal_reserve_effective_weight",
     "terminal_reserve_temperature",
+    "experimental_muscle_horizon",
+    "muscle_horizon_weight",
+    "muscle_horizon_source",
+    "muscle_horizon_reduced_profile",
+    "muscle_horizon_source_cycle_index",
+    "muscle_horizon_cycle_period",
+    "muscle_horizon_cycles",
+    "muscle_horizon_integration_substeps",
+    "muscle_horizon_temperature",
+    "muscle_horizon_allocation_weight",
+    "muscle_horizon_domain_epsilon",
     "model_formulation",
     "mechanical_formulation",
     "formulation",
@@ -153,6 +167,10 @@ BENCHMARK_CONFIGURATION_FIELDS = (
     "nlp_ordering_strategy",
     "state_scaling",
     "pulse_width_scaling",
+    "pulse_width_odd_interpolation",
+    "pulse_width_max_step_us",
+    "pulse_width_slew_weight",
+    "pulse_width_slew_reference_us",
     "pulse_width_active_set",
     "pulse_width_active_threshold",
     "pulse_width_active_margin",
@@ -175,6 +193,7 @@ BENCHMARK_CONFIGURATION_FIELDS = (
     "acados_stationarity_tolerance",
     "acados_qp_solver",
     "acados_integrator_type",
+    "acados_ding_local_reduction",
     "acados_collocation_type",
     "acados_sim_stages",
     "acados_sim_steps",
@@ -201,6 +220,7 @@ BENCHMARK_CONFIGURATION_FIELDS = (
     "acados_ipopt_recovery_irk_seed_audit",
     "acados_ipopt_recovery_force_first_rho",
     "acados_forced_iteration_cap_rhos",
+    "acados_rho_initial_iteration_budget",
     "acados_forced_iteration_cap",
     "acados_ipopt_fallback_advance",
     "acados_failed_rho_alternate_pw_predictor",
@@ -294,6 +314,11 @@ BENCHMARK_CONFIGURATION_FIELDS = (
     "rho_prepared_checkpoint_windows",
     "ipopt_hsl_library",
     "ipopt_c_compile",
+    "ipopt_c_compile_callbacks",
+    "ipopt_function_transform",
+    "ipopt_c_compiler_flags",
+    "ipopt_c_cache_dir",
+    "ipopt_c_cache_name",
     "ipopt_print_level",
     "ipopt_print_timing_statistics",
     "ipopt_linear_system_scaling",
@@ -431,6 +456,25 @@ IPOPT_PROFILE_DEFAULTS = {
     },
 }
 IPOPT_PROFILE_VERSION = 1
+
+
+def _require_supported_30hz_collocation(solver_name: str, args: argparse.Namespace) -> None:
+    """Reject the under-resolved Radau-3 transcription at the clinical 30 Hz rate."""
+
+    if int(getattr(args, "stimulations_per_cycle", 0)) != 30:
+        return
+    if str(getattr(args, "ode_solver", "")).lower() != "collocation":
+        return
+    if str(getattr(args, "collocation_method", "")).lower() != "radau":
+        return
+    degree = int(getattr(args, "collocation_degree", 0))
+    if degree < 5:
+        raise ValueError(
+            f"{solver_name} uses Radau-{degree} at 30 Hz. This transcription is "
+            "disabled because its disagreement with the independent DOP853 replay "
+            "was too large. Use Radau-5 or higher. Radau-3 remains available only "
+            "for the separate 50 Hz discretization-validation benchmark."
+        )
 
 
 def _profile_hash(profile: str) -> str:
@@ -1148,6 +1192,70 @@ def _control_saturation_metrics(result: dict, cycle_count: int) -> list[dict]:
     return rows
 
 
+def _continuous_endurance_estimate(
+    *,
+    validated_cycles: int,
+    success: bool,
+    requested_cycles: int | None,
+    terminal_capacity_reserve: dict | None,
+    control_saturation: list[dict],
+) -> dict:
+    """Attach a continuous ranking signal beside the certified cycle count.
+
+    The integer prefix remains the scientific pass/fail result.  At an early
+    endpoint this retains terminal Ding capacity and pulse-width recruitment
+    headroom.  It is explicitly a proxy: a future terminal-cycle OCP probe can
+    replace its fractional part without changing the exported contract.
+    """
+    summary = {
+        "available": False,
+        "method": "capacity_recruitment_proxy_v1",
+        "validated_cycles": int(validated_cycles),
+        "fractional_cycle_estimate": None,
+        "continuous_cycle_equivalent": None,
+        "censored": False,
+    }
+    if validated_cycles <= 0:
+        summary["reason"] = "no_certified_cycle"
+        return summary
+    if success and (requested_cycles is None or validated_cycles >= requested_cycles):
+        # Do not claim an extra cycle when the requested horizon ended first.
+        summary.update(
+            available=True,
+            censored=True,
+            continuous_cycle_equivalent=float(validated_cycles),
+            reason="requested_horizon_completed",
+        )
+        return summary
+    reserve = terminal_capacity_reserve or {}
+    minimum_ratio = _finite_float(reserve.get("minimum_ratio"))
+    if reserve.get("available") is not True or minimum_ratio is None:
+        summary["reason"] = "terminal_capacity_reserve_unavailable"
+        return summary
+    fractions = [
+        _finite_float(row.get("terminal_upper_fraction"))
+        for row in control_saturation
+    ]
+    fractions = [value for value in fractions if value is not None]
+    if not fractions:
+        summary["reason"] = "terminal_control_headroom_unavailable"
+        return summary
+    # The most saturated muscle limits new recruitment.  Bounds protect the
+    # score from malformed diagnostics and keep it below one nominal cycle.
+    capacity_margin = float(np.clip(minimum_ratio, 0.0, 1.0))
+    recruitment_headroom = float(np.clip(1.0 - max(fractions), 0.0, 1.0))
+    fraction = capacity_margin * recruitment_headroom
+    summary.update(
+        available=True,
+        terminal_minimum_capacity_ratio=minimum_ratio,
+        terminal_recruitment_headroom=recruitment_headroom,
+        fractional_cycle_estimate=fraction,
+        continuous_cycle_equivalent=float(validated_cycles + fraction),
+        warning="proxy_only_not_a_terminal_cycle_feasibility_certificate",
+    )
+    return summary
+
+
 def _maximum_consecutive_uncertified_attempts(result: dict) -> int:
     """Count retry failures that are absent from the certified trajectory.
 
@@ -1606,6 +1714,9 @@ def _solver_config(
     wheel_qdot_regularization_weight: float,
     wheel_qdot_regularization_target: float,
     wheel_qdot_bound_margin: float,
+    wheel_qdot_fast_bound_margin: float | None,
+    wheel_qdot_slow_bound_margin: float | None,
+    reduced_internal_crank_velocity_rk4_fraction: float | None,
     acados_wheel_qdot_fast_bound_margin: float | None,
     acados_wheel_qdot_slow_bound_margin: float | None,
     terminal_wheel_qdot_bound_margin: float | None,
@@ -1655,7 +1766,7 @@ def _solver_config(
     periodic_ipopt_refinement_iterations: int,
     periodic_ipopt_refinement_use_sx: bool,
     warmup_state_comparison_limit: int,
-    ipopt_profile: str = "historical",
+    ipopt_profile: str = "scientific_radau5",
     ipopt_model_formulation: str | None = None,
     ipopt_torque_application: str | None = None,
     ipopt_ode_solver: str | None = None,
@@ -1742,6 +1853,11 @@ def _solver_config(
             wheel_qdot_regularization_weight=wheel_qdot_regularization_weight,
             wheel_qdot_regularization_target=wheel_qdot_regularization_target,
             wheel_qdot_bound_margin=wheel_qdot_bound_margin,
+            wheel_qdot_fast_bound_margin=wheel_qdot_fast_bound_margin,
+            wheel_qdot_slow_bound_margin=wheel_qdot_slow_bound_margin,
+            reduced_internal_crank_velocity_rk4_fraction=(
+                reduced_internal_crank_velocity_rk4_fraction
+            ),
             acados_wheel_qdot_fast_bound_margin=(acados_wheel_qdot_fast_bound_margin),
             acados_wheel_qdot_slow_bound_margin=(acados_wheel_qdot_slow_bound_margin),
             terminal_wheel_qdot_bound_margin=(terminal_wheel_qdot_bound_margin),
@@ -1897,6 +2013,11 @@ def _solver_config(
             wheel_qdot_regularization_weight=wheel_qdot_regularization_weight,
             wheel_qdot_regularization_target=wheel_qdot_regularization_target,
             wheel_qdot_bound_margin=wheel_qdot_bound_margin,
+            wheel_qdot_fast_bound_margin=wheel_qdot_fast_bound_margin,
+            wheel_qdot_slow_bound_margin=wheel_qdot_slow_bound_margin,
+            reduced_internal_crank_velocity_rk4_fraction=(
+                reduced_internal_crank_velocity_rk4_fraction
+            ),
             acados_wheel_qdot_fast_bound_margin=(acados_wheel_qdot_fast_bound_margin),
             acados_wheel_qdot_slow_bound_margin=(acados_wheel_qdot_slow_bound_margin),
             terminal_wheel_qdot_bound_margin=(terminal_wheel_qdot_bound_margin),
@@ -2333,6 +2454,9 @@ def _run_benchmark_case(
                 "common_initial_solution_output",
                 "receding_horizon_solution_output",
                 "reduced_cycling_profile",
+                "endurance_rollout_profile",
+                "muscle_horizon_source",
+                "muscle_horizon_reduced_profile",
             ):
                 path_value = getattr(args, path_attribute, None)
                 if path_value is None:
@@ -3069,6 +3193,11 @@ def _ipopt_runtime_provenance(args: argparse.Namespace, result: dict) -> dict | 
             advanced_options=_ipopt_advanced_options(args),
         ),
         "c_compile": bool(getattr(args, "ipopt_c_compile", False)),
+        "c_compile_callbacks": getattr(args, "ipopt_c_compile_callbacks", None),
+        "function_transform": bool(getattr(args, "ipopt_function_transform", False)),
+        "c_compiler_flags": getattr(args, "ipopt_c_compiler_flags", None),
+        "c_cache_dir": getattr(args, "ipopt_c_cache_dir", None),
+        "c_cache_name": getattr(args, "ipopt_c_cache_name", None),
         "hsl": ipopt_hsl_diagnostics(
             getattr(args, "ipopt_linear_solver", "ma57"),
             diagnostic_hsl_argument,
@@ -3137,6 +3266,16 @@ def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
         )
         saturation = _control_saturation_metrics(
             result, performance["validated_cycles"]
+        )
+        terminal_capacity_reserve = result.get("terminal_capacity_reserve")
+        continuous_endurance = _continuous_endurance_estimate(
+            validated_cycles=performance["validated_cycles"],
+            success=bool(result.get("success")),
+            requested_cycles=(
+                result.get("requested_cycles") or result.get("requested_windows")
+            ),
+            terminal_capacity_reserve=terminal_capacity_reserve,
+            control_saturation=saturation,
         )
         minimum_capacity_ratio = _minimum_a_capacity_ratio(fatigue)
         a_rows = [row for row in fatigue if row["key"].startswith("A_")]
@@ -3509,6 +3648,7 @@ def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
                     "by_state": {},
                 },
                 "control_saturation": saturation,
+                "continuous_endurance": continuous_endurance,
                 "fatigue_endurance_outcome": _fatigue_endurance_outcome(
                     success=bool(result.get("success")),
                     validated_cycles=performance["validated_cycles"],
@@ -3522,6 +3662,9 @@ def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
                     "pulse_width_active_set_summary"
                 )
                 or [],
+                "pulse_width_slew_audit": result.get("pulse_width_slew_audit"),
+                "pulse_width_odd_interpolation_audit": result.get("pulse_width_odd_interpolation_audit"),
+                "pulse_width_slew_regularization_audit": result.get("pulse_width_slew_regularization_audit"),
                 "stop": _stop_classification(result),
                 "native_solver_status": result.get("native_solver_status"),
                 "windows": window_rows,
@@ -3553,6 +3696,7 @@ def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
                 ),
                 "compiled_nlp_reuse": result.get("compiled_nlp_reuse"),
                 "endurance_rollout": result.get("endurance_rollout"),
+                "muscle_horizon": result.get("muscle_horizon"),
                 "acados_maxiter_retry_summaries": (
                     result.get("acados_maxiter_retry_summaries") or []
                 ),
@@ -3567,6 +3711,9 @@ def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
                 ),
                 "acados_forced_iteration_cap_summaries": (
                     result.get("acados_forced_iteration_cap_summaries") or []
+                ),
+                "acados_rho_initial_iteration_budget": result.get(
+                    "acados_rho_initial_iteration_budget"
                 ),
                 "initial_acados_irk_rollout": result.get("initial_acados_irk_rollout"),
                 "acados_ipopt_recovery": result.get("acados_ipopt_recovery"),
@@ -3768,12 +3915,24 @@ def main(
     endurance_rollout_domain_epsilon: float = 1e-8,
     endurance_rollout_horizon_cycles: int = 5,
     endurance_rollout_temperature: float = 0.02,
+    experimental_muscle_horizon: bool = False,
+    muscle_horizon_weight: float = 0.0,
+    muscle_horizon_source: str | Path | None = None,
+    muscle_horizon_reduced_profile: str | Path | None = None,
+    muscle_horizon_source_cycle_index: int = 0,
+    muscle_horizon_cycle_period: float | None = None,
+    muscle_horizon_cycles: int = 3,
+    muscle_horizon_integration_substeps: int = 1,
+    muscle_horizon_temperature: float = 0.02,
+    muscle_horizon_allocation_weight: float = 0.05,
+    muscle_horizon_domain_epsilon: float = 1e-8,
     solvers: tuple[str, ...] = BENCHMARK_SOLVERS,
     single_shot: bool = False,
     cycles_per_window: int = 1,
     stimulations_per_cycle: int = 30,
     n_windows: int = 2,
-    mechanical_formulation: str = "full",
+    mechanical_formulation: str = "reduced",
+    bilateral_reduced: bool = False,
     formulation: str = "dynamic",
     energy_equivalent_torque: float = 0.2,
     isokinetic_omega: float = -float(2 * np.pi),
@@ -3800,6 +3959,7 @@ def main(
     legacy_standard_warmup_seed_signed_torque: float | None = None,
     common_initial_solution: str | Path | None = None,
     common_initial_solution_recenter_first_node_bounds: bool = False,
+    common_initial_solution_feasibility_probe: bool = False,
     full_horizon_prefix_solution: str | Path | None = None,
     adopt_common_initial_solution_warmup_cycles: bool = False,
     common_initial_solution_output: str | Path | None = None,
@@ -3810,6 +3970,11 @@ def main(
     rho_prepared_checkpoint_windows: tuple[int, ...] = (),
     ipopt_hsl_library: str | None = None,
     ipopt_c_compile: bool = False,
+    ipopt_c_compile_callbacks: tuple[str, ...] | list[str] | None = None,
+    ipopt_function_transform: bool = False,
+    ipopt_c_compiler_flags: tuple[str, ...] | list[str] | None = None,
+    ipopt_c_cache_dir: str | Path | None = None,
+    ipopt_c_cache_name: str | None = None,
     ipopt_print_level: int = 0,
     ipopt_print_timing_statistics: bool = False,
     ipopt_linear_system_scaling: str | None = None,
@@ -3851,7 +4016,7 @@ def main(
     alpaqa_max_no_progress: int | None = None,
     optional_nlp_periodic_ipopt_hot_start: bool = True,
     acados_max_iter: int = 100,
-    acados_assisted_hot_start: bool = True,
+    acados_assisted_hot_start: bool = False,
     acados_disable_standard_ipopt_warmup: bool = False,
     acados_control_homotopy_radii: tuple[float, ...] | None = None,
     acados_control_homotopy_tolerance: float = 5e-4,
@@ -3869,6 +4034,9 @@ def main(
     acados_wheel_qdot_regularization_weight: float | None = None,
     wheel_qdot_regularization_target: float = -float(2 * np.pi),
     wheel_qdot_bound_margin: float = 3.0,
+    wheel_qdot_fast_bound_margin: float | None = None,
+    wheel_qdot_slow_bound_margin: float | None = None,
+    reduced_internal_crank_velocity_rk4_fraction: float | None = None,
     acados_wheel_qdot_fast_bound_margin: float | None = None,
     acados_wheel_qdot_slow_bound_margin: float | None = None,
     terminal_wheel_qdot_bound_margin: float | None = None,
@@ -3883,6 +4051,11 @@ def main(
     state_scaling: str = "full",
     acados_state_scaling: str | None = None,
     pulse_width_scaling: float = 1 / 400,
+    pulse_width_odd_interpolation: bool = False,
+    pulse_width_max_step_us: float | None = None,
+    pulse_width_slew_weight: float = 0.0,
+    pulse_width_slew_reference_us: float = 100.0,
+    reduced_internal_crank_velocity_guard: str = "auto",
     pulse_width_active_set: str = "none",
     pulse_width_active_threshold: float = 0.01,
     pulse_width_active_margin: int = 3,
@@ -3912,6 +4085,7 @@ def main(
     acados_fatigue_warmstart_mode: str = "continuous",
     acados_tolerance: float | None = None,
     acados_stationarity_tolerance: float | None = None,
+    acados_qp_solver: str = "auto",
     acados_qp_iter_max: int = 50,
     acados_qp_cond_n: int | None = None,
     acados_qp_warm_start_level: int = 0,
@@ -3942,6 +4116,7 @@ def main(
     acados_ipopt_recovery_force_first_rho: bool = False,
     acados_forced_iteration_cap_rhos: tuple[int, ...] = (),
     acados_forced_iteration_cap: int | None = None,
+    acados_rho_initial_iteration_budget: int | None = None,
     acados_ipopt_fallback_advance: bool = False,
     acados_failed_rho_alternate_pw_predictor: bool = False,
     nlp_ipopt_recovery: bool = False,
@@ -4016,6 +4191,7 @@ def main(
     shared_transfer_ding_force_compensation_iterations: int = 20,
     acados_transfer_ding_force_compensation: bool = False,
     acados_integrator_type: str = "IRK",
+    acados_ding_local_reduction: bool = False,
     acados_collocation_type: str = "GAUSS_LEGENDRE",
     acados_sim_stages: int = 4,
     acados_sim_steps: int = 5,
@@ -4039,7 +4215,7 @@ def main(
     parametric_kkt_predictor: bool = False,
     parametric_kkt_predictor_maximum_residual_ratio: float = 0.95,
     parametric_kkt_dual_mode: str = "reset",
-    periodic_ipopt_refinement: bool = True,
+    periodic_ipopt_refinement: bool = False,
     periodic_ipopt_refinement_each_window: bool = False,
     periodic_ipopt_refinement_iterations: int = 300,
     periodic_ipopt_refinement_use_sx: bool = True,
@@ -4052,7 +4228,7 @@ def main(
     validate_integrator_maps: bool = False,
     high_accuracy_trace_max_cycles: int = 30,
     high_accuracy_trace_cycle_milestones: tuple[int, ...] = (),
-    ipopt_profile: str = "historical",
+    ipopt_profile: str = "scientific_radau5",
     ipopt_model_formulation: str | None = None,
     ipopt_torque_application: str | None = None,
     ipopt_ode_solver: str | None = None,
@@ -4094,12 +4270,18 @@ def main(
         rho_prepared_checkpoint_output_template
     )
     reduced_cycling_profile = resolve_invocation_path(reduced_cycling_profile)
+    endurance_rollout_profile = resolve_invocation_path(endurance_rollout_profile)
+    muscle_horizon_source = resolve_invocation_path(muscle_horizon_source)
+    muscle_horizon_reduced_profile = resolve_invocation_path(
+        muscle_horizon_reduced_profile
+    )
     # ``IPOPT_HSL_LIBRARY`` is the portable benchmark-environment contract.
     # Retain the explicit CLI argument as the higher-priority override so the
     # same command works on workstations and CI without a host-specific path.
     ipopt_hsl_library = resolve_invocation_path(
         ipopt_hsl_library or os.environ.get("IPOPT_HSL_LIBRARY")
     )
+    ipopt_c_cache_dir = resolve_invocation_path(ipopt_c_cache_dir)
     output_json = resolve_invocation_path(output_json)
     os.chdir(EXAMPLE_DIR)
     if n_threads is None:
@@ -4166,6 +4348,11 @@ def main(
         wheel_qdot_regularization_weight=wheel_qdot_regularization_weight,
         wheel_qdot_regularization_target=wheel_qdot_regularization_target,
         wheel_qdot_bound_margin=wheel_qdot_bound_margin,
+        wheel_qdot_fast_bound_margin=wheel_qdot_fast_bound_margin,
+        wheel_qdot_slow_bound_margin=wheel_qdot_slow_bound_margin,
+        reduced_internal_crank_velocity_rk4_fraction=(
+            reduced_internal_crank_velocity_rk4_fraction
+        ),
         acados_wheel_qdot_fast_bound_margin=None,
         acados_wheel_qdot_slow_bound_margin=None,
         terminal_wheel_qdot_bound_margin=(terminal_wheel_qdot_bound_margin),
@@ -4288,6 +4475,11 @@ def main(
         ),
         wheel_qdot_regularization_target=wheel_qdot_regularization_target,
         wheel_qdot_bound_margin=wheel_qdot_bound_margin,
+        wheel_qdot_fast_bound_margin=wheel_qdot_fast_bound_margin,
+        wheel_qdot_slow_bound_margin=wheel_qdot_slow_bound_margin,
+        reduced_internal_crank_velocity_rk4_fraction=(
+            reduced_internal_crank_velocity_rk4_fraction
+        ),
         acados_wheel_qdot_fast_bound_margin=(acados_wheel_qdot_fast_bound_margin),
         acados_wheel_qdot_slow_bound_margin=(acados_wheel_qdot_slow_bound_margin),
         terminal_wheel_qdot_bound_margin=(terminal_wheel_qdot_bound_margin),
@@ -4404,6 +4596,12 @@ def main(
     acados_args.common_initial_solution_recenter_first_node_bounds = (
         common_initial_solution_recenter_first_node_bounds
     )
+    ipopt_args.common_initial_solution_feasibility_probe = (
+        common_initial_solution_feasibility_probe
+    )
+    acados_args.common_initial_solution_feasibility_probe = (
+        common_initial_solution_feasibility_probe
+    )
     ipopt_args.full_horizon_prefix_solution = full_horizon_prefix_solution
     acados_args.full_horizon_prefix_solution = full_horizon_prefix_solution
     ipopt_args.adopt_common_initial_solution_warmup_cycles = (
@@ -4414,6 +4612,22 @@ def main(
     )
     ipopt_args.common_initial_solution_output = common_initial_solution_output
     acados_args.common_initial_solution_output = common_initial_solution_output
+    exact_cycle1_transfer = (
+        mechanical_formulation == "reduced"
+        and formulation == "dynamic"
+        and (
+            common_initial_solution is not None
+            or common_initial_solution_output is not None
+            or "acados" in solvers
+        )
+    )
+    shared_guard_mode = reduced_internal_crank_velocity_guard
+    if shared_guard_mode == "auto" and exact_cycle1_transfer:
+        # The IPOPT cycle-1 producer and ACADOS consumer must include the same
+        # midpoint cadence inequality. Standalone solver runs keep legacy auto.
+        shared_guard_mode = "on"
+    for solver_args in (ipopt_args, acados_args):
+        solver_args.reduced_internal_crank_velocity_guard = shared_guard_mode
     ipopt_args.receding_horizon_solution_output = receding_horizon_solution_output
     acados_args.receding_horizon_solution_output = receding_horizon_solution_output
     ipopt_args.allow_partial_receding_horizon_solution_output = (
@@ -4431,6 +4645,23 @@ def main(
         solver_args.endurance_rollout_domain_epsilon = endurance_rollout_domain_epsilon
         solver_args.endurance_rollout_horizon_cycles = endurance_rollout_horizon_cycles
         solver_args.endurance_rollout_temperature = endurance_rollout_temperature
+        solver_args.experimental_muscle_horizon = experimental_muscle_horizon
+        solver_args.muscle_horizon_weight = muscle_horizon_weight
+        solver_args.muscle_horizon_source = muscle_horizon_source
+        solver_args.muscle_horizon_reduced_profile = muscle_horizon_reduced_profile
+        solver_args.muscle_horizon_source_cycle_index = (
+            muscle_horizon_source_cycle_index
+        )
+        solver_args.muscle_horizon_cycle_period = muscle_horizon_cycle_period
+        solver_args.muscle_horizon_cycles = muscle_horizon_cycles
+        solver_args.muscle_horizon_integration_substeps = (
+            muscle_horizon_integration_substeps
+        )
+        solver_args.muscle_horizon_temperature = muscle_horizon_temperature
+        solver_args.muscle_horizon_allocation_weight = (
+            muscle_horizon_allocation_weight
+        )
+        solver_args.muscle_horizon_domain_epsilon = muscle_horizon_domain_epsilon
         solver_args.rho_prepared_checkpoint_output_template = (
             None
             if rho_prepared_checkpoint_output_template is None
@@ -4469,6 +4700,7 @@ def main(
         high_accuracy_trace_cycle_milestones
     )
     acados_args.acados_integrator_type = acados_integrator_type
+    acados_args.acados_ding_local_reduction = acados_ding_local_reduction
     acados_args.acados_collocation_type = acados_collocation_type
     acados_args.acados_sim_stages = acados_sim_stages
     acados_args.acados_sim_steps = acados_sim_steps
@@ -4505,6 +4737,7 @@ def main(
         acados_control_homotopy_window_max_radius
     )
     acados_args.acados_dual_warm_start_mode = acados_dual_warm_start_mode
+    acados_args.acados_qp_solver = acados_qp_solver
     acados_args.acados_qp_cond_n = acados_qp_cond_n
     acados_args.acados_qp_warm_start_level = acados_qp_warm_start_level
     acados_args.acados_warm_start_first_qp = acados_warm_start_first_qp
@@ -4540,6 +4773,7 @@ def main(
         acados_forced_iteration_cap_rhos
     )
     acados_args.acados_forced_iteration_cap = acados_forced_iteration_cap
+    acados_args.acados_rho_initial_iteration_budget = acados_rho_initial_iteration_budget
     acados_args.acados_ipopt_fallback_advance = acados_ipopt_fallback_advance
     acados_args.acados_failed_rho_alternate_pw_predictor = (
         acados_failed_rho_alternate_pw_predictor
@@ -4715,6 +4949,10 @@ def main(
     acados_args.acados_cyclical_transfer_mode = acados_cyclical_transfer_mode
     for solver_args in (ipopt_args, acados_args):
         solver_args.rho_pulse_width_transfer_mode = rho_pulse_width_transfer_mode
+        solver_args.pulse_width_odd_interpolation = bool(pulse_width_odd_interpolation)
+        solver_args.pulse_width_max_step_us = pulse_width_max_step_us
+        solver_args.pulse_width_slew_weight = pulse_width_slew_weight
+        solver_args.pulse_width_slew_reference_us = pulse_width_slew_reference_us
         solver_args.rho_pulse_width_extrapolation_factor = (
             rho_pulse_width_extrapolation_factor
         )
@@ -4824,6 +5062,11 @@ def main(
     for nlp_args in (ipopt_args, fatrop_args, madnlp_args):
         nlp_args.nlp_failed_rho_phase_one_recovery = nlp_failed_rho_phase_one_recovery
     ipopt_args.ipopt_c_compile = ipopt_c_compile
+    ipopt_args.ipopt_c_compile_callbacks = ipopt_c_compile_callbacks
+    ipopt_args.ipopt_function_transform = ipopt_function_transform
+    ipopt_args.ipopt_c_compiler_flags = ipopt_c_compiler_flags
+    ipopt_args.ipopt_c_cache_dir = str(ipopt_c_cache_dir) if ipopt_c_cache_dir is not None else None
+    ipopt_args.ipopt_c_cache_name = ipopt_c_cache_name
     ipopt_args.ipopt_hsl_library = ipopt_hsl_library
     fatrop_args.ipopt_c_compile = False
     fatrop_args.ipopt_hsl_library = None
@@ -4876,6 +5119,8 @@ def main(
         "madnlp": madnlp_args,
         "alpaqa": alpaqa_args,
     }
+    for solver_name in solvers:
+        _require_supported_30hz_collocation(solver_name, solver_args[solver_name])
     # A benchmark comparison must use a common physical crank coordinate.
     # Full q/qdot traces are therefore projected onto the same contact
     # manifold as the reduced theta/omega OCP before phase and cadence metrics
@@ -4920,6 +5165,10 @@ def main(
         )
     if mechanical_formulation not in ("full", "reduced"):
         raise ValueError("mechanical_formulation must be 'full' or 'reduced'.")
+    if type(bilateral_reduced) is not bool:
+        raise ValueError("bilateral_reduced must be a boolean.")
+    if bilateral_reduced and mechanical_formulation != "reduced":
+        raise ValueError("--bilateral-reduced requires --mechanical-formulation reduced.")
     if formulation not in ("dynamic", "isokinetic"):
         raise ValueError("formulation must be 'dynamic' or 'isokinetic'.")
     if formulation == "isokinetic" and mechanical_formulation != "reduced":
@@ -4939,6 +5188,7 @@ def main(
             "energy_equivalent_torque must lie inside the load-torque bounds."
         )
     for solver_configuration in solver_args.values():
+        solver_configuration.bilateral_reduced = bilateral_reduced
         solver_configuration.formulation = formulation
         solver_configuration.energy_equivalent_torque = float(
             energy_equivalent_torque
@@ -5037,6 +5287,26 @@ def build_cli() -> argparse.ArgumentParser:
         help="Dimensionless smooth-min temperature for terminal muscle reserve.",
     )
     add_endurance_rollout_cli(parser)
+    add_muscle_horizon_cli(parser)
+    add_pulse_width_slew_cli(parser)
+    parser.add_argument(
+        "--reduced-internal-crank-velocity-guard",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help=(
+            "Reduced midpoint cadence guard. auto preserves legacy standalone "
+            "behavior and resolves to on for exact IPOPT-cycle1/ACADOS transfers."
+        ),
+    )
+    parser.add_argument(
+        "--reduced-internal-crank-velocity-rk4-fraction",
+        type=float,
+        default=None,
+        help=(
+            "Experimental full-state RK4 internal cadence guard fraction; "
+            "requires --reduced-internal-crank-velocity-guard on."
+        ),
+    )
     parser.add_argument("--cycles-per-window", type=int, default=1)
     parser.add_argument("--stimulations-per-cycle", type=int, default=30)
     parser.add_argument(
@@ -5059,10 +5329,20 @@ def build_cli() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mechanical-formulation",
         choices=("full", "reduced"),
-        default="full",
+        default="reduced",
         help=(
-            "Benchmark the full constrained mechanics or the experimental "
-            "theta/omega reduction. Reduced mode accepts IPOPT and MadNLP."
+            "Mechanical model for the benchmark. The default is the validated "
+            "reduced theta/omega model; select full explicitly for the "
+            "three-coordinate constrained mechanics."
+        ),
+    )
+    parser.add_argument(
+        "--bilateral-reduced",
+        action="store_true",
+        help=(
+            "Use the physical bilateral Wu bioMod (two arm chains, one shared "
+            "crank) to build the offline reduced profile. Requires reduced "
+            "dynamic mechanics."
         ),
     )
     parser.add_argument(
@@ -5256,6 +5536,14 @@ def build_cli() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--common-initial-solution-feasibility-probe",
+        action="store_true",
+        help=(
+            "Permit an objective-only mismatch for a one-cycle, frozen-state "
+            "allocation-feasibility probe."
+        ),
+    )
+    parser.add_argument(
         "--common-initial-solution-output",
         type=Path,
         default=None,
@@ -5334,6 +5622,7 @@ def build_cli() -> argparse.ArgumentParser:
             "or both between receding-horizon windows."
         ),
     )
+    add_ipopt_performance_arguments(parser)
     parser.add_argument("--nlp-tolerance", type=float, default=1e-6)
     parser.add_argument(
         "--primal-feasibility-threshold",
@@ -5716,13 +6005,13 @@ def build_cli() -> argparse.ArgumentParser:
             "acados_like",
             "acados-like",
         ),
-        default="historical",
+        default="scientific-radau5",
         help=(
-            "Base IPOPT configuration. 'historical' keeps the robust reference "
-            "problem; 'periodic_collocation' isolates the periodic dynamics and "
-            "constant torque with robust collocation; the scientific Radau-4/5/6 "
-            "profiles fix the corrected SX contracts (Radau-5 is the candidate; "
-            "3, 4 and 6 are diagnostics); 'acados_like' additionally "
+            "Base IPOPT configuration. The default scientific Radau-5 profile is "
+            "the minimum supported collocation transcription at 30 Hz; "
+            "'historical' keeps the legacy reference problem; "
+            "'periodic_collocation' isolates periodic dynamics and constant torque; "
+            "the scientific Radau-3/4/6 profiles are diagnostics; 'acados_like' additionally "
             "switches IPOPT to the explicit RK setup used to diagnose ACADOS."
         ),
     )
@@ -5834,7 +6123,8 @@ def build_cli() -> argparse.ArgumentParser:
         "--acados-assisted-hot-start",
         dest="acados_assisted_hot_start",
         action="store_true",
-        default=True,
+        default=False,
+        help="Opt into assisted FES/Phase-I/control continuation; disabled by default to preserve the IPOPT seed.",
     )
     assisted_hot_start_group.add_argument(
         "--disable-acados-assisted-hot-start",
@@ -5903,6 +6193,7 @@ def build_cli() -> argparse.ArgumentParser:
         choices=("GAUSS_LEGENDRE", "GAUSS_RADAU_IIA", "EXPLICIT_RUNGE_KUTTA"),
         default="GAUSS_LEGENDRE",
     )
+    parser.add_argument("--acados-ding-local-reduction", action="store_true")
     parser.add_argument("--acados-sim-stages", type=int, default=4)
     parser.add_argument(
         "--acados-sim-steps",
@@ -5941,6 +6232,24 @@ def build_cli() -> argparse.ArgumentParser:
         default=-float(2 * np.pi),
     )
     parser.add_argument("--wheel-qdot-bound-margin", type=float, default=3.0)
+    parser.add_argument(
+        "--wheel-qdot-fast-bound-margin",
+        type=float,
+        default=None,
+        help=(
+            "Shared lower/fast wheel-speed margin for IPOPT and ACADOS; "
+            "defaults to --wheel-qdot-bound-margin."
+        ),
+    )
+    parser.add_argument(
+        "--wheel-qdot-slow-bound-margin",
+        type=float,
+        default=None,
+        help=(
+            "Shared upper/slow wheel-speed margin for IPOPT and ACADOS; "
+            "defaults to --wheel-qdot-bound-margin."
+        ),
+    )
     parser.add_argument(
         "--acados-wheel-qdot-fast-bound-margin",
         type=float,
@@ -6141,6 +6450,20 @@ def build_cli() -> argparse.ArgumentParser:
         help="Stationarity tolerance applied independently from ACADOS feasibility.",
     )
     parser.add_argument("--acados-qp-iter-max", type=int, default=50)
+    parser.add_argument(
+        "--acados-qp-solver",
+        choices=(
+            "auto",
+            "PARTIAL_CONDENSING_HPIPM",
+            "FULL_CONDENSING_HPIPM",
+            "FULL_CONDENSING_QPOASES",
+        ),
+        default="auto",
+        help=(
+            "QP solver backend. auto selects FULL_CONDENSING_HPIPM with "
+            "--pulse-width-max-step-us and PARTIAL_CONDENSING_HPIPM otherwise."
+        ),
+    )
     parser.add_argument("--acados-qp-cond-n", type=int, default=None)
     parser.add_argument(
         "--acados-qp-warm-start-level",
@@ -6255,6 +6578,13 @@ def build_cli() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--acados-forced-iteration-cap", type=int, default=None)
+    parser.add_argument(
+        "--acados-rho-initial-iteration-budget", type=int, default=None,
+        help=(
+            "Opt-in first-attempt SQP budget for physical RHO >= 2; "
+            "requires ACADOS IPOPT recovery and retry without advance."
+        ),
+    )
     parser.add_argument(
         "--acados-ipopt-fallback-advance",
         action="store_true",
@@ -6476,8 +6806,8 @@ def build_cli() -> argparse.ArgumentParser:
         "--periodic-ipopt-refinement",
         dest="periodic_ipopt_refinement",
         action="store_true",
-        default=True,
-        help="Run the periodic IPOPT refinement before ACADOS (enabled by default).",
+        default=False,
+        help="Opt into the periodic IPOPT refinement before ACADOS (disabled by default).",
     )
     periodic_refinement_group.add_argument(
         "--disable-periodic-ipopt-refinement",
@@ -6613,10 +6943,24 @@ if __name__ == "__main__":
         endurance_rollout_domain_epsilon=args.endurance_rollout_domain_epsilon,
         endurance_rollout_horizon_cycles=args.endurance_rollout_horizon_cycles,
         endurance_rollout_temperature=args.endurance_rollout_temperature,
+        experimental_muscle_horizon=args.experimental_muscle_horizon,
+        muscle_horizon_weight=args.muscle_horizon_weight,
+        muscle_horizon_source=args.muscle_horizon_source,
+        muscle_horizon_reduced_profile=args.muscle_horizon_reduced_profile,
+        muscle_horizon_source_cycle_index=(args.muscle_horizon_source_cycle_index),
+        muscle_horizon_cycle_period=args.muscle_horizon_cycle_period,
+        muscle_horizon_cycles=args.muscle_horizon_cycles,
+        muscle_horizon_integration_substeps=(
+            args.muscle_horizon_integration_substeps
+        ),
+        muscle_horizon_temperature=args.muscle_horizon_temperature,
+        muscle_horizon_allocation_weight=(args.muscle_horizon_allocation_weight),
+        muscle_horizon_domain_epsilon=args.muscle_horizon_domain_epsilon,
         cycles_per_window=args.cycles_per_window,
         stimulations_per_cycle=args.stimulations_per_cycle,
         n_windows=args.n_windows,
         mechanical_formulation=args.mechanical_formulation,
+        bilateral_reduced=args.bilateral_reduced,
         formulation=args.formulation,
         energy_equivalent_torque=args.energy_equivalent_torque,
         isokinetic_omega=args.isokinetic_omega,
@@ -6652,6 +6996,9 @@ if __name__ == "__main__":
         common_initial_solution_recenter_first_node_bounds=(
             args.common_initial_solution_recenter_first_node_bounds
         ),
+        common_initial_solution_feasibility_probe=(
+            args.common_initial_solution_feasibility_probe
+        ),
         full_horizon_prefix_solution=args.full_horizon_prefix_solution,
         adopt_common_initial_solution_warmup_cycles=(
             args.adopt_common_initial_solution_warmup_cycles
@@ -6668,6 +7015,11 @@ if __name__ == "__main__":
         rho_prepared_checkpoint_windows=args.rho_prepared_checkpoint_windows,
         ipopt_hsl_library=args.ipopt_hsl_library,
         ipopt_c_compile=args.ipopt_c_compile,
+        ipopt_c_compile_callbacks=args.ipopt_c_compile_callbacks,
+        ipopt_function_transform=args.ipopt_function_transform,
+        ipopt_c_compiler_flags=args.ipopt_c_compiler_flags,
+        ipopt_c_cache_dir=args.ipopt_c_cache_dir,
+        ipopt_c_cache_name=args.ipopt_c_cache_name,
         ipopt_print_level=args.ipopt_print_level,
         ipopt_print_timing_statistics=args.ipopt_print_timing_statistics,
         ipopt_linear_system_scaling=args.ipopt_linear_system_scaling,
@@ -6741,6 +7093,8 @@ if __name__ == "__main__":
         acados_wheel_qdot_regularization_weight=args.acados_wheel_qdot_regularization_weight,
         wheel_qdot_regularization_target=args.wheel_qdot_regularization_target,
         wheel_qdot_bound_margin=args.wheel_qdot_bound_margin,
+        wheel_qdot_fast_bound_margin=args.wheel_qdot_fast_bound_margin,
+        wheel_qdot_slow_bound_margin=args.wheel_qdot_slow_bound_margin,
         acados_wheel_qdot_fast_bound_margin=(args.acados_wheel_qdot_fast_bound_margin),
         acados_wheel_qdot_slow_bound_margin=(args.acados_wheel_qdot_slow_bound_margin),
         terminal_wheel_qdot_bound_margin=(args.terminal_wheel_qdot_bound_margin),
@@ -6765,6 +7119,16 @@ if __name__ == "__main__":
         state_scaling=args.state_scaling,
         acados_state_scaling=args.acados_state_scaling,
         pulse_width_scaling=args.pulse_width_scaling,
+        pulse_width_odd_interpolation=args.pulse_width_odd_interpolation,
+        pulse_width_max_step_us=args.pulse_width_max_step_us,
+        pulse_width_slew_weight=args.pulse_width_slew_weight,
+        pulse_width_slew_reference_us=args.pulse_width_slew_reference_us,
+        reduced_internal_crank_velocity_guard=(
+            args.reduced_internal_crank_velocity_guard
+        ),
+        reduced_internal_crank_velocity_rk4_fraction=(
+            args.reduced_internal_crank_velocity_rk4_fraction
+        ),
         pulse_width_active_set=args.pulse_width_active_set,
         pulse_width_active_threshold=args.pulse_width_active_threshold,
         pulse_width_active_margin=args.pulse_width_active_margin,
@@ -6824,6 +7188,7 @@ if __name__ == "__main__":
         acados_fatigue_warmstart_mode=args.acados_fatigue_warmstart_mode,
         acados_tolerance=args.acados_tolerance,
         acados_stationarity_tolerance=args.acados_stationarity_tolerance,
+        acados_qp_solver=args.acados_qp_solver,
         acados_qp_iter_max=args.acados_qp_iter_max,
         acados_qp_cond_n=args.acados_qp_cond_n,
         acados_qp_warm_start_level=args.acados_qp_warm_start_level,
@@ -6868,6 +7233,7 @@ if __name__ == "__main__":
         ),
         acados_forced_iteration_cap_rhos=(args.acados_forced_iteration_cap_rhos),
         acados_forced_iteration_cap=args.acados_forced_iteration_cap,
+        acados_rho_initial_iteration_budget=args.acados_rho_initial_iteration_budget,
         acados_ipopt_fallback_advance=args.acados_ipopt_fallback_advance,
         acados_failed_rho_alternate_pw_predictor=(
             args.acados_failed_rho_alternate_pw_predictor
@@ -7022,6 +7388,7 @@ if __name__ == "__main__":
             args.acados_transfer_ding_force_compensation
         ),
         acados_integrator_type=args.acados_integrator_type,
+        acados_ding_local_reduction=args.acados_ding_local_reduction,
         acados_collocation_type=args.acados_collocation_type,
         acados_sim_stages=args.acados_sim_stages,
         acados_sim_steps=args.acados_sim_steps,

@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from hashlib import sha256
 import json
 import math
+import os
 from pathlib import Path
 
 import numpy as np
@@ -21,6 +22,7 @@ FIELD_ATTRIBUTES = {
 }
 REQUIRED_FIELDS = frozenset(("Fmax", "a_scale", "alpha_a", "tau_fat"))
 FINGERPRINT_KEY = "muscle_parameter_fingerprint"
+WARMUP_CACHE_FINGERPRINT_ENV = "COCOFEST_CONFIGURED_MODEL_FINGERPRINT"
 
 
 def resolve_model_config(declared):
@@ -89,7 +91,12 @@ def configured_model_factories(config, records, *, modules=None):
         from examples.fes_multibody.cycling import cycling_pulse_width_mhe_acados_periodic as periodic
         modules = (mhe, periodic)
     originals = [(module, module.set_fes_model) for module in modules]
+    previous_fingerprint = os.environ.get(WARMUP_CACHE_FINGERPRINT_ENV)
     try:
+        # The standard-warmup cache is constructed inside this patched-factory
+        # context. The .bioMod source alone cannot identify two configured Ding
+        # variants, so make the cache key and its metadata variant-specific.
+        os.environ[WARMUP_CACHE_FINGERPRINT_ENV] = config[FINGERPRINT_KEY]
         for module, original in originals:
             def factory(*args, _original=original, **kwargs):
                 model = _original(*args, **kwargs)
@@ -98,6 +105,10 @@ def configured_model_factories(config, records, *, modules=None):
             module.set_fes_model = factory
         yield
     finally:
+        if previous_fingerprint is None:
+            os.environ.pop(WARMUP_CACHE_FINGERPRINT_ENV, None)
+        else:
+            os.environ[WARMUP_CACHE_FINGERPRINT_ENV] = previous_fingerprint
         for module, original in originals:
             module.set_fes_model = original
 

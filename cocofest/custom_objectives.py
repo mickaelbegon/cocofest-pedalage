@@ -17,6 +17,41 @@ from .optimization.muscle_reserve import (
 
 class CustomObjective:
     @staticmethod
+    def _terminal_muscle_horizon_outputs(controller: PenaltyController, binding):
+        from .optimization.muscle_horizon_ocp import (
+            MUSCLE_HORIZON_FUTURE_PW_KEY,
+            MUSCLE_HORIZON_PROFILE_KEY,
+        )
+
+        states = vertcat(
+            *[
+                controller.states[f"{key}_{name}"].cx
+                for name in binding.options.profile.muscle_names
+                for key in ("Cn", "F", "A", "Tau1", "Km")
+            ]
+        )
+        profile = controller.parameters[MUSCLE_HORIZON_PROFILE_KEY].cx
+        # Bioptim exposes the scaled optimization variable in custom penalty
+        # graphs. Convert it back to physical seconds before the Ding rollout.
+        future_pulse_widths = (
+            controller.parameters[MUSCLE_HORIZON_FUTURE_PW_KEY].cx
+            * binding.future_pulse_width_scaling
+        )
+        return binding.function(states, profile, future_pulse_widths)
+
+    @staticmethod
+    def minimize_terminal_muscle_horizon(controller: PenaltyController, binding):
+        return CustomObjective._terminal_muscle_horizon_outputs(controller, binding)[0]
+
+    @staticmethod
+    def terminal_muscle_horizon_total_moment(controller: PenaltyController, binding):
+        return CustomObjective._terminal_muscle_horizon_outputs(controller, binding)[4]
+
+    @staticmethod
+    def terminal_muscle_horizon_domain(controller: PenaltyController, binding):
+        return CustomObjective._terminal_muscle_horizon_outputs(controller, binding)[6]
+
+    @staticmethod
     def _terminal_rollout_outputs(controller: PenaltyController, binding):
         from .optimization.endurance_rollout_ocp import ROLLOUT_PARAMETER_KEY
 

@@ -625,6 +625,133 @@ def solve_cycling_contact_kinematics(
     return theta, q_samples, audit
 
 
+def solve_bilateral_cycling_kinematics(
+    model_path: str | Path,
+    *,
+    sample_count: int = 181,
+    theta_origin: float = 0.0,
+    direction: int = -1,
+    initial_q: Sequence[float] | None = None,
+    right_hand_marker: str = "right_hand",
+    left_hand_marker: str = "left_hand",
+    right_handle_marker: str = "right_handle",
+    left_handle_marker: str = "left_handle",
+    crank_torque_dof: str = "wheel_rotation_RotZ",
+    residual_tolerance: float = 1e-9,
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Solve a bilateral hand-to-crank kinematic manifold offline.
+
+    The model contains a *single* crank coordinate and two independent arm
+    chains.  At each crank angle we solve only the four arm coordinates so
+    that both hands coincide with their respective, opposite crank handles.
+    This is intentionally an offline profile-construction operation: the
+    resulting OCP contains only the reduced crank angle and velocity.
+    """
+
+    if sample_count < 5:
+        raise ValueError("At least five kinematic samples are required.")
+    if direction not in (-1, 1):
+        raise ValueError("Cycling direction must be -1 or 1.")
+
+    from scipy.optimize import least_squares
+
+    biorbd = _load_numerical_biorbd()
+    model = biorbd.Model(str(Path(model_path)))
+    marker_names = _model_marker_names(model)
+    dof_names = _model_dof_names(model)
+    required_markers = {
+        "right hand": right_hand_marker,
+        "left hand": left_hand_marker,
+        "right handle": right_handle_marker,
+        "left handle": left_handle_marker,
+    }
+    missing = [name for name in required_markers.values() if name not in marker_names]
+    if missing:
+        raise ValueError(
+            "The bilateral reduced model requires markers "
+            f"{', '.join(sorted(missing))}."
+        )
+    if crank_torque_dof not in dof_names:
+        raise ValueError(
+            f"The bilateral reduced model requires crank DoF "
+            f"'{crank_torque_dof}'."
+        )
+
+    right_hand_index = marker_names.index(right_hand_marker)
+    left_hand_index = marker_names.index(left_hand_marker)
+    right_handle_index = marker_names.index(right_handle_marker)
+    left_handle_index = marker_names.index(left_handle_marker)
+    crank_index = dof_names.index(crank_torque_dof)
+    arm_indices = np.array(
+        [index for index in range(model.nbQ()) if index != crank_index], dtype=int
+    )
+    if arm_indices.size != 4:
+        raise ValueError(
+            "The bilateral reference model must have exactly four arm DoFs "
+            "and one crank DoF."
+        )
+
+    theta = theta_origin + direction * np.linspace(0.0, TWO_PI, sample_count)
+    current_q = (
+        np.zeros(model.nbQ())
+        if initial_q is None
+        else np.asarray(initial_q, dtype=float).reshape(-1)
+    )
+    if current_q.size != model.nbQ():
+        raise ValueError(f"initial_q must contain {model.nbQ()} values.")
+
+    q_samples = np.empty((model.nbQ(), sample_count))
+    residuals = np.empty((6, sample_count))
+    evaluations = 0
+    for index, theta_value in enumerate(theta):
+        target_q = current_q.copy()
+        target_q[crank_index] = theta_value
+        handles = model.markers(target_q)
+        right_target = _as_numpy(handles[right_handle_index]).reshape(-1)
+        left_target = _as_numpy(handles[left_handle_index]).reshape(-1)
+
+        def residual(arm_q):
+            q_values = target_q.copy()
+            q_values[arm_indices] = arm_q
+            markers = model.markers(q_values)
+            right_hand = _as_numpy(markers[right_hand_index]).reshape(-1)
+            left_hand = _as_numpy(markers[left_hand_index]).reshape(-1)
+            return np.concatenate((right_hand - right_target, left_hand - left_target))
+
+        result = least_squares(
+            residual,
+            target_q[arm_indices],
+            method="trf",
+            xtol=1e-13,
+            ftol=1e-13,
+            gtol=1e-13,
+            max_nfev=200,
+        )
+        current_q = target_q
+        current_q[arm_indices] = result.x
+        evaluations += int(result.nfev)
+        current_residual = residual(result.x)
+        if np.max(np.abs(current_residual)) > residual_tolerance:
+            raise RuntimeError(
+                "Bilateral hand-to-crank solve did not reach the requested "
+                f"tolerance at sample {index}: "
+                f"{np.max(np.abs(current_residual)):.3e}."
+            )
+        q_samples[:, index] = current_q
+        residuals[:, index] = current_residual
+
+    closure_delta = q_samples[:, -1] - q_samples[:, 0]
+    closure_delta[crank_index] -= direction * TWO_PI
+    return theta, q_samples, {
+        "kinematic_model": "bilateral_hand_crank",
+        "sample_count": int(sample_count),
+        "function_evaluations": int(evaluations),
+        "maximum_hand_handle_residual_m": float(np.max(np.abs(residuals))),
+        "maximum_cycle_closure_error": float(np.max(np.abs(closure_delta))),
+        "crank_dof_index": int(crank_index),
+    }
+
+
 @dataclass(frozen=True)
 class ReducedCyclingDynamics:
     """Fourier profile of the tangent-projected mechanical dynamics."""
@@ -1050,16 +1177,36 @@ def build_reduced_cycling_dynamics(
     direction: int = -1,
     initial_q: Sequence[float] | None = None,
 ) -> tuple[ReducedCyclingDynamics, dict]:
-    """Build the complete contact-consistent reduced mechanical model."""
+    """Build the complete contact-consistent reduced mechanical model.
+
+    A model exposing bilateral hand/handle markers is reduced from its two
+    physical hand-to-crank relations.  Historical unilateral models retain
+    their wheel-contact construction unchanged.
+    """
 
     start = perf_counter()
-    theta, q_samples, contact_audit = solve_cycling_contact_kinematics(
-        model_path,
-        sample_count=sample_count,
-        theta_origin=theta_origin,
-        direction=direction,
-        initial_q=initial_q,
-    )
+    biorbd = _load_numerical_biorbd()
+    model = biorbd.Model(str(Path(model_path)))
+    marker_names = set(_model_marker_names(model))
+    bilateral_markers = {
+        "right_hand", "left_hand", "right_handle", "left_handle"
+    }
+    if bilateral_markers.issubset(marker_names):
+        theta, q_samples, contact_audit = solve_bilateral_cycling_kinematics(
+            model_path,
+            sample_count=sample_count,
+            theta_origin=theta_origin,
+            direction=direction,
+            initial_q=initial_q,
+        )
+    else:
+        theta, q_samples, contact_audit = solve_cycling_contact_kinematics(
+            model_path,
+            sample_count=sample_count,
+            theta_origin=theta_origin,
+            direction=direction,
+            initial_q=initial_q,
+        )
     kinematics = ReducedCyclingKinematics.fit(
         theta, q_samples, order=kinematic_order
     )

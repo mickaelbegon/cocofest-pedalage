@@ -41,10 +41,37 @@ MADNLP_LINEAR_SOLVER_RUNTIME_NAMES = {
 # interface transports that enum as an integer and rejects IPOPT's conventional
 # quiet value 0.
 MADNLP_QUIET_PRINT_LEVEL = 6
+IPOPT_NATIVE_CALLBACKS = ("nlp_f", "nlp_g", "nlp_grad_f", "nlp_jac_g", "nlp_hess_l")
 
 
 class SolverBackendUnavailable(RuntimeError):
     """Raised when an optional Bioptim solver or CasADi plugin is unavailable."""
+
+
+def add_ipopt_performance_arguments(parser) -> None:
+    """Expose opt-in evaluator controls without changing the physical problem."""
+
+    parser.add_argument(
+        "--ipopt-function-transform", action="store_true",
+        help="Transform SX callbacks with cse/ref_count/const_folding; requires compatible Bioptim and CasADi 3.8.",
+    )
+    parser.add_argument(
+        "--ipopt-c-compile-callback", dest="ipopt_c_compile_callbacks", action="append", default=None,
+        choices=IPOPT_NATIVE_CALLBACKS,
+        help="Compile this callback separately (repeatable); requires --ipopt-c-cache-dir and excludes --ipopt-c-compile.",
+    )
+    parser.add_argument(
+        "--ipopt-c-compiler-flag", dest="ipopt_c_compiler_flags", action="append", default=None,
+        help="Repeat for each C compiler flag, e.g. --ipopt-c-compiler-flag=-O1; requires either C compilation mode.",
+    )
+    parser.add_argument(
+        "--ipopt-c-cache-dir", default=None,
+        help="Private persistent compiled-NLP cache directory; requires either C compilation mode.",
+    )
+    parser.add_argument(
+        "--ipopt-c-cache-name", default=None,
+        help="Compiled-NLP cache basename; requires either C compilation mode.",
+    )
 
 
 _IPOPT_HSL_LINEAR_SOLVERS = frozenset({"ma27", "ma57", "ma77", "ma86", "ma97"})
@@ -507,6 +534,11 @@ def configure_nlp_solver(
     ipopt_linear_solver: str = "ma57",
     ipopt_hsl_library: str | None = None,
     ipopt_c_compile: bool = False,
+    ipopt_c_compile_callbacks: tuple[str, ...] | list[str] | None = None,
+    ipopt_function_transform: bool = False,
+    ipopt_c_compiler_flags: tuple[str, ...] | list[str] | None = None,
+    ipopt_c_cache_dir: str | os.PathLike[str] | None = None,
+    ipopt_c_cache_name: str | None = None,
     ipopt_options: dict[str, Any] | None = None,
     fatrop_c_compile: bool = False,
     fatrop_structure_detection: str = "auto",
@@ -534,6 +566,28 @@ def configure_nlp_solver(
     """
 
     solver_name = solver_name.lower()
+    compile_options = {
+        name: value for name, value in (
+            ("compiler_flags", ipopt_c_compiler_flags),
+            ("cache_dir", ipopt_c_cache_dir),
+            ("cache_name", ipopt_c_cache_name),
+        ) if value is not None
+    }
+    if solver_name == "ipopt":
+        if ipopt_c_compile_callbacks is not None:
+            if ipopt_c_compile:
+                raise ValueError("ipopt_c_compile_callbacks and ipopt_c_compile are mutually exclusive.")
+            if ipopt_c_cache_dir is None or not str(ipopt_c_cache_dir).strip():
+                raise ValueError("ipopt_c_compile_callbacks requires ipopt_c_cache_dir.")
+            if (
+                not isinstance(ipopt_c_compile_callbacks, (list, tuple))
+                or not ipopt_c_compile_callbacks
+                or any(name not in IPOPT_NATIVE_CALLBACKS for name in ipopt_c_compile_callbacks)
+                or len(set(ipopt_c_compile_callbacks)) != len(ipopt_c_compile_callbacks)
+            ):
+                raise ValueError("ipopt_c_compile_callbacks must contain distinct IPOPT evaluation callback names.")
+        elif compile_options and not ipopt_c_compile:
+            raise ValueError("IPOPT compiler/cache options require ipopt_c_compile=True or ipopt_c_compile_callbacks.")
     if max_iterations < 1:
         raise ValueError("max_iterations must be strictly positive.")
     if solver_name == "fatrop" and max_iterations > 1000:
@@ -644,7 +698,29 @@ def configure_nlp_solver(
             solver.set_option_unsafe(str(configured_hsl_library), "hsllib")
         for name, value in (ipopt_options or {}).items():
             solver.set_option_unsafe(value, name)
-        solver.set_c_compile(ipopt_c_compile)
+        if ipopt_c_compile_callbacks is not None:
+            compile_setter = getattr(solver, "set_c_compile_callbacks", None)
+            if not callable(compile_setter):
+                raise SolverBackendUnavailable(
+                    "Separate IPOPT callback compilation requires Bioptim with set_c_compile_callbacks."
+                )
+            compile_setter(True, callbacks=tuple(ipopt_c_compile_callbacks), **compile_options)
+        elif compile_options:
+            try:
+                solver.set_c_compile(ipopt_c_compile, **compile_options)
+            except TypeError as error:
+                raise SolverBackendUnavailable(
+                    "This Bioptim revision does not support the requested IPOPT compiler/cache options."
+                ) from error
+        else:
+            solver.set_c_compile(ipopt_c_compile)
+        if ipopt_function_transform:
+            transform_setter = getattr(solver, "set_function_transform", None)
+            if not callable(transform_setter):
+                raise SolverBackendUnavailable(
+                    "IPOPT CasADi transformation requires Bioptim with set_function_transform and CasADi 3.8."
+                )
+            transform_setter(True)
         # Do not attach diagnostic attributes to Bioptim's solver wrapper.
         # Its attribute forwarding treats unknown attributes as IPOPT options,
         # so Python-only diagnostic names are later submitted to CasADi and

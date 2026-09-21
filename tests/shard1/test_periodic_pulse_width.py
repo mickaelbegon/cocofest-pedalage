@@ -235,6 +235,40 @@ def test_reduced_cadence_guard_predicts_interval_midpoint():
     assert float(predicted) == pytest.approx(-6.2)
 
 
+def test_reduced_cadence_rk4_guard_evolves_the_full_state_vector():
+    """The experimental map must use RK4, not the frozen-force Euler proxy."""
+
+    reduced_model = object.__new__(mhe_example.ReducedFesCyclingModel)
+    reduced_model.muscles_dynamics_model = [
+        SimpleNamespace(muscle_name=name) for name in ("a", "b", "c", "d")
+    ]
+
+    def dynamics(_time, states, *_args):
+        # Every state evolves, and omega has xdot = omega.  Exact omega at
+        # h=.1 from -6 is -6*exp(.1); RK4 is accurate through O(h^5).
+        return SimpleNamespace(dxdt=np.asarray(states, dtype=float))
+
+    reduced_model.dynamics = dynamics
+    state = np.zeros(22)
+    state[21] = -6.0
+    controller = SimpleNamespace(
+        model=reduced_model,
+        states=SimpleNamespace(cx=state),
+        controls=SimpleNamespace(cx=np.zeros(4)),
+        parameters=SimpleNamespace(cx=np.zeros(0)),
+        algebraic_states=SimpleNamespace(cx=np.zeros(0)),
+        numerical_timeseries=SimpleNamespace(cx=np.zeros(0)),
+        time=SimpleNamespace(cx=0.0),
+        get_nlp=object(),
+    )
+
+    predicted = mhe_example.reduced_internal_crank_velocity_rk4_constraint(
+        controller, shooting_interval_duration=0.1, fraction=1.0
+    )
+
+    assert float(predicted) == pytest.approx(-6.0 * np.exp(0.1), abs=1e-6)
+
+
 def test_reduced_cadence_guard_is_added_at_all_shooting_nodes(monkeypatch):
     captured = []
 
@@ -1200,6 +1234,7 @@ def test_assisted_hot_start_can_preserve_an_exact_prepared_primal():
             "acados",
             "--common-initial-solution",
             "prepared-rho.npz",
+            "--acados-assisted-hot-start",
             "--disable-full-dynamics-phase-one",
         ]
     )
@@ -1425,13 +1460,13 @@ def test_comparison_relays_acados_standard_warmup_skip(monkeypatch):
 
     monkeypatch.setattr(comparison_example, "_run_benchmark_case", fake_run)
     monkeypatch.setattr(comparison_example, "print_solver_overview", lambda _: None)
-
     cli_args = comparison_example.build_cli().parse_args(
         ["--solvers", "acados", "--acados-disable-standard-ipopt-warmup"]
     )
     comparison_example.main(
         solvers=("acados",),
         n_windows=1,
+        mechanical_formulation="full",
         common_initial_solution="common-reduced.npz",
         acados_disable_standard_ipopt_warmup=(
             cli_args.acados_disable_standard_ipopt_warmup
@@ -1444,6 +1479,7 @@ def test_comparison_relays_acados_standard_warmup_skip(monkeypatch):
         comparison_example.main(
             solvers=("acados",),
             n_windows=1,
+            mechanical_formulation="full",
             acados_disable_standard_ipopt_warmup=True,
         )
 
@@ -2621,7 +2657,7 @@ def test_compact_rho_output_is_opt_in():
     assert parser.parse_args(["--compact-rho-output"]).compact_rho_output is True
 
 
-def test_acados_example_defaults_to_the_assisted_periodic_profile():
+def test_acados_example_keeps_periodic_profile_but_assisted_preparation_is_opt_in():
     args = periodic_example.build_argument_parser().parse_args([])
     periodic_example.apply_assisted_hot_start_defaults(args)
     torque = periodic_example.crank_torque_diagnostics(
@@ -2641,12 +2677,10 @@ def test_acados_example_defaults_to_the_assisted_periodic_profile():
     assert args.acados_wheel_q_slack == 0.0
     assert args.acados_terminal_wheel_q_slack == 0.002
     assert args.warmup_ipopt_linear_solver == "mumps"
-    assert args.periodic_ipopt_refinement is True
-    assert (
-        args.acados_control_homotopy_radii
-        == periodic_example.DEFAULT_ASSISTED_CONTROL_HOMOTOPY_RADII
-    )
-    assert args.acados_control_homotopy_keep_final_radius is True
+    assert args.periodic_ipopt_refinement is False
+    assert args.acados_assisted_hot_start is False
+    assert args.acados_control_homotopy_radii is None
+    assert args.acados_control_homotopy_keep_final_radius is False
     assert args.acados_control_homotopy_stage_iterations == 100
     assert args.acados_control_homotopy_max_restarts == 1
     assert args.acados_cycle_boundary_homotopy_slacks is None
@@ -2659,14 +2693,16 @@ def test_acados_example_defaults_to_the_assisted_periodic_profile():
     assert ipopt_args.acados_control_homotopy_keep_final_radius is False
 
 
-def test_common_target_seed_enables_the_robust_acados_reference_preparation():
+def test_common_target_seed_assisted_preparation_requires_explicit_opt_in():
     parser = periodic_example.build_argument_parser()
-    args = parser.parse_args(["--common-initial-solution", "common.npz"])
+    args = parser.parse_args(["--common-initial-solution", "common.npz", "--acados-assisted-hot-start"])
 
     periodic_example.apply_assisted_hot_start_defaults(args)
 
     assert args.periodic_fes_warmup_projection_strategy == "rollout"
     assert args.full_dynamics_phase_one is True
+    assert args.disable_periodic_fes_warmup_projection is False
+    assert args.acados_control_homotopy_radii == periodic_example.DEFAULT_ASSISTED_CONTROL_HOMOTOPY_RADII
     assert args.acados_transfer_full_dynamics_rollout is False
     assert args.acados_transfer_irk_rollout is True
     assert args.acados_bind_first_node_fes_states is True
@@ -2873,6 +2909,51 @@ def test_common_initial_solution_metadata_rejects_an_incompatible_horizon(
     with pytest.raises(ValueError, match="cycles_per_window"):
         periodic_example._validate_common_initial_solution_metadata(
             seed, args, tmp_path / "common.npz"
+        )
+
+
+def test_common_seed_feasibility_probe_allows_only_objective_metadata_mismatch(
+    tmp_path,
+):
+    args = SimpleNamespace(
+        model_formulation="periodic_node",
+        mechanical_formulation="reduced",
+        cycles_per_window=1,
+        stimulations_per_cycle=30,
+        objective="fatigue",
+        objective_shape="quadratic",
+        constant_crank_torque=0.2,
+        torque_application="constant",
+        enforce_start_constraints=False,
+        acados_wheel_q_slack=0.0,
+        acados_terminal_wheel_q_slack=0.002,
+        terminal_wheel_q_reference_mode="absolute_initial",
+        pulse_width_scaling=0.0025,
+        pulse_width_active_set="none",
+        ode_solver="collocation",
+        nlp_ordering_strategy="time_major",
+        solver="ipopt",
+        warmup_cycles_consumed=1,
+    )
+    metadata = periodic_example._common_initial_solution_metadata(args)
+    metadata["objective"] = ["control"]
+    metadata["objective_shape"] = "linear"
+    seed = periodic_example._WarmupSolutionAdapter({}, {}, metadata=metadata)
+
+    periodic_example._validate_common_initial_solution_metadata(
+        seed,
+        args,
+        tmp_path / "checkpoint.npz",
+        feasibility_probe=True,
+    )
+
+    metadata["constant_crank_torque"] = 0.123
+    with pytest.raises(ValueError, match="signed crank torque"):
+        periodic_example._validate_common_initial_solution_metadata(
+            seed,
+            args,
+            tmp_path / "checkpoint.npz",
+            feasibility_probe=True,
         )
 
 
@@ -3307,6 +3388,73 @@ def test_isokinetic_rho_export_accepts_the_per_cycle_energy_reset(tmp_path):
     }
 
 
+def test_rho_export_ignores_the_free_pulse_width_slew_carrier_terminal_state(tmp_path):
+    args = periodic_example.build_argument_parser().parse_args([])
+    args.single_shot = False
+    args.cycles_per_window = 1
+    args.terminal_wheel_q_reference_mode = "absolute_initial"
+    args.n_windows = 2
+    output_path = tmp_path / "slew_carrier_rho_seed.npz"
+    summary = {
+        "success": True,
+        "covered_cycles": 2,
+        "state_traces": {
+            "theta": np.array([[0.0, -2.0 * np.pi, -4.0 * np.pi]]),
+            "pw_slew_carrier_Triceps": np.array([[150e-6, 215e-6, 131e-6]]),
+        },
+        "control_traces": {"Biceps": np.array([[150e-6, 160e-6]])},
+        "state_boundary_jumps": {
+            "available": True,
+            "boundary_count": 1,
+            "by_state": {
+                "theta": {"maximum_absolute_jump": 0.0},
+                # The terminal carrier is reached through the final free
+                # delta-PW control.  A new RHO constrains its first carrier
+                # from the executed PW, not from this nonphysical terminal.
+                "pw_slew_carrier_Triceps": {
+                    "maximum_absolute_jump": 84e-6,
+                },
+            },
+        },
+    }
+
+    periodic_example._save_receding_horizon_solution(output_path, summary, args)
+    seed = periodic_example._load_warmup_cache(output_path)
+
+    assert seed.metadata["state_boundary_maximum_absolute_jump"] == 0.0
+    assert seed.metadata["nonphysical_state_boundary_jumps"] == {
+        "pw_slew_carrier_Triceps": pytest.approx(84e-6)
+    }
+
+
+def test_rho_export_still_rejects_a_physical_state_seam_with_slew_carriers(tmp_path):
+    args = periodic_example.build_argument_parser().parse_args([])
+    args.single_shot = False
+    args.cycles_per_window = 1
+    args.n_windows = 2
+    summary = {
+        "success": True,
+        "covered_cycles": 2,
+        "state_traces": {"theta": np.array([[0.0, -2.0 * np.pi]])},
+        "control_traces": {"Biceps": np.array([[150e-6, 160e-6]])},
+        "state_boundary_jumps": {
+            "available": True,
+            "boundary_count": 1,
+            "by_state": {
+                "omega": {"maximum_absolute_jump": 2e-5},
+                "pw_slew_carrier_Triceps": {
+                    "maximum_absolute_jump": 84e-6,
+                },
+            },
+        },
+    }
+
+    with pytest.raises(RuntimeError, match="largest state seam"):
+        periodic_example._save_receding_horizon_solution(
+            tmp_path / "physical_seam.npz", summary, args
+        )
+
+
 def test_optional_rho_export_keeps_an_incomplete_prefix_diagnostic(tmp_path):
     args = periodic_example.build_argument_parser().parse_args([])
     args.single_shot = False
@@ -3548,6 +3696,31 @@ def test_standard_warmup_cache_signature_separates_assistance_and_resistance(
     assert assisted_signature != resistive_signature
 
 
+def test_standard_warmup_cache_signature_separates_configured_ding_variants(
+    tmp_path, monkeypatch,
+):
+    args = periodic_example.build_argument_parser().parse_args(
+        ["--signed-crank-torque", "0.2"]
+    )
+    model_path = tmp_path / "model.bioMod"
+    model_path.write_text("version 4\n")
+    conditions = {"scenario": "configured-variant"}
+    cycling_info = {"resistive_torque": object()}
+
+    monkeypatch.setenv("COCOFEST_CONFIGURED_MODEL_FINGERPRINT", "variant-a")
+    first = periodic_example._warmup_cache_signature(
+        args, model_path, conditions, cycling_info
+    )
+    metadata = periodic_example._standard_warmup_metadata(args)
+    assert metadata["muscle_parameter_fingerprint"] == "variant-a"
+
+    monkeypatch.setenv("COCOFEST_CONFIGURED_MODEL_FINGERPRINT", "variant-b")
+    second = periodic_example._warmup_cache_signature(
+        args, model_path, conditions, cycling_info
+    )
+    assert first != second
+
+
 def test_source_stamp_is_portable_and_content_addressed(tmp_path):
     first = tmp_path / "runner_a" / "model.bioMod"
     second = tmp_path / "runner_b" / "model.bioMod"
@@ -3703,7 +3876,7 @@ def test_periodic_ipopt_bridge_collocation_degree_uses_a_distinct_cache(
 
 def test_reduced_mechanics_uses_a_distinct_periodic_ipopt_cache(tmp_path, monkeypatch):
     parser = periodic_example.build_argument_parser()
-    full_args = parser.parse_args([])
+    full_args = parser.parse_args(["--mechanical-formulation", "full"])
     reduced_args = parser.parse_args(["--mechanical-formulation", "reduced"])
     model_path = tmp_path / "cycling.bioMod"
     model_path.write_text("version 4\n")
@@ -14454,6 +14627,291 @@ def test_periodic_collocation_ipopt_profile_is_available():
     assert comparison_args.periodic_ipopt_refinement_collocation_method == "radau"
 
 
+def test_reduced_velocity_guard_cli_is_tristate():
+    for parser in (
+        comparison_example.build_cli(),
+        periodic_example.build_argument_parser(),
+    ):
+        assert parser.parse_args([]).reduced_internal_crank_velocity_guard == "auto"
+        assert (
+            parser.parse_args(
+                ["--reduced-internal-crank-velocity-guard", "on"]
+            ).reduced_internal_crank_velocity_guard
+            == "on"
+        )
+        assert (
+            parser.parse_args(
+                ["--reduced-internal-crank-velocity-guard", "off"]
+            ).reduced_internal_crank_velocity_guard
+            == "off"
+        )
+
+
+def test_reduced_velocity_guard_auto_keeps_backend_history():
+    parser = periodic_example.build_argument_parser()
+    ipopt = parser.parse_args(
+        ["--solver", "ipopt", "--mechanical-formulation", "reduced"]
+    )
+    acados = parser.parse_args(
+        ["--solver", "acados", "--mechanical-formulation", "reduced"]
+    )
+    isokinetic = parser.parse_args(
+        [
+            "--solver",
+            "acados",
+            "--mechanical-formulation",
+            "reduced",
+            "--formulation",
+            "isokinetic",
+        ]
+    )
+
+    assert not periodic_example.resolve_reduced_internal_crank_velocity_guard(ipopt)
+    assert periodic_example.resolve_reduced_internal_crank_velocity_guard(acados)
+    assert not periodic_example.resolve_reduced_internal_crank_velocity_guard(isokinetic)
+
+
+@pytest.mark.parametrize("stimulations_per_cycle", (30, 50))
+def test_acados_qp_auto_uses_full_condensing_for_slew(stimulations_per_cycle):
+    parser = periodic_example.build_argument_parser()
+    args = parser.parse_args(
+        [
+            "--solver",
+            "acados",
+            "--stimulations-per-cycle",
+            str(stimulations_per_cycle),
+            "--pulse-width-max-step-us",
+            "100",
+        ]
+    )
+
+    assert args.acados_qp_solver == "auto"
+    assert (
+        periodic_example.resolve_acados_qp_solver(args)
+        == "FULL_CONDENSING_HPIPM"
+    )
+
+
+def test_acados_qp_auto_uses_partial_condensing_without_slew():
+    args = periodic_example.build_argument_parser().parse_args(
+        ["--solver", "acados"]
+    )
+
+    assert (
+        periodic_example.resolve_acados_qp_solver(args)
+        == "PARTIAL_CONDENSING_HPIPM"
+    )
+
+
+@pytest.mark.parametrize(
+    "override",
+    ("PARTIAL_CONDENSING_HPIPM", "FULL_CONDENSING_HPIPM"),
+)
+def test_acados_qp_explicit_override_is_preserved_with_slew(override):
+    args = periodic_example.build_argument_parser().parse_args(
+        [
+            "--solver",
+            "acados",
+            "--pulse-width-max-step-us",
+            "100",
+            "--acados-qp-solver",
+            override,
+        ]
+    )
+
+    assert periodic_example.resolve_acados_qp_solver(args) == override
+
+
+def test_acados_qp_auto_is_resolved_before_codegen_signature():
+    parser = periodic_example.build_argument_parser()
+    automatic = parser.parse_args(
+        ["--solver", "acados", "--pulse-width-max-step-us", "100"]
+    )
+    explicit = parser.parse_args(
+        [
+            "--solver",
+            "acados",
+            "--pulse-width-max-step-us",
+            "100",
+            "--acados-qp-solver",
+            "FULL_CONDENSING_HPIPM",
+        ]
+    )
+    automatic.acados_qp_solver = periodic_example.resolve_acados_qp_solver(automatic)
+
+    assert periodic_example._codegen_signature(
+        automatic
+    ) == periodic_example._codegen_signature(explicit)
+
+
+def test_comparison_exposes_acados_qp_auto_and_override():
+    parser = comparison_example.build_cli()
+
+    assert parser.parse_args([]).acados_qp_solver == "auto"
+    assert (
+        parser.parse_args(
+            ["--acados-qp-solver", "FULL_CONDENSING_HPIPM"]
+        ).acados_qp_solver
+        == "FULL_CONDENSING_HPIPM"
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("reduced_internal_crank_velocity_guard", False),
+        ("reduced_internal_crank_velocity_guard_scheme", "other"),
+        ("reduced_internal_crank_velocity_guard_target_rad_s", -1.0),
+        ("reduced_internal_crank_velocity_guard_fast_margin_rad_s", 2.0),
+        ("reduced_internal_crank_velocity_guard_slow_margin_rad_s", 2.0),
+        ("reduced_internal_crank_velocity_guard_interval_s", 0.5),
+    ),
+)
+def test_common_seed_rejects_a_different_reduced_velocity_guard(
+    tmp_path, field, replacement
+):
+    parser = periodic_example.build_argument_parser()
+    producer = parser.parse_args(
+        [
+            "--solver",
+            "ipopt",
+            "--mechanical-formulation",
+            "reduced",
+            "--reduced-internal-crank-velocity-guard",
+            "on",
+        ]
+    )
+    producer.terminal_wheel_q_reference_mode = "absolute_initial"
+    metadata = periodic_example._common_initial_solution_metadata(producer)
+    metadata[field] = replacement
+    seed = periodic_example._WarmupSolutionAdapter({}, {}, metadata=metadata)
+
+    with pytest.raises(ValueError, match=field):
+        periodic_example._validate_common_initial_solution_metadata(
+            seed, producer, tmp_path / "cycle1.npz"
+        )
+
+
+def test_ipopt_and_acados_accept_the_same_explicit_guard_contract(tmp_path):
+    parser = periodic_example.build_argument_parser()
+    shared = [
+        "--mechanical-formulation",
+        "reduced",
+        "--formulation",
+        "dynamic",
+        "--reduced-internal-crank-velocity-guard",
+        "on",
+    ]
+    producer = parser.parse_args(["--solver", "ipopt", *shared])
+    consumer = parser.parse_args(["--solver", "acados", *shared])
+    for args in (producer, consumer):
+        args.terminal_wheel_q_reference_mode = "absolute_initial"
+    seed = periodic_example._WarmupSolutionAdapter(
+        {},
+        {},
+        metadata=periodic_example._common_initial_solution_metadata(producer),
+    )
+
+    periodic_example._validate_common_initial_solution_metadata(
+        seed, consumer, tmp_path / "cycle1.npz"
+    )
+    periodic_example.validate_acados_ipopt_common_seed_provenance(
+        seed, consumer, tmp_path / "cycle1.npz"
+    )
+
+
+def test_guard_changes_target_cache_and_codegen_signatures(tmp_path, monkeypatch):
+    parser = periodic_example.build_argument_parser()
+    disabled = parser.parse_args(
+        [
+            "--solver",
+            "acados",
+            "--mechanical-formulation",
+            "reduced",
+            "--acados-seed-cache-tag",
+            "guard",
+            "--reduced-internal-crank-velocity-guard",
+            "off",
+        ]
+    )
+    enabled = parser.parse_args(
+        [
+            "--solver",
+            "acados",
+            "--mechanical-formulation",
+            "reduced",
+            "--acados-seed-cache-tag",
+            "guard",
+            "--reduced-internal-crank-velocity-guard",
+            "on",
+        ]
+    )
+    model_path = tmp_path / "cycling.bioMod"
+    model_path.write_text("version 4\n")
+    monkeypatch.setattr(periodic_example, "_cache_root", lambda: tmp_path)
+
+    signature_functions = (
+        periodic_example._continuation_cache_signature,
+        periodic_example._horizon_seed_cache_signature,
+        periodic_example._codegen_signature,
+    )
+    for signature in signature_functions:
+        assert signature(disabled) != signature(enabled)
+    assert periodic_example._periodic_ipopt_refinement_cache_path(
+        disabled, model_path
+    ) != periodic_example._periodic_ipopt_refinement_cache_path(enabled, model_path)
+    assert periodic_example._acados_seed_cache_path(
+        disabled, model_path
+    ) != periodic_example._acados_seed_cache_path(enabled, model_path)
+
+
+def test_comparison_forwards_one_guard_to_exact_cycle1_producer_and_consumer(
+    monkeypatch, tmp_path
+):
+    captured = {}
+
+    def fake_run(solver_name, args, **_):
+        captured[solver_name] = args
+        return {}
+
+    monkeypatch.setattr(comparison_example, "_run_benchmark_case", fake_run)
+    monkeypatch.setattr(comparison_example, "print_solver_overview", lambda _: None)
+    monkeypatch.setattr(comparison_example, "print_comparison", lambda *_, **__: None)
+
+    comparison_example.main(
+        solvers=("ipopt", "acados"),
+        n_windows=1,
+        mechanical_formulation="reduced",
+        formulation="dynamic",
+        experimental_reduced_acados=True,
+        common_initial_solution=tmp_path / "cycle1.npz",
+    )
+
+    assert captured["ipopt"].reduced_internal_crank_velocity_guard == "on"
+    assert captured["acados"].reduced_internal_crank_velocity_guard == "on"
+
+
+def test_comparison_enables_guard_for_ipopt_cycle1_output(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_run(solver_name, args, **_):
+        captured[solver_name] = args
+        return {}
+
+    monkeypatch.setattr(comparison_example, "_run_benchmark_case", fake_run)
+    monkeypatch.setattr(comparison_example, "print_solver_overview", lambda _: None)
+
+    comparison_example.main(
+        solvers=("ipopt",),
+        n_windows=1,
+        mechanical_formulation="reduced",
+        formulation="dynamic",
+        common_initial_solution_output=tmp_path / "cycle1.npz",
+    )
+
+    assert captured["ipopt"].reduced_internal_crank_velocity_guard == "on"
+
+
 def test_scientific_radau5_profile_is_fixed_and_shared_by_nlp_solvers(monkeypatch):
     captured = {}
 
@@ -14468,6 +14926,7 @@ def test_scientific_radau5_profile_is_fixed_and_shared_by_nlp_solvers(monkeypatc
         ["--benchmark-profile", "scientific-radau5"]
     )
     assert cli_args.ipopt_profile == "scientific-radau5"
+    assert comparison_example.build_cli().parse_args([]).ipopt_profile == "scientific-radau5"
 
     comparison_example.main(
         solvers=("ipopt", "madnlp"),
@@ -14499,6 +14958,7 @@ def test_scientific_radau5_profile_is_fixed_and_shared_by_nlp_solvers(monkeypatc
             solvers=("ipopt", "madnlp"),
             n_windows=1,
             ipopt_profile=profile,
+            stimulations_per_cycle=50,
         )
         for solver_name in ("ipopt", "madnlp"):
             args = captured[solver_name]
@@ -14516,6 +14976,34 @@ def test_scientific_radau5_profile_is_fixed_and_shared_by_nlp_solvers(monkeypatc
             ipopt_profile="scientific-radau5",
             ipopt_collocation_degree=3,
         )
+
+
+def test_radau3_and_radau4_are_rejected_at_30hz_but_available_at_50hz():
+    radau3 = SimpleNamespace(
+        stimulations_per_cycle=30,
+        ode_solver="collocation",
+        collocation_method="radau",
+        collocation_degree=3,
+    )
+    with pytest.raises(ValueError, match="Radau-3 at 30 Hz"):
+        comparison_example._require_supported_30hz_collocation("ipopt", radau3)
+
+    radau3.stimulations_per_cycle = 50
+    comparison_example._require_supported_30hz_collocation("ipopt", radau3)
+
+    radau5 = SimpleNamespace(
+        stimulations_per_cycle=30,
+        ode_solver="collocation",
+        collocation_method="radau",
+        collocation_degree=5,
+    )
+    comparison_example._require_supported_30hz_collocation("ipopt", radau5)
+
+    direct_args = periodic_example.build_argument_parser().parse_args(
+        ["--ode-solver", "collocation", "--collocation-degree", "3"]
+    )
+    with pytest.raises(ValueError, match="Radau-3/4 at 30 Hz is disabled"):
+        periodic_example.solve_case(direct_args, echo=False)
 
 
 def test_comparison_cli_accepts_acados_best_iterate_retry_options():
@@ -14550,6 +15038,7 @@ def test_comparison_main_forwards_acados_best_iterate_retry_options(monkeypatch)
     comparison_example.main(
         solvers=("acados",),
         n_windows=1,
+        mechanical_formulation="full",
         acados_store_iterates=True,
         acados_maxiter_retries=1,
         acados_maxiter_retry_iterations=20,
@@ -14574,6 +15063,19 @@ def test_refinement_initial_guess_expands_shooting_nodes_for_collocation():
     _copy_refinement_initial_guesses(source, target, has_terminal_node=True)
 
     np.testing.assert_allclose(target["q"].init, np.linspace(0.0, 2.0, 9)[None, :])
+
+
+def test_refinement_initial_guess_coarsens_a_higher_degree_collocation_grid():
+    source = {
+        "Cn": SimpleNamespace(init=np.linspace(0.0, 1.0, 181)[None, :]),
+    }
+    target = {
+        "Cn": SimpleNamespace(init=np.zeros((1, 121))),
+    }
+
+    _copy_refinement_initial_guesses(source, target, has_terminal_node=True)
+
+    np.testing.assert_allclose(target["Cn"].init, np.linspace(0.0, 1.0, 121)[None, :])
 
 
 def test_fes_nmpc_reports_incomplete_export_as_solver_failure():

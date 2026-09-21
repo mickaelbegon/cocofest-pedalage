@@ -62,6 +62,7 @@ from cocofest.optimization.receding_horizon_initial_guess import (
     snapshot_initial_guess,
 )
 from cocofest.optimization.solver_backends import (
+    add_ipopt_performance_arguments,
     NLP_SOLVER_NAMES,
     configure_nlp_solver,
 )
@@ -81,10 +82,27 @@ from cocofest.optimization.endurance_rollout_ocp import (
     endurance_rollout_signature_fields,
     resolve_endurance_rollout_options,
 )
+from cocofest.optimization.muscle_horizon_ocp import (
+    add_muscle_horizon_cli,
+    muscle_horizon_signature_fields,
+    resolve_muscle_horizon_options,
+)
 from cocofest.optimization.muscle_reserve import (
     DEFAULT_SMOOTH_MIN_TEMPERATURE,
     capacity_reserve_metrics,
     physiological_capacity_ratios,
+)
+from cocofest.optimization.pulse_width_slew import (
+    PREFIX as PW_SLEW_PREFIX, add_pulse_width_slew_cli,
+    pulse_width_slew_signature, validate_max_step, attach_slew_audit,
+    validate_slew_formulation, validate_slew_regularization,
+)
+from cocofest.optimization.pulse_width_interpolation import validate_odd_interpolation
+from cocofest.optimization.pulse_width_rate import (
+    CONTROL_MODE as PW_RATE_MODE,
+    CONTROL_REPRESENTATION as PW_RATE_REPRESENTATION,
+    physical_pulse_controls,
+    validate_rate_mode,
 )
 from cocofest.dynamics.reduced_cycling import (
     ReducedCyclingDynamics,
@@ -93,20 +111,20 @@ from cocofest.dynamics.reduced_cycling import (
 
 try:
     from .cycling_pulse_width_mhe import (
+        MyCyclicNMPC,
         prepare_nmpc,
         project_full_first_node_initial_guess_to_contact,
         set_fes_model,
         validate_and_clip_pulse_width_seed,
     )
-        MyCyclicNMPC,
 except ImportError:
     from cycling_pulse_width_mhe import (
+        MyCyclicNMPC,
         prepare_nmpc,
         project_full_first_node_initial_guess_to_contact,
         set_fes_model,
         validate_and_clip_pulse_width_seed,
     )
-        MyCyclicNMPC,
 
 OBJECTIVE_TO_WEIGHT_INDEX = {"force": 0, "fatigue": 1, "control": 2}
 DEFAULT_CRANK_ASSISTANCE_NM = 0.2
@@ -727,6 +745,20 @@ def should_run_standard_ipopt_warmup(
     )
 
 
+def validate_acados_ipopt_initialization_policy(args: argparse.Namespace) -> None:
+    """Prevent a dynamic ACADOS OCP from starting without an IPOPT solution."""
+
+    if getattr(args, "solver", None) != "acados":
+        return
+    if getattr(args, "formulation", "dynamic") != "dynamic":
+        return
+    if getattr(args, "common_initial_solution", None) is None:
+        raise ValueError(
+            "A dynamic ACADOS OCP requires --common-initial-solution with the "
+            "certified IPOPT solution of cycle 1 for the exact target problem."
+        )
+
+
 def parse_crank_assistance(raw_assistance: str) -> float:
     """Convert assistance, or ``signed:<N.m>``, to the cycling torque convention."""
 
@@ -776,12 +808,22 @@ def crank_torque_diagnostics(
 
 
 def apply_assisted_hot_start_defaults(args: argparse.Namespace) -> None:
-    """Enable the robust ACADOS reference preparation without affecting NLPs."""
+    """Preserve an exact common primal unless assisted preparation is requested."""
 
     assisted_hot_start = bool(
-        getattr(args, "acados_assisted_hot_start", True) and args.solver == "acados"
+        getattr(args, "acados_assisted_hot_start", False) and args.solver == "acados"
     )
     common_target_seed = bool(getattr(args, "common_initial_solution", None))
+    if (
+        args.solver == "acados"
+        and getattr(args, "formulation", "dynamic") == "dynamic"
+        and common_target_seed
+        and not assisted_hot_start
+    ):
+        # The common path applies a FES projection independently of Phase I.
+        # Leaving that enabled would still mutate the pristine IPOPT seed even
+        # though assisted continuation is off. Its provenance is checked later.
+        args.disable_periodic_fes_warmup_projection = True
     if (
         assisted_hot_start
         and common_target_seed
@@ -973,6 +1015,26 @@ def build_cost_fun_weight(objectives: set[str]) -> list[int]:
     return weights
 
 
+def pulse_width_rate_signature(args: argparse.Namespace) -> dict[str, object]:
+    """Return the structural PW-command identity used by caches and seeds."""
+
+    mode = getattr(args, "pulse_width_control_mode", "direct")
+    maximum_rate_us_per_s = getattr(
+        args, "pulse_width_max_rate_us_per_s", None
+    )
+    return {
+        "pulse_width_control_mode": mode,
+        "pulse_width_control_representation": (
+            PW_RATE_REPRESENTATION if mode == PW_RATE_MODE else "direct_zoh_v1"
+        ),
+        "pulse_width_max_rate_us_per_s": (
+            None
+            if maximum_rate_us_per_s is None
+            else float(maximum_rate_us_per_s)
+        ),
+    }
+
+
 def default_worker_threads() -> int:
     """Return the physical cores available to this process when detectable."""
 
@@ -998,6 +1060,10 @@ def default_worker_threads() -> int:
 
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--acados-ding-local-reduction", action="store_true",
+        help="Experimental native IRK Ding reduction retaining F,A with exact discrete affine profiles.",
+    )
     parser.add_argument(
         "--n-windows",
         type=int,
@@ -1049,11 +1115,19 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mechanical-formulation",
         choices=("full", "reduced"),
-        default="full",
+        default="reduced",
         help=(
-            "Use the full three-coordinate constrained mechanics or the "
-            "experimental theta/omega tangent-projected mechanics. The "
-            "reduced formulation currently targets IPOPT and MadNLP validation."
+            "Use the reduced theta/omega tangent-projected mechanics (default) "
+            "or select full explicitly for the three-coordinate constrained "
+            "mechanics. Reduced mode targets the online RHO formulation."
+        ),
+    )
+    parser.add_argument(
+        "--bilateral-reduced",
+        action="store_true",
+        help=(
+            "Duplicate reduced right-side muscles for a left side shifted by "
+            "pi radians. Requires reduced dynamic mechanics."
         ),
     )
     parser.add_argument(
@@ -1163,6 +1237,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="Dimensionless smooth-min temperature for the terminal reserve proxy.",
     )
     add_endurance_rollout_cli(parser)
+    add_muscle_horizon_cli(parser)
+    add_pulse_width_slew_cli(parser)
     parser.add_argument(
         "--control-regularization-weight",
         type=float,
@@ -1268,6 +1344,25 @@ def build_argument_parser() -> argparse.ArgumentParser:
         type=float,
         default=1 / 400,
         help="Scaling divisor, in seconds, for pulse-width controls.",
+    )
+    parser.add_argument(
+        "--pulse-width-control-mode",
+        choices=("direct", PW_RATE_MODE),
+        default="direct",
+        help=(
+            "Represent each applied pulse width directly as a ZOH control, or "
+            "as a continuous state driven by a bounded rate control."
+        ),
+    )
+    parser.add_argument(
+        "--pulse-width-max-rate-us-per-s",
+        type=float,
+        default=None,
+        help=(
+            "Symmetric physical bound on d(PW)/dt in microseconds per second. "
+            "Required with --pulse-width-control-mode=rate_state and rejected "
+            "in direct mode."
+        ),
     )
     parser.add_argument(
         "--pulse-width-active-set",
@@ -1403,6 +1498,16 @@ def build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--preserve-warmup-pulse-width-seed",
+        action="store_true",
+        help=(
+            "Preserve the bridge's physical PW samples when initializing a "
+            "target-only slew/rate representation. Intended for controlled "
+            "same-seed representation benchmarks; auxiliary variables are "
+            "rebuilt around that trace."
+        ),
+    )
+    parser.add_argument(
         "--common-initial-solution",
         type=Path,
         default=None,
@@ -1429,6 +1534,16 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "Bind every first-node state bound to the first state stored in "
             "--common-initial-solution. Use this when the seed is a continuation "
             "from the terminal state of another OCP."
+        ),
+    )
+    parser.add_argument(
+        "--common-initial-solution-feasibility-probe",
+        action="store_true",
+        help=(
+            "Use a continuation seed to test one frozen RHO with a different "
+            "objective. This preserves the model, fatigue state, load and "
+            "constraints, but is an allocation-feasibility diagnostic rather "
+            "than an endurance-policy result. Requires one recentered RHO."
         ),
     )
     parser.add_argument(
@@ -1568,12 +1683,17 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--acados-qp-solver",
         choices=(
+            "auto",
             "PARTIAL_CONDENSING_HPIPM",
             "FULL_CONDENSING_HPIPM",
             "FULL_CONDENSING_QPOASES",
         ),
-        default="PARTIAL_CONDENSING_HPIPM",
-        help="QP solver backend used by ACADOS.",
+        default="auto",
+        help=(
+            "QP solver backend used by ACADOS. auto selects full-condensing "
+            "HPIPM when an adjacent pulse-width slew constraint is active and "
+            "partial-condensing HPIPM otherwise."
+        ),
     )
     parser.add_argument(
         "--acados-qp-cond-n",
@@ -2348,6 +2468,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "Defaults to --max-ipopt-iterations."
         ),
     )
+    add_ipopt_performance_arguments(parser)
     parser.add_argument(
         "--ipopt-c-compile",
         action="store_true",
@@ -2611,6 +2732,17 @@ def build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--acados-rho-initial-iteration-budget",
+        type=int,
+        default=None,
+        help=(
+            "Opt-in SQP budget for the first attempt of each physical RHO >= 2. "
+            "RHO 1 and same-RHO retries retain --max-acados-iterations. "
+            "Requires --acados-ipopt-recovery and --retry-failed-rho-without-advance; "
+            "certification tolerances and the separate hybrid fallback gate are unchanged."
+        ),
+    )
+    parser.add_argument(
         "--acados-forced-iteration-cap-rhos",
         type=parse_positive_window_indices,
         default=(),
@@ -2843,17 +2975,17 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--acados-assisted-hot-start",
         dest="acados_assisted_hot_start",
         action="store_true",
-        default=True,
+        default=False,
         help=(
-            "Use the measured fixed-control/logarithmic-radius continuation for "
-            "the assisted ACADOS first window (enabled by default)."
+            "Opt into FES/Phase-I preparation and fixed-control/logarithmic-radius "
+            "continuation; the default preserves the common IPOPT primal."
         ),
     )
     assisted_hot_start_group.add_argument(
         "--disable-acados-assisted-hot-start",
         dest="acados_assisted_hot_start",
         action="store_false",
-        help="Disable the default assisted ACADOS control continuation.",
+        help="Keep assisted ACADOS preparation disabled (the default).",
     )
     parser.add_argument(
         "--acados-fixed-control-tolerance",
@@ -3121,10 +3253,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--periodic-ipopt-refinement",
         action="store_true",
-        default=True,
+        default=False,
         help=(
-            "Run a one-window IPOPT refinement on the periodic formulation "
-            "before handing the initial guess to ACADOS (enabled by default)."
+            "Opt into a one-window IPOPT refinement on the periodic formulation "
+            "before handing the initial guess to ACADOS (disabled by default)."
         ),
     )
     parser.add_argument(
@@ -3139,7 +3271,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--disable-periodic-ipopt-refinement",
         action="store_true",
-        help="Skip the periodic IPOPT refinement and use only the projected standard warmup.",
+        help="Skip the optional periodic IPOPT refinement (already disabled by default).",
     )
     parser.add_argument(
         "--periodic-ipopt-refinement-iterations",
@@ -3311,6 +3443,25 @@ def build_argument_parser() -> argparse.ArgumentParser:
         dest="enforce_start_constraints",
         action="store_false",
         help="Disable the start-of-window posture constraints.",
+    )
+    parser.add_argument(
+        "--reduced-internal-crank-velocity-guard",
+        choices=("auto", "on", "off"),
+        default="auto",
+        help=(
+            "Control the reduced midpoint crank-velocity inequality. 'auto' "
+            "preserves the historical backend-specific behavior; use 'on' for "
+            "both an IPOPT cycle-1 seed and its ACADOS target."
+        ),
+    )
+    parser.add_argument(
+        "--reduced-internal-crank-velocity-rk4-fraction",
+        type=float,
+        default=None,
+        help=(
+            "Experimental full-state RK4 cadence guard at a fraction of each "
+            "reduced shooting interval; requires the internal guard."
+        ),
     )
     parser.add_argument(
         "--full-contact-constraints-terminal",
@@ -3514,6 +3665,13 @@ def _scientific_ocp_source_stamps(repository_root: Path) -> list[dict]:
         "cocofest/optimization/muscle_reserve.py",
         "cocofest/optimization/endurance_rollout_objective.py",
         "cocofest/optimization/endurance_rollout_ocp.py",
+        "cocofest/optimization/adaptive_moment_rollout.py",
+        "cocofest/optimization/rho_adaptive_moment_policy.py",
+        "cocofest/optimization/muscle_horizon_objective.py",
+        "cocofest/optimization/muscle_horizon_ocp.py",
+        "cocofest/optimization/pulse_width_slew.py",
+        "cocofest/optimization/pulse_width_interpolation.py",
+        "cocofest/optimization/pulse_width_rate.py",
         "cocofest/optimization/isokinetic_cycling.py",
         "cocofest/models/reduced_cycling_model.py",
         "cocofest/dynamics/reduced_cycling.py",
@@ -3568,6 +3726,23 @@ def _target_independent_warmup_conditions(
     warmup_conditions["pulse_width_active_set_mode"] = "none"
     warmup_conditions["pulse_width_active_threshold"] = 0.01
     warmup_conditions["pulse_width_active_margin"] = 3
+    # The auxiliary local lifting belongs to the target periodic OCP.  A
+    # standard warm-up has no preceding executed cycle to bind and is reused
+    # only as a physical-state/PW seed; adding the lift here needlessly makes
+    # that otherwise generic bridge a different constrained problem.
+    warmup_conditions["pulse_width_max_step_s"] = None
+    warmup_conditions["pulse_width_slew_weight"] = 0.0
+    warmup_conditions["pulse_width_odd_interpolation"] = False
+    # The historical bridge remains a direct-PW OCP.  Its physical command
+    # trace is promoted to the target PW state by the target builder, so both
+    # A/B arms start from the same applied widths without pretending that the
+    # bridge had rate controls.
+    warmup_conditions["pulse_width_control_mode"] = "direct"
+    warmup_conditions["pulse_width_max_rate_s_per_s"] = None
+    # This generic bridge is not the accepted cycle-1 target solve. Keep the
+    # target-only midpoint guard out of it; exact ACADOS initialization is
+    # certified later through the common-seed contract.
+    warmup_conditions["enforce_reduced_internal_crank_velocity_guard"] = False
     return warmup_conditions
 
 
@@ -3575,6 +3750,11 @@ def _warmup_cacheable_conditions(simulation_conditions: dict) -> dict:
     """Drop target-only runtime objects from the standard warmup signature."""
 
     conditions = dict(simulation_conditions)
+    # Preserve historical unilateral cache keys while giving bilateral OCPs a
+    # distinct identity. A bilateral model changes both state and control
+    # dimensions, so it can never safely reuse a unilateral warmup.
+    if not conditions.get("bilateral_reduced", False):
+        conditions.pop("bilateral_reduced", None)
     # The reduced mechanical surrogate is used by the periodic target OCP,
     # not by the standard full-mechanics IPOPT bridge. Besides being target
     # specific, it contains CasADi functions and is not JSON serializable.
@@ -3582,6 +3762,9 @@ def _warmup_cacheable_conditions(simulation_conditions: dict) -> dict:
     rollout = conditions.pop("endurance_rollout_options", None)
     if rollout is not None:
         conditions["endurance_rollout"] = rollout.metadata()
+    # This terminal target policy is absent from the standard full-mechanics
+    # bridge and can contain CasADi-incompatible runtime objects.
+    conditions.pop("muscle_horizon_options", None)
     return conditions
 
 
@@ -3594,7 +3777,13 @@ def _warmup_cache_signature(
     repository_root = Path(__file__).resolve().parents[3]
     payload = {
         "kind": "warmup",
-        "nmpc_builder_version": 4,
+        "nmpc_builder_version": 5,
+        # Configured variants patch Ding factories at runtime. Include the
+        # declared effective-parameter fingerprint when present so variants
+        # sharing a .bioMod never reuse a cross-parameter warmup.
+        "configured_muscle_parameter_fingerprint": os.environ.get(
+            "COCOFEST_CONFIGURED_MODEL_FINGERPRINT"
+        ),
         "model_path": _source_stamp(model_path),
         "cycles_per_window": args.cycles_per_window,
         "stimulations_per_cycle": args.stimulations_per_cycle,
@@ -3618,6 +3807,7 @@ def _warmup_cache_signature(
         "state_scaling": args.state_scaling,
         "pulse_width_scaling": args.pulse_width_scaling,
         "warmup_ipopt_linear_solver": _warmup_ipopt_linear_solver(args),
+        "warmup_transcription": _standard_warmup_transcription_metadata(args),
         "simulation_conditions": _warmup_cacheable_conditions(
             simulation_conditions
         ),
@@ -3647,13 +3837,31 @@ def _warmup_cache_signature(
     return _short_hash(payload)
 
 
+def _standard_warmup_transcription_metadata(args: argparse.Namespace) -> dict[str, object]:
+    """Return the independently documented transcription of an IPOPT warmup.
+
+    A warmup is a numerical solve, not merely a serialization convenience.  It
+    must consequently meet the same minimum integration standard as the RHO it
+    initializes.  Radau-3 gave unacceptable disagreement with the independent
+    DOP853 replay at 30 Hz, so the bridge is deliberately fixed to Radau-5.
+    Keeping this independent of the target transcription also makes it a common
+    high-quality seed for controlled Radau-degree validation experiments.
+    """
+
+    return {
+        "ode_solver": "collocation",
+        "collocation_degree": 5,
+        "collocation_method": "radau",
+    }
+
+
 def _standard_warmup_metadata(args: argparse.Namespace) -> dict:
     torque = crank_torque_diagnostics(
         args.constant_crank_torque,
         args.wheel_qdot_regularization_target,
     )
-    return {
-        "schema_version": 1,
+    metadata = {
+        "schema_version": 2,
         "kind": "standard_ipopt_warmup",
         "cycles_per_window": int(args.cycles_per_window),
         "stimulations_per_cycle": int(args.stimulations_per_cycle),
@@ -3664,17 +3872,23 @@ def _standard_warmup_metadata(args: argparse.Namespace) -> dict:
         "signed_crank_torque_nm": float(args.constant_crank_torque),
         "crank_torque_role": torque["role"],
         "torque_application": str(args.torque_application),
-        "producer_ode_solver": str(args.ode_solver),
-        "producer_collocation_degree": (
-            None
-            if getattr(args, "collocation_degree", None) is None
-            else int(args.collocation_degree)
-        ),
-        "producer_collocation_method": getattr(args, "collocation_method", None),
+        "producer_ode_solver": _standard_warmup_transcription_metadata(args)[
+            "ode_solver"
+        ],
+        "producer_collocation_degree": _standard_warmup_transcription_metadata(
+            args
+        )["collocation_degree"],
+        "producer_collocation_method": _standard_warmup_transcription_metadata(
+            args
+        )["collocation_method"],
         "activate_passive_force_relationship": bool(
             getattr(args, "activate_passive_force_relationship", True)
         ),
     }
+    configured_fingerprint = os.environ.get("COCOFEST_CONFIGURED_MODEL_FINGERPRINT")
+    if configured_fingerprint:
+        metadata["muscle_parameter_fingerprint"] = configured_fingerprint
+    return metadata
 
 
 def _validate_standard_warmup_seed(
@@ -3720,6 +3934,21 @@ def _validate_standard_warmup_seed(
             f"Warmup seed '{seed_path}' is incompatible with the target: "
             f"{mismatches}."
         )
+
+    if int(args.stimulations_per_cycle) == 30:
+        required = _standard_warmup_transcription_metadata(args)
+        observed = {
+            "ode_solver": metadata.get("producer_ode_solver"),
+            "collocation_degree": metadata.get("producer_collocation_degree"),
+            "collocation_method": metadata.get("producer_collocation_method"),
+        }
+        if observed != required:
+            raise ValueError(
+                f"Warmup seed '{seed_path}' does not document the required "
+                f"Radau-5 transcription at 30 Hz: observed={observed}, "
+                f"required={required}. Rebuild the warmup instead of reusing "
+                "an under-resolved or undocumented seed."
+            )
 
     source_torque = metadata.get("signed_crank_torque_nm")
     target_torque = float(args.constant_crank_torque)
@@ -3785,7 +4014,7 @@ def _validate_standard_warmup_seed(
     has_full_mechanics = "q" in states and "qdot" in states
     has_reduced_mechanics = "theta" in states and "omega" in states
     mechanics_compatible = has_full_mechanics or (
-        getattr(args, "mechanical_formulation", "full") == "reduced"
+        getattr(args, "mechanical_formulation", "reduced") == "reduced"
         and has_reduced_mechanics
     )
     if (
@@ -3922,6 +4151,9 @@ def _periodic_ipopt_refinement_cache_path(
         "torque_application": args.torque_application,
         "state_scaling": args.state_scaling,
         "pulse_width_scaling": args.pulse_width_scaling,
+        **pulse_width_slew_signature(args),
+        **pulse_width_rate_signature(args),
+        **reduced_internal_crank_velocity_guard_signature(args),
         "standard_warmup_transfer": args.acados_standard_warmup_transfer,
         "fatigue_warmstart_mode": args.acados_fatigue_warmstart_mode,
         "use_sx": args.periodic_ipopt_refinement_use_sx,
@@ -3957,8 +4189,17 @@ def _periodic_ipopt_refinement_cache_path(
             _source_stamp(
                 repository_root / "cocofest" / "models" / "dynamical_model.py"
             ),
+            _source_stamp(
+                repository_root
+                / "cocofest"
+                / "optimization"
+                / "pulse_width_slew.py"
+            ),
+            _source_stamp(repository_root / "cocofest" / "optimization" / "pulse_width_interpolation.py"),
         ],
     }
+    if getattr(args, "bilateral_reduced", False):
+        payload["bilateral_reduced"] = True
     if cache_version >= 3:
         payload["wheel_cycle_boundary_slack"] = args.acados_terminal_wheel_q_slack
     if cache_version >= 4:
@@ -4029,6 +4270,9 @@ def _acados_seed_cache_path(args: argparse.Namespace, model_path: Path) -> Path 
         "torque_application": args.torque_application,
         "state_scaling": args.state_scaling,
         "pulse_width_scaling": args.pulse_width_scaling,
+        **pulse_width_slew_signature(args),
+        **pulse_width_rate_signature(args),
+        **reduced_internal_crank_velocity_guard_signature(args),
         "terminal_wheel_q_reference_mode": "absolute_initial",
         "integrator_type": args.acados_integrator_type,
         "sim_stages": args.acados_sim_stages,
@@ -4046,6 +4290,8 @@ def _acados_seed_cache_path(args: argparse.Namespace, model_path: Path) -> Path 
             _source_stamp(model_path),
         ],
     }
+    if getattr(args, "bilateral_reduced", False):
+        payload["bilateral_reduced"] = True
     return _cache_root() / f"acados_seed_{safe_tag}_{_short_hash(payload)}.npz"
 
 
@@ -4053,6 +4299,7 @@ def _save_warmup_cache(
     cache_path: Path,
     solution,
     metadata: dict | None = None,
+    applied_pulse_widths: dict[str, np.ndarray] | None = None,
 ) -> None:
     states = solution.decision_states(to_merge=SolutionMerge.NODES)
     controls = solution.decision_controls(to_merge=SolutionMerge.NODES)
@@ -4061,6 +4308,8 @@ def _save_warmup_cache(
         payload[f"states__{key}"] = np.asarray(values)
     for key, values in controls.items():
         payload[f"controls__{key}"] = np.asarray(values)
+    for key, values in (applied_pulse_widths or {}).items():
+        payload[f"applied_pulse_widths__{key}"] = np.asarray(values)
     if metadata is not None:
         payload["metadata__json"] = np.asarray(
             json.dumps(metadata, sort_keys=True, separators=(",", ":"))
@@ -4130,8 +4379,13 @@ def _common_initial_solution_metadata(args: argparse.Namespace) -> dict:
     return {
         "schema": "cocofest-common-periodic-initial-solution-v3",
         **endurance_rollout_signature_fields(args),
+        **muscle_horizon_signature_fields(args),
+        **pulse_width_slew_signature(args),
+        **pulse_width_rate_signature(args),
+        **reduced_internal_crank_velocity_guard_signature(args),
         "model_formulation": args.model_formulation,
         "mechanical_formulation": args.mechanical_formulation,
+        "bilateral_reduced": bool(getattr(args, "bilateral_reduced", False)),
         "formulation": getattr(args, "formulation", "dynamic"),
         "isokinetic_omega": getattr(args, "isokinetic_omega", None),
         "energy_equivalent_torque": getattr(
@@ -4187,6 +4441,12 @@ def _common_initial_solution_metadata(args: argparse.Namespace) -> dict:
             args, "acados_terminal_wheel_qdot_homotopy_margins", None
         ),
         "pulse_width_scaling": float(args.pulse_width_scaling),
+        "applied_pulse_width_trace_source": (
+            "state_at_shooting_node"
+            if getattr(args, "pulse_width_control_mode", "direct") == PW_RATE_MODE
+            else "direct_zoh_control"
+        ),
+        "applied_pulse_width_archive_prefix": "applied_pulse_widths__",
         "pulse_width_active_set": args.pulse_width_active_set,
         "pulse_width_minimum_policy": "model_pd0",
         "pulse_width_maximum_s": 0.0006,
@@ -4229,6 +4489,7 @@ def _receding_horizon_solution_metadata(
     absolute_wheel_q_origin_reference: float | None = None,
     absolute_wheel_q_start_cycle_index: int | None = None,
     reset_state_boundary_jumps: dict[str, float] | None = None,
+    nonphysical_state_boundary_jumps: dict[str, float] | None = None,
 ) -> dict:
     """Describe a concatenated RHO trace as one multi-cycle primal seed."""
 
@@ -4245,6 +4506,15 @@ def _receding_horizon_solution_metadata(
             "cycle_boundary_reset_state_jumps": {
                 str(key): float(value)
                 for key, value in (reset_state_boundary_jumps or {}).items()
+            },
+            # A PW-slew carrier has a deliberately free terminal increment.
+            # Its state seam is therefore neither a physical discontinuity nor
+            # a state reset, and must not invalidate an otherwise certified
+            # concatenated RHO seed.  The corresponding physical PW seam is
+            # audited separately against its hard bound.
+            "nonphysical_state_boundary_jumps": {
+                str(key): float(value)
+                for key, value in (nonphysical_state_boundary_jumps or {}).items()
             },
             # Preserve the rested Ding reference explicitly.  A terminal-set
             # dataset assembled from several loads or replay checkpoints must
@@ -4369,6 +4639,30 @@ def _save_receding_horizon_solution(
     }
     if not states or not controls:
         raise RuntimeError("The successful RHO result has no trajectory to export.")
+    exported_cycles = int(summary.get("exported_cycles") or cycle_count)
+    if exported_cycles < cycle_count:
+        raise RuntimeError(
+            "The RHO export contains fewer trajectory blocks than its certified prefix."
+        )
+    if exported_cycles > cycle_count:
+        # A failed final window remains useful in ``result.json`` diagnostics,
+        # but it must never enter a continuation seed.  Preserve exactly the
+        # certified prefix declared by ``covered_cycles``.
+        def certified_prefix(values: np.ndarray, *, state: bool) -> np.ndarray:
+            length = values.shape[-1] - 1 if state else values.shape[-1]
+            nodes_per_cycle, remainder = divmod(length, exported_cycles)
+            if remainder or nodes_per_cycle < 1:
+                raise RuntimeError(
+                    "The RHO trajectory cannot be partitioned into exported cycles."
+                )
+            stop = cycle_count * nodes_per_cycle + (1 if state else 0)
+            return values[..., :stop].copy()
+
+        states = {key: certified_prefix(values, state=True) for key, values in states.items()}
+        controls = {key: certified_prefix(values, state=False) for key, values in controls.items()}
+        summary["receding_horizon_export_discarded_failed_windows"] = (
+            exported_cycles - cycle_count
+        )
     boundary_summary = summary.get("state_boundary_jumps") or {}
     by_state = boundary_summary.get("by_state") or {}
     if cycle_count > 1 and (
@@ -4381,16 +4675,24 @@ def _save_receding_horizon_solution(
     reset_state_keys = (
         {"E_prod"} if getattr(args, "formulation", "dynamic") == "isokinetic" else set()
     )
+    nonphysical_state_keys = {
+        key for key in by_state if key.startswith(PW_SLEW_PREFIX)
+    }
     reset_state_boundary_jumps = {
         key: float(item["maximum_absolute_jump"])
         for key, item in by_state.items()
         if key in reset_state_keys
     }
+    nonphysical_state_boundary_jumps = {
+        key: float(item["maximum_absolute_jump"])
+        for key, item in by_state.items()
+        if key in nonphysical_state_keys
+    }
     maximum_boundary_jump = max(
         (
             float(item["maximum_absolute_jump"])
             for key, item in by_state.items()
-            if key not in reset_state_keys
+            if key not in reset_state_keys | nonphysical_state_keys
         ),
         default=0.0,
     )
@@ -4411,7 +4713,16 @@ def _save_receding_horizon_solution(
             summary.get("absolute_wheel_q_origin_reference"),
             summary.get("absolute_wheel_q_start_cycle_index"),
             reset_state_boundary_jumps,
+            nonphysical_state_boundary_jumps,
         ),
+        applied_pulse_widths={
+            key: (
+                np.asarray(values)
+                if exported_cycles == cycle_count
+                else certified_prefix(np.asarray(values), state=False)
+            )
+            for key, values in (summary.get("applied_pulse_width_traces") or {}).items()
+        },
     )
 
 
@@ -4486,6 +4797,8 @@ def _validate_common_initial_solution_metadata(
     seed: "_WarmupSolutionAdapter",
     args: argparse.Namespace,
     seed_path: Path,
+    *,
+    feasibility_probe: bool = False,
 ) -> None:
     """Reject silent horizon or physical-problem mismatches in shared seeds."""
 
@@ -4496,10 +4809,28 @@ def _validate_common_initial_solution_metadata(
             "with --common-initial-solution-output."
         )
     expected = _common_initial_solution_metadata(args)
+    # Pre-regularization seeds describe the zero-weight objective. A positive
+    # weight must carry matching provenance, including the normalization.
+    for field, default in (("pulse_width_slew_weight", 0.0), ("pulse_width_slew_reference_us", 100.0)):
+        if metadata.get(field, default) != expected[field]:
+            raise ValueError(f"Common initial solution has incompatible {field}; regenerate and certify the IPOPT seed.")
+    if metadata.get("pulse_width_odd_interpolation", False) != expected["pulse_width_odd_interpolation"]:
+        raise ValueError("Common initial solution has incompatible pulse_width_odd_interpolation; "
+                         "regenerate and certify the IPOPT seed with matching constraints.")
+    if expected["pulse_width_slew_weight"] > 0 and metadata.get("pulse_width_slew_normalization") != expected.get("pulse_width_slew_normalization"):
+        raise ValueError("Common initial solution has incompatible pulse_width_slew_normalization.")
+    slew_representation = expected.get("pulse_width_slew_control_representation")
+    if slew_representation is not None and metadata.get("pulse_width_slew_control_representation") != slew_representation:
+        raise ValueError(
+            "Common initial solution has incompatible pulse_width_slew_control_representation; "
+            f"expected {slew_representation}. Regenerate and certify the IPOPT seed "
+            "with the current increment formulation."
+        )
     for field in (
         "schema",
         "model_formulation",
         "mechanical_formulation",
+        "bilateral_reduced",
         "formulation",
         "isokinetic_omega",
         "energy_equivalent_torque",
@@ -4515,12 +4846,34 @@ def _validate_common_initial_solution_metadata(
         "terminal_wheel_q_slack",
         "terminal_wheel_q_reference_mode",
         "pulse_width_scaling",
+        "pulse_width_control_mode",
+        "pulse_width_control_representation",
+        "pulse_width_max_rate_us_per_s",
+        "pulse_width_max_step_us",
+        "reduced_internal_crank_velocity_guard",
+        "reduced_internal_crank_velocity_guard_scheme",
+        "reduced_internal_crank_velocity_guard_target_rad_s",
+        "reduced_internal_crank_velocity_guard_fast_margin_rad_s",
+        "reduced_internal_crank_velocity_guard_slow_margin_rad_s",
+        "reduced_internal_crank_velocity_guard_interval_s",
         "pulse_width_active_set",
         "pulse_width_minimum_policy",
         "pulse_width_maximum_s",
         "warmup_cycles_consumed",
     ):
-        if metadata.get(field) != expected[field]:
+        legacy_defaults = {
+            "bilateral_reduced": False,
+            "pulse_width_control_mode": "direct",
+            "pulse_width_control_representation": "direct_zoh_v1",
+            "pulse_width_max_rate_us_per_s": None,
+        }
+        actual = metadata.get(field, legacy_defaults.get(field))
+        if actual != expected[field]:
+            if feasibility_probe and field in {"objective", "objective_shape"}:
+                # A frozen one-cycle probe deliberately changes only the
+                # allocation preference. All other metadata checks retain the
+                # source RHO's model, fatigue chronology, load and motion.
+                continue
             if (
                 field == "enforce_start_constraints"
                 and metadata.get(field) is True
@@ -4574,6 +4927,38 @@ def _validate_common_initial_solution_metadata(
             f"Common initial solution '{seed_path}' uses signed crank torque "
             f"{seed_torque}, expected {expected['constant_crank_torque']}."
         )
+
+
+def validate_acados_ipopt_common_seed_provenance(
+    seed: "_WarmupSolutionAdapter",
+    args: argparse.Namespace,
+    seed_path: Path,
+) -> None:
+    """Require an external ACADOS primal seed to be IPOPT's cycle-1 solution."""
+
+    if getattr(args, "solver", None) != "acados":
+        return
+    metadata = getattr(seed, "metadata", None) or {}
+    if metadata.get("producer_solver") != "ipopt":
+        raise ValueError(
+            f"ACADOS common initial solution '{seed_path}' must be produced by "
+            "IPOPT for cycle 1; producer_solver="
+            f"{metadata.get('producer_solver')!r}."
+        )
+    if metadata.get("cycles_per_window") != 1:
+        raise ValueError(
+            f"ACADOS common initial solution '{seed_path}' must contain exactly "
+            "the IPOPT solution of cycle 1; cycles_per_window="
+            f"{metadata.get('cycles_per_window')!r}."
+        )
+    expected_guard = reduced_internal_crank_velocity_guard_signature(args)
+    for field, expected_value in expected_guard.items():
+        if metadata.get(field) != expected_value:
+            raise ValueError(
+                f"ACADOS common initial solution '{seed_path}' has {field}="
+                f"{metadata.get(field)!r}, expected {expected_value!r}; the "
+                "IPOPT cycle-1 producer must use the exact ACADOS target guard."
+            )
 
 
 def apply_full_horizon_prefix_to_initial_guess(
@@ -4720,15 +5105,103 @@ def _effective_wheel_qdot_bound_margins(
 ) -> tuple[float, float]:
     """Return fast/slow OCP margins while keeping the physical audit separate."""
 
-    physical_margin = float(args.wheel_qdot_bound_margin)
-    if args.solver != "acados":
+    physical_margin = float(getattr(args, "wheel_qdot_bound_margin", 3.0))
+    if (
+        getattr(args, "solver", None) != "acados"
+        and not resolve_reduced_internal_crank_velocity_guard(args)
+    ):
         return physical_margin, physical_margin
     fast_margin = getattr(args, "acados_wheel_qdot_fast_bound_margin", None)
     slow_margin = getattr(args, "acados_wheel_qdot_slow_bound_margin", None)
+    if fast_margin is None:
+        fast_margin = getattr(args, "wheel_qdot_fast_bound_margin", None)
+    if slow_margin is None:
+        slow_margin = getattr(args, "wheel_qdot_slow_bound_margin", None)
     return (
         physical_margin if fast_margin is None else float(fast_margin),
         physical_margin if slow_margin is None else float(slow_margin),
     )
+
+
+def resolve_reduced_internal_crank_velocity_guard(args: argparse.Namespace) -> bool:
+    """Resolve the tri-state guard while retaining the historical auto policy."""
+
+    mode = getattr(args, "reduced_internal_crank_velocity_guard", "auto")
+    if isinstance(mode, (bool, np.bool_)):
+        return bool(mode)
+    if mode not in ("auto", "on", "off"):
+        raise ValueError(
+            "reduced_internal_crank_velocity_guard must be 'auto', 'on', or 'off'."
+        )
+    if mode == "on":
+        return True
+    if mode == "off":
+        return False
+    return bool(
+        getattr(args, "solver", None) == "acados"
+        and getattr(args, "mechanical_formulation", None) == "reduced"
+        and getattr(args, "formulation", "dynamic") == "dynamic"
+    )
+
+
+def reduced_internal_crank_velocity_guard_signature(
+    args: argparse.Namespace,
+) -> dict[str, object]:
+    """Describe the exact midpoint cadence inequality represented by a seed."""
+
+    fast_margin, slow_margin = _effective_wheel_qdot_bound_margins(args)
+    stimulations = int(getattr(args, "stimulations_per_cycle", 30))
+    interval = getattr(args, "calcium_stimulation_interval_s", None)
+    if interval is None:
+        interval = 1.0 / stimulations
+    return {
+        "reduced_internal_crank_velocity_guard": (
+            resolve_reduced_internal_crank_velocity_guard(args)
+        ),
+        "reduced_internal_crank_velocity_guard_scheme": "euler_half_step_v1",
+        "reduced_internal_crank_velocity_rk4_fraction": getattr(
+            args, "reduced_internal_crank_velocity_rk4_fraction", None
+        ),
+        "reduced_internal_crank_velocity_rk4_substeps": (
+            5
+            if getattr(args, "reduced_internal_crank_velocity_rk4_fraction", None)
+            is not None
+            else None
+        ),
+        "reduced_internal_crank_velocity_guard_target_rad_s": float(
+            getattr(args, "wheel_qdot_regularization_target", DEFAULT_CRANK_QDOT_RAD_S)
+        ),
+        "reduced_internal_crank_velocity_guard_fast_margin_rad_s": fast_margin,
+        "reduced_internal_crank_velocity_guard_slow_margin_rad_s": slow_margin,
+        "reduced_internal_crank_velocity_guard_interval_s": float(interval),
+    }
+
+
+def resolve_acados_qp_solver(args: argparse.Namespace) -> str:
+    """Resolve the public auto policy before ACADOS caches and codegen are used."""
+
+    requested = getattr(
+        args,
+        "acados_qp_solver_requested",
+        getattr(args, "acados_qp_solver", "auto"),
+    )
+    supported = {
+        "PARTIAL_CONDENSING_HPIPM",
+        "FULL_CONDENSING_HPIPM",
+        "FULL_CONDENSING_QPOASES",
+    }
+    if requested == "auto":
+        return (
+            "FULL_CONDENSING_HPIPM"
+            if getattr(args, "pulse_width_max_step_us", None) is not None
+            else "PARTIAL_CONDENSING_HPIPM"
+        )
+    if requested not in supported:
+        raise ValueError(
+            "acados_qp_solver must be 'auto', 'PARTIAL_CONDENSING_HPIPM', "
+            "'FULL_CONDENSING_HPIPM', or 'FULL_CONDENSING_QPOASES'."
+        )
+    return requested
 
 
 def _continuation_cache_signature(args: argparse.Namespace) -> str:
@@ -4736,6 +5209,10 @@ def _continuation_cache_signature(args: argparse.Namespace) -> str:
     payload = {
         "kind": "acados_one_cycle_continuation",
         **endurance_rollout_signature_fields(args),
+        **muscle_horizon_signature_fields(args),
+        **pulse_width_slew_signature(args),
+        **pulse_width_rate_signature(args),
+        **reduced_internal_crank_velocity_guard_signature(args),
         "cache_version": 3,
         "nmpc_builder_version": 2,
         "model_formulation": args.model_formulation,
@@ -4841,6 +5318,10 @@ def _horizon_seed_cache_signature(args: argparse.Namespace) -> str:
     payload = {
         "kind": "acados_horizon_seed",
         **endurance_rollout_signature_fields(args),
+        **muscle_horizon_signature_fields(args),
+        **pulse_width_slew_signature(args),
+        **pulse_width_rate_signature(args),
+        **reduced_internal_crank_velocity_guard_signature(args),
         "cache_version": 5,
         "nmpc_builder_version": 2,
         "model_formulation": args.model_formulation,
@@ -4936,6 +5417,10 @@ def _codegen_signature(args: argparse.Namespace) -> str:
     repository_root = Path(__file__).resolve().parents[3]
     payload = {
         **endurance_rollout_signature_fields(args, structure_only=True),
+        **muscle_horizon_signature_fields(args, structure_only=True),
+        **pulse_width_slew_signature(args),
+        **pulse_width_rate_signature(args),
+        **reduced_internal_crank_velocity_guard_signature(args),
         # Increment when solve_case changes the generated OCP structure in a way that is
         # not represented by the arguments or the model sources below.
         "problem_builder_version": 2,
@@ -5014,6 +5499,11 @@ def _codegen_signature(args: argparse.Namespace) -> str:
         "acados_qp_solver": args.acados_qp_solver,
         "acados_qp_cond_n": args.acados_qp_cond_n,
         "acados_hpipm_mode": args.acados_hpipm_mode,
+        "acados_ding_local_reduction": bool(getattr(args, "acados_ding_local_reduction", False)),
+        "acados_ding_local_source": (
+            _source_stamp(repository_root / "cocofest/optimization/acados_ding_local_reduction.py")
+            if getattr(args, "acados_ding_local_reduction", False) else None
+        ),
         "acados_integrator_type": args.acados_integrator_type,
         "acados_collocation_type": args.acados_collocation_type,
         "acados_sim_stages": args.acados_sim_stages,
@@ -5322,6 +5812,11 @@ def configure_ipopt_solver(
     c_compile: bool = False,
     print_level: int = 0,
     advanced_options: dict | None = None,
+    function_transform: bool = False,
+    c_compiler_flags: tuple[str, ...] | list[str] | None = None,
+    c_cache_dir: str | Path | None = None,
+    c_cache_name: str | None = None,
+    c_compile_callbacks: tuple[str, ...] | list[str] | None = None,
 ) -> Solver.IPOPT:
     return configure_nlp_solver(
         "ipopt",
@@ -5331,6 +5826,11 @@ def configure_ipopt_solver(
         ipopt_linear_solver=linear_solver,
         ipopt_hsl_library=hsl_library,
         ipopt_c_compile=c_compile,
+        ipopt_c_compile_callbacks=c_compile_callbacks,
+        ipopt_function_transform=function_transform,
+        ipopt_c_compiler_flags=c_compiler_flags,
+        ipopt_c_cache_dir=c_cache_dir,
+        ipopt_c_cache_name=c_cache_name,
         ipopt_options=advanced_options,
     )
 
@@ -5371,6 +5871,11 @@ def configure_cycle_nlp_solver(args: argparse.Namespace):
             tolerance=args.nlp_tolerance,
             hsl_library=args.ipopt_hsl_library,
             c_compile=args.ipopt_c_compile,
+            c_compile_callbacks=getattr(args, "ipopt_c_compile_callbacks", None),
+            function_transform=getattr(args, "ipopt_function_transform", False),
+            c_compiler_flags=getattr(args, "ipopt_c_compiler_flags", None),
+            c_cache_dir=getattr(args, "ipopt_c_cache_dir", None),
+            c_cache_name=getattr(args, "ipopt_c_cache_name", None),
             print_level=getattr(args, "ipopt_print_level", 0),
             advanced_options=_ipopt_advanced_options(args),
         )
@@ -5685,6 +6190,139 @@ def _state_traces_from_exported_cycles(
     return state_traces
 
 
+def attach_pulse_width_command_audit(
+    summary: dict,
+    args: argparse.Namespace,
+) -> None:
+    """Expose applied PW separately from its direct or rate control variable."""
+
+    mode = getattr(args, "pulse_width_control_mode", "direct")
+    states = summary.get("state_traces") or {}
+    controls = summary.get("control_traces") or {}
+    stride = (
+        int(getattr(args, "collocation_degree", 0)) + 1
+        if str(getattr(args, "ode_solver", "rk4")).lower() == "collocation"
+        else 1
+    )
+    physical_controls = physical_pulse_controls(
+        states,
+        controls,
+        shooting_stride=stride,
+    )
+    applied = {
+        key: np.asarray(values)
+        for key, values in physical_controls.items()
+        if key.startswith("last_pulse_width_")
+    }
+    summary["applied_pulse_width_traces"] = applied
+    command = {
+        **pulse_width_rate_signature(args),
+        "applied_trace_available": bool(applied),
+        "applied_trace_source": (
+            "state_at_shooting_node" if mode == PW_RATE_MODE else "direct_zoh_control"
+        ),
+        "applied_trace_key_prefix": "last_pulse_width_",
+        "rate_control_key_prefix": (
+            "pulse_width_rate_" if mode == PW_RATE_MODE else None
+        ),
+        "shooting_state_stride": int(stride),
+    }
+    initial_states = summary.get("initial_guess_state_traces") or {}
+    initial_controls = summary.get("initial_guess_control_traces") or {}
+    initial_physical = physical_pulse_controls(
+        initial_states,
+        initial_controls,
+        shooting_stride=stride,
+    )
+    initial_applied = {
+        key: np.asarray(values, dtype=float)
+        for key, values in initial_physical.items()
+        if key.startswith("last_pulse_width_")
+    }
+    if initial_applied:
+        summary["initial_applied_pulse_width_traces"] = initial_applied
+    initial_digest = hashlib.sha256()
+    for key, values in sorted(initial_applied.items()):
+        initial_digest.update(key.encode("utf-8"))
+        # A direct control copied onto a Radau state grid can differ by a few
+        # floating-point ulps after interpolation. Quantize at one picosecond
+        # of PW before hashing: this is six orders of magnitude below the
+        # microsecond-scale command resolution, while still detecting any
+        # physically meaningful seed difference.
+        quantized = np.rint(np.asarray(values) / 1e-12).astype(np.int64)
+        initial_digest.update(np.ascontiguousarray(quantized).tobytes())
+    command["initial_applied_trace_available"] = bool(initial_applied)
+    command["initial_applied_trace_sha256"] = (
+        initial_digest.hexdigest() if initial_applied else None
+    )
+    command["initial_applied_trace_hash_quantization_s"] = 1e-12
+    if mode != PW_RATE_MODE:
+        command["rate_bound_audit"] = {
+            "available": False,
+            "reason": "direct_pulse_width_controls",
+        }
+        summary["pulse_width_command"] = command
+        return
+
+    maximum_rate = float(args.pulse_width_max_rate_s_per_s)
+    rate_controls = {
+        key: np.asarray(values, dtype=float).reshape(-1)
+        for key, values in controls.items()
+        if key.startswith("pulse_width_rate_")
+    }
+    finite = bool(rate_controls) and all(
+        np.isfinite(values).all() for values in rate_controls.values()
+    )
+    maximum_absolute_rate = max(
+        (float(np.max(np.abs(values))) for values in rate_controls.values()),
+        default=float("nan"),
+    )
+    tolerance = max(1e-12, 1e-9 * maximum_rate)
+    cycle_duration = (
+        2.0 * np.pi / abs(float(args.isokinetic_omega))
+        if getattr(args, "formulation", "dynamic") == "isokinetic"
+        else 1.0
+    )
+    dt = cycle_duration / float(args.stimulations_per_cycle)
+    maximum_increase = max(
+        (
+            float(np.max(np.diff(np.asarray(values, dtype=float).reshape(-1))))
+            for values in applied.values()
+            if np.asarray(values).size > 1
+        ),
+        default=float("nan"),
+    )
+    maximum_decrease = max(
+        (
+            float(np.max(-np.diff(np.asarray(values, dtype=float).reshape(-1))))
+            for values in applied.values()
+            if np.asarray(values).size > 1
+        ),
+        default=float("nan"),
+    )
+    command["rate_bound_audit"] = {
+        "available": bool(rate_controls),
+        "finite": finite,
+        "bounded_pair": "successive_applied_pulse_width_states",
+        "actual_rho_seam_bounded": True,
+        "trace_scope": "all_exported_attempts",
+        "maximum_rate_s_per_s": maximum_rate,
+        "maximum_rate_us_per_s": maximum_rate * 1e6,
+        "maximum_absolute_control_rate_s_per_s": maximum_absolute_rate,
+        "maximum_absolute_control_rate_us_per_s": maximum_absolute_rate * 1e6,
+        "maximum_allowed_step_s": maximum_rate * dt,
+        "maximum_allowed_step_us": maximum_rate * dt * 1e6,
+        "maximum_observed_applied_increase_s": maximum_increase,
+        "maximum_observed_applied_increase_us": maximum_increase * 1e6,
+        "maximum_observed_applied_decrease_s": maximum_decrease,
+        "maximum_observed_applied_decrease_us": maximum_decrease * 1e6,
+        "passes_bound": bool(
+            finite and maximum_absolute_rate <= maximum_rate + tolerance
+        ),
+    }
+    summary["pulse_width_command"] = command
+
+
 def _state_boundary_jump_summary(exported_cycle_solutions: list) -> dict:
     """Keep both sides of every RHO seam instead of hiding them in merged traces."""
 
@@ -5869,6 +6507,11 @@ def _acados_bound_complementarity_rows(
     rows = []
     state_labels = state_labels or []
     control_labels = control_labels or []
+    if hasattr(acados_solver, "native_solver") and hasattr(acados_solver, "mapping"):
+        # Complementarity pairs belong to the reduced native capsule; x from
+        # the Bioptim facade has reconstructed rows without corresponding lam.
+        state_labels = [state_labels[index] for index in acados_solver.mapping.keep]
+        acados_solver = acados_solver.native_solver
     for stage in range(n_stages):
         x = _safe_acados_stage_field(acados_solver, stage, "x")
         u = _safe_acados_stage_field(acados_solver, stage, "u")
@@ -5970,6 +6613,8 @@ def collect_acados_diagnostics(solution) -> dict:
         return diagnostics
 
     diagnostics["solver_available"] = True
+    if hasattr(acados_solver, "summary"):
+        diagnostics["ding_local_reduction"] = dict(acados_solver.summary)
     first_stage_parameters = _safe_acados_stage_field(acados_solver, 0, "p")
     if not isinstance(first_stage_parameters, dict):
         diagnostics["first_stage_parameters"] = np.asarray(first_stage_parameters)
@@ -6115,6 +6760,83 @@ def set_acados_runtime_max_iterations(periodic_nmpc, max_iterations: int) -> boo
     return True
 
 
+def validate_acados_rho_initial_iteration_budget(args) -> None:
+    """Reject combinations that defeat the deterministic first-attempt budget."""
+    budget = getattr(args, "acados_rho_initial_iteration_budget", None)
+    if budget is None:
+        return
+    option = "--acados-rho-initial-iteration-budget"
+    if not 1 <= budget < args.max_acados_iterations:
+        raise ValueError(f"{option} must be >= 1 and smaller than --max-acados-iterations.")
+    if args.solver != "acados" or args.single_shot:
+        raise ValueError(f"{option} requires ACADOS RHO mode.")
+    if not args.acados_ipopt_recovery or not args.retry_failed_rho_without_advance:
+        raise ValueError(
+            f"{option} requires --acados-ipopt-recovery and --retry-failed-rho-without-advance."
+        )
+    if args.max_consecutive_failing < 1:
+        raise ValueError(f"{option} requires at least one authorized recovery attempt.")
+    if args.acados_maxiter_retries:
+        raise ValueError(f"{option} cannot be combined with --acados-maxiter-retries.")
+    if args.acados_forced_iteration_cap_rhos or args.acados_ipopt_recovery_force_first_rho:
+        raise ValueError(f"{option} cannot be combined with test-only recovery/cap gates.")
+
+
+def arm_acados_rho_initial_iteration_budget(
+    periodic_nmpc, *, target_rho: int, budget: int, attempted_rhos: set,
+) -> bool:
+    """Arm once per physical RHO; auxiliary solves and same-RHO retries are uncapped."""
+    if target_rho < 2 or target_rho in attempted_rhos:
+        return False
+    periodic_nmpc._cocofest_forced_iteration_cap_pending = {
+        "target_rho": target_rho,
+        "iteration_cap": budget,
+        "policy": "first_attempt_budget",
+    }
+    attempted_rhos.add(target_rho)
+    return True
+
+
+def summarize_acados_rho_initial_iteration_budget(args, attempts, recoveries) -> dict:
+    """Link the budget audit to the existing frozen-RHO recovery certificate."""
+    return {
+        "enabled": True,
+        "requested_iterations": args.acados_rho_initial_iteration_budget,
+        "nominal_iterations": args.max_acados_iterations,
+        "first_eligible_physical_rho": 2,
+        "scope": "first_attempt_only",
+        "certification_policy": "unchanged",
+        "fallback_advance_enabled": bool(args.acados_ipopt_fallback_advance),
+        "estimated_time_saved_s": None,
+        "time_savings_note": (
+            "Counterfactual time is not measured. Iteration headroom is not a measured "
+            "saving; compare a matched nominal-budget replay, including recovery costs."
+        ),
+        "attempts": [
+            {
+                **attempt,
+                "recovery_attempt_windows": [
+                    recovery["attempt_window"]
+                    for recovery in recoveries
+                    if recovery.get("target_rho") == attempt["target_rho"]
+                ],
+                "fallback_advanced": any(
+                    recovery.get("fallback_advanced", False)
+                    for recovery in recoveries
+                    if recovery.get("target_rho") == attempt["target_rho"]
+                ),
+                "recovery_total_wall_time_s": sum(
+                    (recovery.get("timing") or {}).get("total_wall_time_s")
+                    or recovery.get("wall_time_s") or 0.0
+                    for recovery in recoveries
+                    if recovery.get("target_rho") == attempt["target_rho"]
+                ),
+            }
+            for attempt in attempts
+        ],
+    }
+
+
 def install_acados_forced_iteration_cap(
     periodic_nmpc,
     *,
@@ -6167,14 +6889,34 @@ def install_acados_forced_iteration_cap(
                 "SQP iteration budget."
             )
         started = perf_counter()
+        failure_summary = None
         try:
             output = original_solve(*args, **kwargs)
             status = int(getattr(_interface, "status", -1))
             diagnostics = diagnostics_function(periodic_nmpc)
+        except Exception as exc:
+            if experiment.get("policy") == "first_attempt_budget":
+                failure_summary = {
+                    "target_rho": target_rho,
+                    "policy": "first_attempt_budget",
+                    "requested_iteration_cap": iteration_cap,
+                    "effective_iteration_cap": iteration_cap,
+                    "budget_application": "runtime_setter_succeeded",
+                    "nominal_iterations": int(nominal_iterations),
+                    "status": None,
+                    "residuals_at_return": None,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "estimated_time_saved_s": None,
+                }
+                summaries.append(failure_summary)
+            raise
         finally:
             restored = bool(
                 set_iterations_function(periodic_nmpc, nominal_iterations)
             )
+            if failure_summary is not None:
+                failure_summary["nominal_budget_restored"] = restored
+                failure_summary["wall_time_s"] = perf_counter() - started
         if not restored:
             raise RuntimeError(
                 "The forced ACADOS interruption did not restore the nominal "
@@ -6191,10 +6933,22 @@ def install_acados_forced_iteration_cap(
             "wall_time_s": perf_counter() - started,
             "nominal_budget_restored": restored,
         }
+        if experiment.get("policy") == "first_attempt_budget":
+            iterations = summary["iterations"]
+            summary.update({
+                "policy": "first_attempt_budget",
+                "requested_iteration_cap": iteration_cap,
+                "effective_iteration_cap": iteration_cap,
+                "budget_application": "runtime_setter_succeeded",
+                "residuals_at_return": deepcopy(diagnostics.get("residuals")),
+                "iteration_cap_reached": iterations >= iteration_cap,
+                "unused_nominal_iteration_headroom": max(0, nominal_iterations - iterations),
+                "estimated_time_saved_s": None,
+            })
         summaries.append(summary)
         if echo:
             print(
-                "acados_forced_iteration_cap: "
+                f"acados_{experiment.get('policy', 'forced_iteration_cap')}: "
                 f"target_rho={target_rho} cap={iteration_cap} "
                 f"status={status} iterations={summary['iterations']} "
                 f"nominal_restored={restored}"
@@ -8778,6 +9532,9 @@ def attach_exact_initial_nlp_audits(summary: dict, nmpc) -> None:
     rollout_binding = getattr(nmpc, "endurance_rollout_binding", None)
     if rollout_binding is not None:
         summary["endurance_rollout"] = rollout_binding.summary()
+    muscle_horizon_binding = getattr(nmpc, "muscle_horizon_binding", None)
+    if muscle_horizon_binding is not None:
+        summary["muscle_horizon"] = muscle_horizon_binding.summary()
 
 
 def canonical_solution_kkt_audit(
@@ -9276,6 +10033,9 @@ class CompiledNlpReuseTracker:
         rollout_binding = getattr(nmpc, "endurance_rollout_binding", None)
         if rollout_binding is not None:
             rollout_binding.observe_solver(nmpc)
+        muscle_horizon_binding = getattr(nmpc, "muscle_horizon_binding", None)
+        if muscle_horizon_binding is not None:
+            muscle_horizon_binding.observe_solver(nmpc)
         if not self.enabled:
             return
         interface = getattr(nmpc, "ocp_solver", None)
@@ -9367,7 +10127,9 @@ def nlp_c_compile_enabled(args: argparse.Namespace) -> bool:
     """Return whether the selected NLP backend requested CasADi C codegen."""
 
     return bool(
-        (args.solver == "ipopt" and args.ipopt_c_compile)
+        (args.solver == "ipopt" and (
+            args.ipopt_c_compile or getattr(args, "ipopt_c_compile_callbacks", None)
+        ))
         or (args.solver == "madnlp" and args.madnlp_c_compile)
         or (args.solver == "fatrop" and args.fatrop_c_compile)
     )
@@ -10995,6 +11757,9 @@ def high_accuracy_trace_rollout_diagnostics(
     cycle_count: int,
     capacity_scales: dict[str, float],
     objective_weight: float = 10_000.0,
+    crank_velocity_target_rad_s: float = DEFAULT_CRANK_QDOT_RAD_S,
+    crank_velocity_fast_margin_rad_s: float = 3.0,
+    crank_velocity_slow_margin_rad_s: float = 3.0,
 ) -> dict:
     """Reintegrate an exported RHO prefix with one common DOP853 reference.
 
@@ -11129,12 +11894,24 @@ def high_accuracy_trace_rollout_diagnostics(
     dense_load_minimum = float("inf")
     dense_load_maximum = -float("inf")
     dense_load_sample_count = 0
+    dense_velocity_minimum = float("inf")
+    dense_velocity_maximum = -float("inf")
+    dense_velocity_sample_count = 0
     model_container = getattr(nlp, "model", None)
     isokinetic_model = getattr(model_container, "bio_model", model_container)
     audit_dense_load = bool(
         getattr(isokinetic_model, "isokinetic", False)
         and hasattr(isokinetic_model, "reduced_dynamics")
         and "theta" in nlp.states
+    )
+    # The reduced dynamic cadence guard is enforced at shooting nodes (and,
+    # optionally, an Euler midpoint).  DOP853 samples expose any continuous
+    # excursion without changing the NLP transcription.
+    crank_velocity_state_key = next(
+        (key for key in ("qdot", "omega") if key in nlp.states), None
+    )
+    audit_dense_velocity = bool(
+        "theta" in nlp.states and crank_velocity_state_key is not None
     )
     state_scales = np.maximum(
         np.maximum(np.ptp(states, axis=1), np.max(np.abs(states), axis=1)), 1.0
@@ -11190,7 +11967,7 @@ def high_accuracy_trace_rollout_diagnostics(
             method="DOP853",
             rtol=1e-11,
             atol=1e-13,
-            dense_output=audit_dense_load,
+            dense_output=audit_dense_load or audit_dense_velocity,
         )
         if not reference.success:
             raise RuntimeError(
@@ -11199,11 +11976,23 @@ def high_accuracy_trace_rollout_diagnostics(
             )
         augmented = reference.y[:, -1]
         reference_evaluations += int(reference.nfev)
-        if audit_dense_load:
+        if audit_dense_load or audit_dense_velocity:
             dense_times = np.linspace(
                 interval_start, interval_start + dt, 65
             )
             dense_states = reference.sol(dense_times)[:n_states]
+        if audit_dense_velocity:
+            qdot_index = int(
+                np.asarray(nlp.states[crank_velocity_state_key].index).reshape(-1)[0]
+            )
+            dense_velocity_minimum = min(
+                dense_velocity_minimum, float(np.min(dense_states[qdot_index]))
+            )
+            dense_velocity_maximum = max(
+                dense_velocity_maximum, float(np.max(dense_states[qdot_index]))
+            )
+            dense_velocity_sample_count += int(dense_states.shape[1])
+        if audit_dense_load:
             theta_index = int(
                 np.asarray(nlp.states["theta"].index).reshape(-1)[0]
             )
@@ -11294,6 +12083,32 @@ def high_accuracy_trace_rollout_diagnostics(
             ),
         }
 
+    dense_velocity_summary = None
+    if audit_dense_velocity:
+        lower_velocity_bound = (
+            float(crank_velocity_target_rad_s)
+            - float(crank_velocity_fast_margin_rad_s)
+        )
+        upper_velocity_bound = (
+            float(crank_velocity_target_rad_s)
+            + float(crank_velocity_slow_margin_rad_s)
+        )
+        dense_velocity_summary = {
+            "samples_per_interval": 65,
+            "sample_count": int(dense_velocity_sample_count),
+            "minimum_crank_velocity_rad_s": float(dense_velocity_minimum),
+            "maximum_crank_velocity_rad_s": float(dense_velocity_maximum),
+            "lower_bound_rad_s": lower_velocity_bound,
+            "upper_bound_rad_s": upper_velocity_bound,
+            "maximum_bound_violation_rad_s": float(
+                max(
+                    lower_velocity_bound - dense_velocity_minimum,
+                    dense_velocity_maximum - upper_velocity_bound,
+                    0.0,
+                )
+            ),
+        }
+
     return {
         "available": True,
         "method": "DOP853_continuous_RHO_trace",
@@ -11308,6 +12123,7 @@ def high_accuracy_trace_rollout_diagnostics(
         "maximum_endpoint_error_interval": maximum_endpoint_error_interval,
         "maximum_absolute_endpoint_error_by_state": maximum_absolute_by_state,
         "dense_isokinetic_load_audit": dense_load_summary,
+        "dense_crank_velocity_audit": dense_velocity_summary,
         "final_reference_state": {
             key: np.asarray(
                 augmented[np.asarray(nlp.states[key].index).reshape(-1)],
@@ -11721,6 +12537,12 @@ def project_full_dynamics_initial_guess(
             )
 
     for key in nlp.states.keys():
+        # The PW-slew lift already has an exact constant-derivative map and is
+        # seeded coherently.  Phase-I repairs the physical/FES trajectory;
+        # target-only auxiliary guesses may use compact constant interpolation
+        # and therefore must not be rewritten as full shooting traces here.
+        if key.startswith(PW_SLEW_PREFIX):
+            continue
         indexes = np.asarray(nlp.states[key].index).reshape((-1,)).tolist()
         original_columns = state_snapshot[key]
         nlp.x_init[key].init[:, :] = _lift_shooting_endpoint_update_to_state_columns(
@@ -12378,6 +13200,8 @@ def _acados_variable_scaling(nlp, variables, scaling_container) -> np.ndarray:
 
 
 def _get_or_create_acados_sim_solver(periodic_nmpc):
+    if getattr(periodic_nmpc, "_cocofest_acados_ding_local_reduction", False):
+        raise ValueError("The separate ACADOS IRK seed simulator is not available with Ding local reduction")
     cached_solver = getattr(periodic_nmpc, "_cocofest_acados_sim_solver", None)
     if cached_solver is not None:
         return cached_solver, False
@@ -14863,8 +15687,85 @@ def certified_ipopt_fallback_adapter(
     )
 
 
+def _collocation_state_time_grid(
+    state_length: int,
+    interval_count: int,
+    *,
+    method: str = "radau",
+) -> np.ndarray | None:
+    """Return physical times for a merged direct-collocation state trace.
+
+    Bioptim keeps, for every shooting interval, its collocation stages *and*
+    its terminal shooting state.  A Radau stage at fraction one and that
+    shooting state therefore share a timestamp.  The duplicate is intentional:
+    it represents the left-stage and right/shooting values of a primal NLP
+    iterate.  ``None`` means that the supplied layout is not direct
+    collocation, so a legacy generic resampling path must be used instead.
+    """
+
+    if interval_count < 1 or state_length < 2:
+        return None
+    columns_per_interval, remainder = divmod(state_length - 1, interval_count)
+    if remainder or columns_per_interval < 2:
+        return None
+
+    degree = columns_per_interval - 1
+    from casadi import collocation_points
+
+    fractions = np.asarray(collocation_points(degree, str(method).lower()), dtype=float)
+    if fractions.shape != (degree,) or not np.isclose(fractions[-1], 1.0):
+        raise ValueError(
+            "The collocation state layout must end at the interval endpoint."
+        )
+
+    times = [0.0]
+    for interval in range(interval_count):
+        start = interval / interval_count
+        stop = (interval + 1) / interval_count
+        times.extend(start + fractions / interval_count)
+        # The last Radau stage and this shooting endpoint are distinct state
+        # columns at the same physical time.
+        times.append(stop)
+    return np.asarray(times, dtype=float)
+
+
+def _right_continuous_unique_collocation_samples(
+    times: np.ndarray, values: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Collapse equal timestamps, retaining the deterministic shooting value.
+
+    A direct-collocation solution can have a small primal defect between its
+    last stage and its shooting endpoint.  For an initial guess transferred to
+    another transcription, retaining the latter is the causal/right-continuous
+    convention: it is the state used as the start of the following interval.
+    """
+
+    retained: list[int] = []
+    for index, time in enumerate(times):
+        if not retained:
+            retained.append(index)
+            continue
+        previous = times[retained[-1]]
+        tolerance = 1e-12 * max(1.0, abs(float(time)), abs(float(previous)))
+        if time < previous - tolerance:
+            raise ValueError("The collocation state time grid is not non-decreasing.")
+        if abs(time - previous) <= tolerance:
+            retained[-1] = index
+        else:
+            retained.append(index)
+    indices = np.asarray(retained, dtype=int)
+    return times[indices], values[:, indices]
+
+
 def _resample_warmup_data(
-    values: np.ndarray, target_len: int, has_terminal_node: bool
+    values: np.ndarray,
+    target_len: int,
+    has_terminal_node: bool,
+    *,
+    source_interval_count: int | None = None,
+    target_interval_count: int | None = None,
+    source_collocation_method: str = "radau",
+    target_collocation_method: str = "radau",
 ) -> np.ndarray:
     values = np.asarray(values, dtype=float)
     current_len = values.shape[1]
@@ -14885,14 +15786,36 @@ def _resample_warmup_data(
             return values[:, ::stride][:, :target_len]
 
     # A refined collocation audit changes the number of internal state points
-    # without changing the physical horizon or its shooting nodes.  Linear
-    # interpolation is appropriate for a primal warm start: it preserves both
-    # endpoints exactly and the refined NLP subsequently restores its own
-    # collocation equations.  Controls retain the legacy piecewise-constant
-    # path above and must never be smoothed across stimulation intervals.
+    # without changing the physical horizon or its shooting nodes.  Interpolate
+    # on the *actual* Radau timestamps: merged collocation traces contain
+    # non-uniform stages and duplicated interval endpoints, so treating their
+    # columns as a linspace can create an O(1e-2 rad) mechanical warm-start
+    # defect when a Radau-5 seed initializes Radau-3.  Controls retain the
+    # piecewise-constant path above and must never be smoothed across
+    # stimulation intervals.
     if has_terminal_node and current_len > 1 and target_len > 1:
-        source_grid = np.linspace(0.0, 1.0, current_len)
-        target_grid = np.linspace(0.0, 1.0, target_len)
+        source_grid = None
+        target_grid = None
+        if source_interval_count is not None and target_interval_count is not None:
+            source_grid = _collocation_state_time_grid(
+                current_len,
+                int(source_interval_count),
+                method=source_collocation_method,
+            )
+            target_grid = _collocation_state_time_grid(
+                target_len,
+                int(target_interval_count),
+                method=target_collocation_method,
+            )
+        if source_grid is None or target_grid is None:
+            # Generic/legacy traces do not carry a collocation topology.  Keep
+            # the former normalized-column behavior for those only.
+            source_grid = np.linspace(0.0, 1.0, current_len)
+            target_grid = np.linspace(0.0, 1.0, target_len)
+        else:
+            source_grid, values = _right_continuous_unique_collocation_samples(
+                source_grid, values
+            )
         resampled = np.vstack(
             [np.interp(target_grid, source_grid, row) for row in values]
         )
@@ -14916,9 +15839,29 @@ def _adapt_warmup_solution_to_periodic_nodes(
     first_control_key = next(iter(periodic_nmpc.nlp[0].u_init.keys()))
     target_state_len = periodic_nmpc.nlp[0].x_init[first_state_key].init.shape[1]
     target_control_len = periodic_nmpc.nlp[0].u_init[first_control_key].init.shape[1]
+    source_first_control_key = next(iter(warmup_controls))
+    source_interval_count = int(
+        np.asarray(warmup_controls[source_first_control_key], dtype=float).shape[1]
+    )
+    target_solver = getattr(
+        getattr(periodic_nmpc.nlp[0], "dynamics_type", None), "ode_solver", None
+    )
+    target_collocation_method = str(getattr(target_solver, "method", "radau"))
+    warmup_metadata = getattr(warmup_solution, "metadata", {}) or {}
+    source_collocation_method = str(
+        warmup_metadata.get("producer_collocation_method", "radau")
+    )
 
     resampled_states = {
-        key: _resample_warmup_data(values, target_state_len, has_terminal_node=True)
+        key: _resample_warmup_data(
+            values,
+            target_state_len,
+            has_terminal_node=True,
+            source_interval_count=source_interval_count,
+            target_interval_count=int(target_control_len),
+            source_collocation_method=source_collocation_method,
+            target_collocation_method=target_collocation_method,
+        )
         for key, values in warmup_states.items()
     }
     target_state_keys = set(periodic_nmpc.nlp[0].x_init.keys())
@@ -14995,6 +15938,72 @@ def _adapt_warmup_solution_to_periodic_nodes(
         for key, values in resampled_states.items()
         if key in target_state_keys
     }
+    target_model = getattr(periodic_nmpc.nlp[0], "model", None)
+    rate_state_target = (
+        getattr(target_model, "pulse_width_control_mode", "direct")
+        == PW_RATE_MODE
+    )
+    promoted_warmup_pulse_widths = {}
+    if rate_state_target:
+        target_grid = _collocation_state_time_grid(
+            target_state_len,
+            target_control_len,
+            method=target_collocation_method,
+        )
+        if target_grid is None:
+            target_grid = np.linspace(0.0, 1.0, target_state_len)
+        shooting_grid = np.linspace(0.0, 1.0, target_control_len + 1)
+        for key in sorted(target_state_keys):
+            if not key.startswith("last_pulse_width_") or key in adapted_states:
+                continue
+            if key not in warmup_controls:
+                continue
+            model_by_name = {
+                item.muscle_name: item
+                for item in getattr(target_model, "muscles_dynamics_model", ())
+            }
+            muscle_name = key.removeprefix("last_pulse_width_")
+            muscle_model = model_by_name[muscle_name]
+            physical = _resample_warmup_data(
+                validate_and_clip_pulse_width_seed(
+                    warmup_controls[key],
+                    key=key,
+                    pd0=float(muscle_model.pd0),
+                    maximum=0.0006,
+                    source="standard warm-start",
+                ),
+                target_control_len,
+                has_terminal_node=False,
+            )
+            endpoints = np.concatenate((physical, physical[:, -1:]), axis=1)
+            adapted_states[key] = np.vstack(
+                [np.interp(target_grid, shooting_grid, row) for row in endpoints]
+            )
+            promoted_warmup_pulse_widths[key] = physical
+    # Only a generic, unlifted warm-up needs the constant auxiliary fallback.
+    # A certified IPOPT/common or recovery seed already supplies z, u and delta_pw:
+    # replacing its physical PW controls would detach them from its FES and
+    # mechanical trajectory and destroy the seed's zero-defect property.
+    slew_enabled = getattr(
+        getattr(periodic_nmpc.nlp[0], "model", None), "pulse_width_max_step_s", None
+    ) is not None
+    if slew_enabled and any(key.startswith("pw_slew_next_") for key in warmup_controls):
+        raise ValueError(
+            "Legacy PW-slew seed uses next-PW controls (pw_slew_next_*); "
+            "the target requires delta_pw_v1 increments. Regenerate and certify "
+            "the IPOPT seed with the current formulation before reuse."
+        )
+    source_has_slew = any(
+        key.startswith(PW_SLEW_PREFIX)
+        for key in (*warmup_states.keys(), *warmup_controls.keys())
+    )
+    initialize_target_only_slew = slew_enabled and not source_has_slew
+    if initialize_target_only_slew:
+        for key in target_state_keys:
+            if key.startswith(PW_SLEW_PREFIX):
+                adapted_states[key] = np.asarray(
+                    periodic_nmpc.nlp[0].x_init[key].init, dtype=float
+                ).copy()
     missing_states = target_state_keys - set(adapted_states)
     if missing_states:
         raise KeyError(
@@ -15031,6 +16040,46 @@ def _adapt_warmup_solution_to_periodic_nodes(
         for key, values in warmup_controls.items()
         if key in target_control_keys
     }
+    if rate_state_target:
+        interval_duration = float(periodic_nmpc.cycle_duration) / int(
+            periodic_nmpc.cycle_len
+        )
+        for pw_key, physical in promoted_warmup_pulse_widths.items():
+            rate_key = pw_key.replace("last_pulse_width_", "pulse_width_rate_", 1)
+            if rate_key not in target_control_keys or rate_key in adapted_controls:
+                continue
+            endpoints = np.concatenate((physical, physical[:, -1:]), axis=1)
+            maximum_rate = float(target_model.pulse_width_max_rate_s_per_s)
+            rates = np.diff(endpoints, axis=1) / interval_duration
+            observed_rate = float(np.max(np.abs(rates)))
+            if observed_rate > maximum_rate + max(1e-12, 1e-9 * maximum_rate):
+                warnings.warn(
+                    f"The common physical PW seed requires {observed_rate * 1e6:.6g} "
+                    f"us/s for {pw_key}, above the requested "
+                    f"{maximum_rate * 1e6:.6g} us/s rate bound. The rate-control "
+                    "initial guess is projected to its bound while the applied-PW "
+                    "state trace is preserved for the same-seed A/B contract.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            adapted_controls[rate_key] = np.clip(
+                rates, -maximum_rate, maximum_rate
+            )
+    if initialize_target_only_slew:
+        for key in target_control_keys:
+            if key.startswith(PW_SLEW_PREFIX) or (
+                key.startswith("last_pulse_width_")
+                and not bool(
+                    getattr(
+                        periodic_nmpc,
+                        "preserve_warmup_pulse_width_seed",
+                        False,
+                    )
+                )
+            ):
+                adapted_controls[key] = np.asarray(
+                    periodic_nmpc.nlp[0].u_init[key].init, dtype=float
+                ).copy()
     missing_controls = target_control_keys - set(adapted_controls)
     if missing_controls:
         raise KeyError(
@@ -15554,7 +16603,27 @@ def apply_standard_warmup_to_periodic_nmpc(
     adapted_solution = _adapt_warmup_solution_to_periodic_nodes(
         periodic_nmpc, warmup_solution
     )
+    # A generic direct-PW bridge is an optimization seed, not an executed
+    # predecessor command. Keep the first target PW state free for this first
+    # window so it matches the bridge's first direct control exactly. Ordinary
+    # RHO advances still bind this state to the previous certified terminal PW.
+    first_pw_bounds = {
+        key: (
+            np.asarray(periodic_nmpc.nlp[0].x_bounds[key].min[:, 0], dtype=float).copy(),
+            np.asarray(periodic_nmpc.nlp[0].x_bounds[key].max[:, 0], dtype=float).copy(),
+        )
+        for key in periodic_nmpc.nlp[0].x_bounds.keys()
+        if key.startswith("last_pulse_width_")
+    }
     periodic_nmpc.advance_window_bounds_states(adapted_solution)
+    for key, (lower, upper) in first_pw_bounds.items():
+        periodic_nmpc.nlp[0].x_bounds[key].min[:, 0] = lower
+        periodic_nmpc.nlp[0].x_bounds[key].max[:, 0] = upper
+    if first_pw_bounds:
+        periodic_nmpc._sync_acados_state_bounds()
+    periodic_nmpc._cocofest_preserve_common_applied_pw_seed = bool(
+        first_pw_bounds
+    )
     if warmup_transfer_mode == "phase_shift":
         apply_phase_shifted_warmup_initial_guess(periodic_nmpc, adapted_solution)
         fatigue_warmstart_summary = {}
@@ -15577,6 +16646,7 @@ def apply_standard_warmup_to_periodic_nmpc(
         raise ValueError(
             "--acados-standard-warmup-transfer must be 'advance' or 'phase_shift'."
         )
+    periodic_nmpc._cocofest_preserve_common_applied_pw_seed = False
     if echo:
         for summary in pulse_width_initial_guess_summary(periodic_nmpc):
             print(
@@ -15683,10 +16753,29 @@ def apply_solution_directly_to_periodic_nmpc_initial_guess(
     recenter_kinematic_bounds: bool = False,
     recenter_position_bounds: bool = False,
     recenter_first_node_bounds: bool = False,
+    translate_absolute_position_bounds: bool = False,
 ):
     adapted_solution = _adapt_warmup_solution_to_periodic_nodes(periodic_nmpc, solution)
     states = adapted_solution.decision_states(to_merge=SolutionMerge.NODES)
     controls = adapted_solution.decision_controls(to_merge=SolutionMerge.NODES)
+
+    if translate_absolute_position_bounds:
+        # An exact common seed can start one consumed warmup cycle later than
+        # this freshly constructed OCP. Translate its absolute coordinate
+        # bounds BEFORE copying/clipping the seed; finalizing the reference
+        # afterwards cannot recover states already clipped to the old cycle.
+        position_key = getattr(
+            periodic_nmpc, "position_state_key", "theta" if "theta" in states else "q"
+        )
+        wheel_index = getattr(periodic_nmpc, "wheel_state_index", 0 if position_key == "theta" else 2)
+        nlp = periodic_nmpc.nlp[0]
+        shift = float(states[position_key][wheel_index, 0] - nlp.x_init[position_key].init[wheel_index, 0])
+        if not np.isfinite(shift):
+            raise ValueError("The common seed absolute-position shift must be finite.")
+        if shift != 0.0:
+            bounds = nlp.x_bounds[position_key]
+            bounds.min[wheel_index, :] += shift
+            bounds.max[wheel_index, :] += shift
 
     for key in periodic_nmpc.nlp[0].x_init.keys():
         if key not in states:
@@ -15712,7 +16801,7 @@ def apply_solution_directly_to_periodic_nmpc_initial_guess(
             )
         target[:, :] = values
 
-    if recenter_kinematic_bounds or recenter_position_bounds:
+    if recenter_kinematic_bounds or (recenter_position_bounds and not translate_absolute_position_bounds):
         recentered_keys = (
             ("q", "qdot", "theta", "omega")
             if recenter_kinematic_bounds
@@ -15741,14 +16830,21 @@ def apply_solution_directly_to_periodic_nmpc_initial_guess(
 
     if recenter_first_node_bounds:
         for key in periodic_nmpc.nlp[0].x_init.keys():
+            if key.startswith(PW_SLEW_PREFIX):
+                continue
             if key not in periodic_nmpc.nlp[0].x_bounds.keys():
                 continue
             first_state = np.asarray(
                 periodic_nmpc.nlp[0].x_init[key].init[:, 0], dtype=float
             )
             bounds = periodic_nmpc.nlp[0].x_bounds[key]
-            bounds.min[:, 0] = first_state
-            bounds.max[:, 0] = first_state
+            rows = np.arange(first_state.size)
+            if translate_absolute_position_bounds and key == position_key:
+                # Translation preserves START's configured slack too; other
+                # first states are paired with the exact common seed.
+                rows = rows[rows != wheel_index]
+            bounds.min[rows, 0] = first_state[rows]
+            bounds.max[rows, 0] = first_state[rows]
 
     periodic_nmpc._correct_init_guess_to_fit_bounds(corrected_input="states")
     periodic_nmpc._correct_init_guess_to_fit_bounds(corrected_input="controls")
@@ -15756,8 +16852,21 @@ def apply_solution_directly_to_periodic_nmpc_initial_guess(
     return adapted_solution
 
 
+def _common_seed_uses_absolute_position_translation(args, seed, mechanical_bridge: bool) -> bool:
+    """Only an exactly validated IPOPT cycle-1 common seed uses this path."""
+    metadata = getattr(seed, "metadata", None) or {}
+    return bool(
+        getattr(args, "solver", None) == "acados"
+        and getattr(args, "formulation", "dynamic") == "dynamic"
+        and not mechanical_bridge
+        and not getattr(args, "common_initial_solution_feasibility_probe", False)
+        and metadata.get("producer_solver") == "ipopt"
+        and metadata.get("cycles_per_window") == 1
+    )
+
+
 def _common_initial_solution_recenter_modes(
-    args, mechanical_bridge: bool
+    args, mechanical_bridge: bool, translate_absolute_position_bounds: bool = False
 ) -> tuple[bool, bool, bool]:
     """Separate a formulation bridge from an exact first-node pairing.
 
@@ -15765,10 +16874,14 @@ def _common_initial_solution_recenter_modes(
     the lifted trajectory.  Pairing two runs of the *same* formulation only
     requires fixing the first state to the common seed; widening the path and
     terminal columns would silently change the physical cadence constraints.
+    Exact common IPOPT seeds must pair their first physical states before
+    clipping, even without the legacy opt-in flag. Their absolute position
+    keeps its translated START slack rather than being fixed to a point.
     """
 
     recenter_first_node = bool(
         args.common_initial_solution_recenter_first_node_bounds
+        or translate_absolute_position_bounds
     )
     return (
         bool(mechanical_bridge),
@@ -15784,7 +16897,7 @@ def _copy_list_values(source, target, attribute_name: str) -> None:
 
 
 def _copy_refinement_initial_guesses(source, target, has_terminal_node: bool) -> None:
-    """Copy shooting-node guesses onto a denser collocation grid when needed."""
+    """Interpolate initial guesses between equivalent collocation grids."""
 
     source_keys = set(source.keys())
     for key in target.keys():
@@ -15798,21 +16911,23 @@ def _copy_refinement_initial_guesses(source, target, has_terminal_node: bool) ->
 
         source_len = source_values.shape[1]
         target_len = target_values.shape[1]
-        source_intervals = source_len - int(has_terminal_node)
-        target_intervals = target_len - int(has_terminal_node)
         if (
             source_values.shape[0] != target_values.shape[0]
-            or source_intervals <= 0
-            or target_intervals % source_intervals != 0
+            or source_len <= int(has_terminal_node)
+            or target_len <= int(has_terminal_node)
         ):
             raise ValueError(
                 f"Cannot copy refinement initial guess '{key}' with shape "
                 f"{source_values.shape} into shape {target_values.shape}."
             )
 
-        subdivision = target_intervals // source_intervals
-        source_grid = np.arange(source_len, dtype=float)
-        target_grid = np.arange(target_len, dtype=float) / subdivision
+        # Recovery can use a lower Radau degree than the target NLP (e.g.,
+        # 5 -> 3). The prior integer-subdivision rule worked only in the
+        # refining direction and prevented exactly that robust recovery path.
+        # Both traces span the same one-cycle horizon, so normalize their
+        # grids and preserve their first/last values by interpolation.
+        source_grid = np.linspace(0.0, 1.0, source_len)
+        target_grid = np.linspace(0.0, 1.0, target_len)
         for row, values in enumerate(source_values):
             target_values[row, :] = np.interp(target_grid, source_grid, values)
 
@@ -16748,6 +17863,12 @@ def recenter_absolute_wheel_q_reference_from_initial_guess(
     periodic_nmpc._cocofest_terminal_wheel_q_center = (
         initial_wheel_q + horizon_cycles * cycle_shift
     )
+    # Loading a transported RHO seed can shift every absolute crank angle.
+    # Single-shot FHO does not advance a window, so recenter its internal
+    # cycle seams here as well, before synchronizing the solver bounds.
+    MyCyclicNMPC._recenter_wheel_cycle_boundary_constraints(
+        periodic_nmpc, first_wheel_q=initial_wheel_q, cycle_shift=cycle_shift
+    )
     set_terminal_wheel_q_bound_slack(
         periodic_nmpc,
         periodic_nmpc.terminal_state_slack[position_key][wheel_index],
@@ -16771,12 +17892,6 @@ def finalize_absolute_wheel_q_initial_guess(
         ]
     )
     periodic_nmpc._correct_init_guess_to_fit_bounds(corrected_input="states")
-    # Loading a transported RHO seed can shift every absolute crank angle.
-    # Single-shot FHO does not advance a window, so recenter its internal
-    # cycle seams here as well, before synchronizing the solver bounds.
-    MyCyclicNMPC._recenter_wheel_cycle_boundary_constraints(
-        periodic_nmpc, first_wheel_q=initial_wheel_q, cycle_shift=cycle_shift
-    )
     terminal_after_clip = float(
         np.asarray(periodic_nmpc.nlp[0].x_init[position_key].init, dtype=float)[
             wheel_index, -1
@@ -17203,37 +18318,48 @@ def run_standard_ipopt_warmup(
         explicit_seed = _resolve_standard_warmup_seed(explicit_seed)
         print(f"warmup_seed: explicit ({explicit_seed})")
         warmup_seed = _load_warmup_cache(explicit_seed)
-        declared_legacy_torque = getattr(
-            args,
-            "legacy_standard_warmup_seed_signed_torque",
-            None,
-        )
-        if warmup_seed.metadata is None and declared_legacy_torque is not None:
-            _attach_declared_legacy_warmup_metadata(
+        # The repository's legacy seed predates metadata.  Do not fabricate a
+        # Radau-5 provenance for it: at 30 Hz it must not initialize a run
+        # because the historical Radau-3 bridge is now known to disagree with
+        # the DOP853 replay.  Fall through to the cache/new Radau-5 warmup.
+        if int(args.stimulations_per_cycle) == 30 and warmup_seed.metadata is None:
+            print(
+                "warmup_seed: ignored undocumented legacy seed at 30 Hz; "
+                "building or loading a documented Radau-5 warmup instead"
+            )
+            explicit_seed = None
+        else:
+            declared_legacy_torque = getattr(
+                args,
+                "legacy_standard_warmup_seed_signed_torque",
+                None,
+            )
+            if warmup_seed.metadata is None and declared_legacy_torque is not None:
+                _attach_declared_legacy_warmup_metadata(
+                    warmup_seed,
+                    args,
+                    explicit_seed,
+                    declared_legacy_torque,
+                )
+                print(
+                    "warmup_seed_legacy_torque_assertion_nm: " f"{declared_legacy_torque}"
+                )
+            allow_torque_continuation = bool(
+                getattr(args, "standard_warmup_seed_continuation", False)
+            )
+            _validate_standard_warmup_seed(
                 warmup_seed,
                 args,
                 explicit_seed,
-                declared_legacy_torque,
+                allow_torque_continuation=allow_torque_continuation,
             )
-            print(
-                "warmup_seed_legacy_torque_assertion_nm: " f"{declared_legacy_torque}"
-            )
-        allow_torque_continuation = bool(
-            getattr(args, "standard_warmup_seed_continuation", False)
-        )
-        _validate_standard_warmup_seed(
-            warmup_seed,
-            args,
-            explicit_seed,
-            allow_torque_continuation=allow_torque_continuation,
-        )
-        if allow_torque_continuation:
-            print(
-                "warmup_seed_torque_continuation: "
-                f"source={warmup_seed.metadata.get('signed_crank_torque_nm')} "
-                f"target={args.constant_crank_torque}"
-            )
-        return warmup_seed
+            if allow_torque_continuation:
+                print(
+                    "warmup_seed_torque_continuation: "
+                    f"source={warmup_seed.metadata.get('signed_crank_torque_nm')} "
+                    f"target={args.constant_crank_torque}"
+                )
+            return warmup_seed
 
     cache_path = _warmup_cache_path(
         args, model_path, simulation_conditions, cycling_info
@@ -17245,8 +18371,10 @@ def run_standard_ipopt_warmup(
         return warmup_seed
 
     warmup_mhe_info = dict(mhe_info)
+    warmup_transcription = _standard_warmup_transcription_metadata(args)
     warmup_mhe_info["ode_solver"] = OdeSolver.COLLOCATION(
-        polynomial_degree=3, method="radau"
+        polynomial_degree=warmup_transcription["collocation_degree"],
+        method=warmup_transcription["collocation_method"],
     )
     # The endurance benchmark is SX-only.  Keeping the standard IPOPT bridge
     # in the same graph family avoids paying MX evaluation costs in an
@@ -17283,6 +18411,7 @@ def run_standard_ipopt_warmup(
         ),
         linear_solver=_warmup_ipopt_linear_solver(args),
         hsl_library=getattr(args, "ipopt_hsl_library", None),
+        print_level=int(getattr(args, "ipopt_print_level", 0)),
     )
     warmup_sol = super(RecedingHorizonOptimization, warmup_nmpc).solve(
         solver=warmup_solver,
@@ -17386,10 +18515,144 @@ def _should_apply_transfer_phase_one(
     )
 
 
-def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
+def build_unilateral_runtime(args: argparse.Namespace, *, echo: bool = False) -> dict:
+    """Construct one live unilateral periodic NMPC without solving it.
+
+    This is the supported construction seam for independent isokinetic arms.
+    ``args`` is the same validated namespace used by :func:`solve_case`; the
+    returned ``nmpc`` and ``solver`` must stay in the caller process so terminal
+    ``E_prod`` targets can be updated without rebuilding code.
+    """
+    return solve_case(args, echo=echo, build_only=True)
+
+
+def solve_case(
+    args: argparse.Namespace,
+    echo: bool = True,
+    *,
+    build_only: bool = False,
+    on_runtime_built=None,
+) -> dict:
+    if (
+        int(getattr(args, "stimulations_per_cycle", 30)) == 30
+        and str(getattr(args, "ode_solver", "rk4")).lower() == "collocation"
+        and str(getattr(args, "collocation_method", "radau")).lower() == "radau"
+        and int(getattr(args, "collocation_degree", 3)) < 5
+    ):
+        raise ValueError(
+            "Radau-3/4 at 30 Hz is disabled because its disagreement with the "
+            "independent DOP853 replay was too large. Use Radau-5 or higher. "
+            "Radau-3 is reserved for the separate 50 Hz validation benchmark."
+        )
     preparation_start = perf_counter()
+    args.bilateral_reduced = bool(getattr(args, "bilateral_reduced", False))
+    if args.bilateral_reduced and args.mechanical_formulation != "reduced":
+        raise ValueError("--bilateral-reduced requires reduced mechanics.")
+    # The bilateral reduced mechanics and the local Ding elimination operate on
+    # independent muscle copies.  Neither construction depends on a free crank
+    # acceleration, so isokinetic RHO and eight-muscle local capsules are valid
+    # numerical configurations.  The GUI capability policy stays conservative
+    # until its own user-facing validation is completed.
+    args.pulse_width_max_step_us = getattr(args, "pulse_width_max_step_us", None)
+    pulse_width_max_step_s = validate_max_step(
+        None if args.pulse_width_max_step_us is None else args.pulse_width_max_step_us * 1e-6
+    )
+    args.pulse_width_slew_formulation = validate_slew_formulation(
+        getattr(args, "pulse_width_slew_formulation", "lifting")
+    )
+    args.pulse_width_odd_interpolation = validate_odd_interpolation(
+        getattr(args, "pulse_width_odd_interpolation", False), max_step_s=pulse_width_max_step_s,
+        mechanical_formulation=getattr(args, "mechanical_formulation", "full"),
+        cycles_per_window=getattr(args, "cycles_per_window", 1),
+        stimulations_per_cycle=getattr(args, "stimulations_per_cycle", 30),
+        solver=getattr(args, "solver", "ipopt"),
+    )
+    args.pulse_width_slew_weight, args.pulse_width_slew_reference_us = validate_slew_regularization(
+        getattr(args, "pulse_width_slew_weight", 0.0),
+        getattr(args, "pulse_width_slew_reference_us", 100.0),
+        max_step_s=pulse_width_max_step_s,
+    )
+    if (
+        args.pulse_width_slew_formulation == "direct_constraints"
+        and args.pulse_width_slew_weight != 0.0
+    ):
+        raise ValueError(
+            "--pulse-width-slew-weight is not yet available with "
+            "--pulse-width-slew-formulation=direct_constraints."
+        )
+    if (
+        args.pulse_width_slew_formulation == "direct_constraints"
+        and str(getattr(args, "solver", "ipopt")).lower() == "acados"
+    ):
+        raise ValueError(
+            "--pulse-width-slew-formulation=direct_constraints is currently "
+            "available with IPOPT or MadNLP, not ACADOS."
+        )
+    maximum_rate_us_per_s = getattr(
+        args, "pulse_width_max_rate_us_per_s", None
+    )
+    args.pulse_width_control_mode = getattr(args, "pulse_width_control_mode", "direct")
+    args.pulse_width_max_rate_s_per_s = validate_rate_mode(
+        args.pulse_width_control_mode,
+        (
+            None
+            if maximum_rate_us_per_s is None
+            else float(maximum_rate_us_per_s) * 1e-6
+        ),
+    )
+    if args.pulse_width_control_mode == PW_RATE_MODE:
+        if args.model_formulation != "periodic_node":
+            raise ValueError(
+                "--pulse-width-control-mode=rate_state requires "
+                "--model-formulation=periodic_node."
+            )
+        if args.mechanical_formulation != "reduced":
+            raise ValueError(
+                "--pulse-width-control-mode=rate_state requires reduced mechanics."
+            )
+        if pulse_width_max_step_s is not None:
+            raise ValueError(
+                "The rate-state PW formulation replaces the auxiliary delta-PW "
+                "lift; do not combine it with --pulse-width-max-step-us."
+            )
+        if args.pulse_width_active_set != "none":
+            raise ValueError(
+                "The rate-state PW formulation requires "
+                "--pulse-width-active-set=none."
+            )
+        if float(args.control_regularization_weight) != 0.0:
+            raise ValueError(
+                "--control-regularization-weight is defined on direct pulse-width "
+                "controls and is not available in rate_state mode."
+            )
+        if "control" in parse_objectives(args.objective):
+            raise ValueError(
+                "The 'control' objective minimizes direct pulse widths and is "
+                "not available in rate_state mode; use force and/or fatigue."
+            )
+    if pulse_width_max_step_s is not None and (
+        args.mechanical_formulation != "reduced" or args.cycles_per_window != 1
+    ):
+        raise ValueError("--pulse-width-max-step-us requires reduced mechanics and one-cycle windows.")
+    args.acados_qp_solver_requested = getattr(
+        args,
+        "acados_qp_solver_requested",
+        getattr(args, "acados_qp_solver", "auto"),
+    )
+    args.acados_qp_solver = resolve_acados_qp_solver(args)
     args._endurance_rollout_options = resolve_endurance_rollout_options(args)
-    if args._endurance_rollout_options is not None:
+    args._muscle_horizon_options = resolve_muscle_horizon_options(args)
+    if (
+        args._endurance_rollout_options is not None
+        and args._muscle_horizon_options is not None
+    ):
+        raise ValueError(
+            "Select either the frozen endurance rollout or the muscle horizon, not both."
+        )
+    if (
+        args._endurance_rollout_options is not None
+        or args._muscle_horizon_options is not None
+    ):
         # The historical multibody aggregate builder treats every parameter
         # as a stimulation series. Compact output preserves fixed profiles.
         args.compact_rho_output = True
@@ -17428,6 +18691,7 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         args.disable_periodic_fes_warmup_projection = True
     else:
         args.energy_target_j = None
+    validate_acados_ipopt_initialization_policy(args)
     if (
         getattr(args, "rho_replay_checkpoint_output", None) is not None
         and not args.retry_failed_rho_without_advance
@@ -17590,6 +18854,7 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             "--acados-ipopt-recovery."
         )
     forced_cap_rhos = tuple(args.acados_forced_iteration_cap_rhos or ())
+    validate_acados_rho_initial_iteration_budget(args)
     if forced_cap_rhos:
         if args.solver != "acados":
             raise ValueError(
@@ -17807,6 +19072,20 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             raise ValueError(
                 "--common-initial-solution and "
                 "--common-initial-solution-output must not be the same file."
+            )
+    if getattr(args, "common_initial_solution_feasibility_probe", False):
+        if (
+            args.common_initial_solution is None
+            or args.single_shot
+            or args.n_windows != 1
+            or args.cycles_per_window != 1
+            or not args.common_initial_solution_recenter_first_node_bounds
+        ):
+            raise ValueError(
+                "--common-initial-solution-feasibility-probe requires "
+                "--common-initial-solution, one non-single-shot RHO "
+                "(--n-windows=1 and --cycles-per-window=1), and "
+                "--common-initial-solution-recenter-first-node-bounds."
             )
     if getattr(args, "full_horizon_prefix_solution", None) is not None:
         if not args.single_shot or args.common_initial_solution is None:
@@ -18401,9 +19680,12 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             )
 
     example_dir = Path(__file__).resolve().parent
-    model_path = (
-        example_dir / "../../msk_models/Wu/Modified_Wu_Shoulder_Model_Cycling.bioMod"
+    model_filename = (
+        "Modified_Wu_Shoulder_Model_Cycling_Bilateral.bioMod"
+        if getattr(args, "bilateral_reduced", False)
+        else "Modified_Wu_Shoulder_Model_Cycling.bioMod"
     )
+    model_path = example_dir / "../../msk_models/Wu" / model_filename
     reduced_cycling_dynamics = None
     reduced_profile_build_time_s = 0.0
     build_mechanical_audit_profile = bool(
@@ -18432,7 +19714,14 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         reduced_profile_path = (
             args.reduced_cycling_profile
             if args.reduced_cycling_profile is not None
-            else example_dir / "result" / "cache" / "reduced_cycling_fourier12.npz"
+            else example_dir
+            / "result"
+            / "cache"
+            / (
+                "reduced_cycling_fourier12_bilateral.npz"
+                if getattr(args, "bilateral_reduced", False)
+                else "reduced_cycling_fourier12.npz"
+            )
         )
         if reduced_profile_path.exists():
             try:
@@ -18447,6 +19736,10 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                     RuntimeWarning,
                     stacklevel=2,
                 )
+                # A rejected cache must not remain available to the OCP
+                # construction below.  In particular the unilateral cache has
+                # a valid Fourier shape but incompatible muscle identities.
+                reduced_cycling_dynamics = None
         if (
             reduced_cycling_dynamics is None
             or reduced_cycling_dynamics.muscle_geometry is None
@@ -18620,11 +19913,20 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         }
     else:
         cycling_info["constant_crank_torque"] = args.constant_crank_torque
-    args.reduced_internal_crank_velocity_guard = bool(
-        args.solver == "acados"
-        and args.mechanical_formulation == "reduced"
-        and isokinetic_config is None
+    args.reduced_internal_crank_velocity_guard = (
+        resolve_reduced_internal_crank_velocity_guard(args)
     )
+    rk4_fraction = getattr(args, "reduced_internal_crank_velocity_rk4_fraction", None)
+    if rk4_fraction is not None and (
+        not np.isfinite(rk4_fraction) or not 0.0 < float(rk4_fraction) <= 1.0
+    ):
+        raise ValueError(
+            "reduced_internal_crank_velocity_rk4_fraction must lie in (0, 1]."
+        )
+    if rk4_fraction is not None and not args.reduced_internal_crank_velocity_guard:
+        raise ValueError(
+            "The RK4 internal cadence guard requires the reduced internal guard."
+        )
     simulation_conditions = {
         "n_cycles_simultaneous": args.cycles_per_window,
         "stimulation": total_stimulations,
@@ -18637,6 +19939,8 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         "terminal_reserve_temperature": args.terminal_reserve_temperature,
         **({"endurance_rollout_options": args._endurance_rollout_options}
            if args._endurance_rollout_options is not None else {}),
+        **({"muscle_horizon_options": args._muscle_horizon_options}
+           if args._muscle_horizon_options is not None else {}),
         "control_regularization_weight": args.control_regularization_weight,
         "control_regularization_target": args.control_regularization_target,
         "wheel_qdot_regularization_weight": args.wheel_qdot_regularization_weight,
@@ -18656,6 +19960,9 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         "enforce_reduced_internal_crank_velocity_guard": bool(
             args.reduced_internal_crank_velocity_guard
         ),
+        "reduced_internal_crank_velocity_rk4_fraction": getattr(
+            args, "reduced_internal_crank_velocity_rk4_fraction", None
+        ),
         "terminal_qdot_regularization_weight": (
             args.terminal_qdot_regularization_weight
         ),
@@ -18664,7 +19971,14 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         ),
         "state_scaling": args.state_scaling,
         "pulse_width_scaling": args.pulse_width_scaling,
+        "pulse_width_control_mode": args.pulse_width_control_mode,
+        "pulse_width_max_rate_s_per_s": args.pulse_width_max_rate_s_per_s,
         "pulse_width_active_set_mode": args.pulse_width_active_set,
+        "pulse_width_max_step_s": pulse_width_max_step_s,
+        "pulse_width_slew_formulation": args.pulse_width_slew_formulation,
+        "pulse_width_odd_interpolation": args.pulse_width_odd_interpolation,
+        "pulse_width_slew_weight": args.pulse_width_slew_weight,
+        "pulse_width_slew_reference_us": args.pulse_width_slew_reference_us,
         "pulse_width_active_threshold": args.pulse_width_active_threshold,
         "pulse_width_active_margin": args.pulse_width_active_margin,
         "wheel_cycle_boundary_slack": (
@@ -18678,6 +19992,7 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             else None
         ),
         "mechanical_formulation": args.mechanical_formulation,
+        "bilateral_reduced": args.bilateral_reduced,
         "reduced_cycling_dynamics": reduced_cycling_dynamics,
         "formulation": args.formulation,
         "isokinetic_omega": (
@@ -18751,10 +20066,31 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         ] = prefetched_standard_warmup.decision_controls(to_merge=SolutionMerge.NODES)
 
     nmpc = prepare_nmpc(model, mhe_info, cycling_info, nmpc_simulation_conditions)
+    nmpc.preserve_warmup_pulse_width_seed = bool(
+        getattr(args, "preserve_warmup_pulse_width_seed", False)
+    )
     nmpc.n_cycles_simultaneous = args.cycles_per_window
     nmpc._cocofest_mechanical_equivalence_dynamics = reduced_cycling_dynamics
+    if args.bilateral_reduced:
+        # The source FesMskModel stays unilateral until prepare_nmpc creates
+        # the reduced OCP. Publish the actual state/control topology from that
+        # OCP for result serialization and capacity diagnostics.
+        active_muscles = nmpc.nlp[0].model.muscles_dynamics_model
+        args.muscle_names = [muscle.muscle_name for muscle in active_muscles]
+        fatigue_capacity_scales = {
+            f"A_{muscle.muscle_name}": float(muscle.a_scale)
+            for muscle in active_muscles
+        }
     if args.solver == "acados":
         patch_bioptim_acados_interface()
+        if getattr(args, "acados_ding_local_reduction", False):
+            if args.acados_integrator_type != "IRK":
+                raise ValueError("--acados-ding-local-reduction requires --acados-integrator-type IRK")
+            if args.acados_initial_irk_rollout or args.acados_transfer_irk_rollout:
+                raise ValueError("Ding local reduction does not yet support the separate native IRK rollout seed options")
+            from cocofest.optimization.acados_ding_local_reduction import install_acados_ding_local_reduction
+            install_acados_ding_local_reduction()
+            nmpc._cocofest_acados_ding_local_reduction = True
 
     # These settings define the physical receding-horizon transfer, not the
     # numerical backend. Apply them to periodic IPOPT diagnostics as well so a
@@ -19226,6 +20562,10 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             )
             print(f"acados_print_level: {args.acados_print_level}")
             print("bioptim_acados_interface_patch: True")
+            print(
+                "acados_qp_solver_requested: "
+                f"{args.acados_qp_solver_requested}"
+            )
             print(f"acados_qp_solver: {args.acados_qp_solver}")
             print(f"acados_integrator_type: {args.acados_integrator_type}")
             print(f"acados_wheel_q_slack: {args.acados_wheel_q_slack}")
@@ -19546,7 +20886,17 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                     "common_initial_solution_warmup_cycles: adopted "
                     f"({adopted_warmup_cycles})"
                 )
-        _validate_common_initial_solution_metadata(common_seed, args, common_seed_path)
+        _validate_common_initial_solution_metadata(
+            common_seed,
+            args,
+            common_seed_path,
+            feasibility_probe=bool(
+                getattr(args, "common_initial_solution_feasibility_probe", False)
+            ),
+        )
+        validate_acados_ipopt_common_seed_provenance(
+            common_seed, args, common_seed_path
+        )
         initial_control_seed = (common_seed.metadata or {}).get(
             "initial_control_seed"
         )
@@ -19585,17 +20935,23 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             seed_mechanical_formulation is not None
             and seed_mechanical_formulation != args.mechanical_formulation
         )
+        translate_absolute_position_bounds = _common_seed_uses_absolute_position_translation(
+            args, common_seed, mechanical_bridge
+        )
         (
             recenter_kinematic_bounds,
             recenter_position_bounds,
             recenter_first_node_bounds,
-        ) = _common_initial_solution_recenter_modes(args, mechanical_bridge)
+        ) = _common_initial_solution_recenter_modes(
+            args, mechanical_bridge, translate_absolute_position_bounds
+        )
         apply_solution_directly_to_periodic_nmpc_initial_guess(
             nmpc,
             common_seed,
             recenter_kinematic_bounds=recenter_kinematic_bounds,
             recenter_position_bounds=recenter_position_bounds,
             recenter_first_node_bounds=recenter_first_node_bounds,
+            translate_absolute_position_bounds=translate_absolute_position_bounds,
         )
         # Loading any seed can change the first crank angle, including when
         # producer and consumer share the same mechanical formulation.  The
@@ -19615,8 +20971,14 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                 f"mechanical_bridge={mechanical_bridge}, "
                 f"recenter_kinematic_bounds={recenter_kinematic_bounds}, "
                 f"recenter_position_bounds={recenter_position_bounds}, "
+                f"translate_absolute_position_bounds={translate_absolute_position_bounds}, "
                 f"recenter_first_node_bounds={recenter_first_node_bounds})"
             )
+            if getattr(args, "common_initial_solution_feasibility_probe", False):
+                print(
+                    "common_initial_solution_feasibility_probe: True "
+                    "(objective metadata mismatch permitted only)"
+                )
             if terminal_contact_projection is not None:
                 print(
                     "common_initial_solution_terminal_contact_projection: "
@@ -20262,6 +21624,8 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
     forced_iteration_cap_summaries = []
     forced_iteration_cap_rhos = set(args.acados_forced_iteration_cap_rhos or ())
     forced_iteration_cap_armed_rhos = set()
+    initial_iteration_budget_summaries = []
+    initial_iteration_budget_attempted_rhos = set()
     ipopt_recovery_summaries = []
     nlp_failed_rho_phase_one_summaries = []
     acados_failed_rho_phase_one_summaries = []
@@ -22079,6 +23443,23 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                     f"signature={next_audit['signature']} "
                     f"finite={next_audit['finite']}"
                 )
+        initial_iteration_budget = getattr(args, "acados_rho_initial_iteration_budget", None)
+        if args.solver == "acados" and initial_iteration_budget is not None:
+            cap_installed = install_acados_forced_iteration_cap(
+                _nmpc,
+                nominal_iterations=args.max_acados_iterations,
+                summaries=initial_iteration_budget_summaries,
+                echo=echo,
+            )
+            if continue_solving and completed_physical_rhos >= 1:
+                if not cap_installed:
+                    raise RuntimeError("Cannot install the requested ACADOS initial RHO budget.")
+                arm_acados_rho_initial_iteration_budget(
+                    _nmpc,
+                    target_rho=completed_physical_rhos + 1,
+                    budget=initial_iteration_budget,
+                    attempted_rhos=initial_iteration_budget_attempted_rhos,
+                )
         if args.solver == "acados" and forced_iteration_cap_rhos:
             cap_installed = install_acados_forced_iteration_cap(
                 _nmpc,
@@ -22298,6 +23679,22 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             enable_exact_initial_nlp_audit(nmpc, solver)
             if echo:
                 print("exact_initial_nlp_audit: enabled")
+
+    # Public, deliberately narrow construction seam for the independent-arm
+    # coordinator.  All historical model/OCP construction remains above; a
+    # caller can retain this live unilateral NMPC and update E_prod bounds
+    # between solves without re-entering code generation.
+    runtime = {
+        "nmpc": nmpc,
+        "solver": solver,
+        "args": args,
+        "isokinetic_config": isokinetic_config,
+        "external_force": cycling_info.get("resistive_torque"),
+    }
+    if on_runtime_built is not None:
+        on_runtime_built(runtime)
+    if build_only:
+        return runtime
 
     initial_acados_irk_rollout_summary = None
     if args.solver == "acados" and args.acados_initial_irk_rollout:
@@ -22663,6 +24060,8 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             summary["initial_guess_control_traces"] = initial_guess_control_traces
         summary["args"] = args
         summary["control_bounds"] = _control_bounds_summary(nmpc)
+        attach_pulse_width_command_audit(summary, args)
+        attach_slew_audit(summary, args)
         summary["pulse_width_active_set_summary"] = pulse_width_active_set_summary(nmpc)
         summary["initial_guess_audits"] = initial_guess_audits
         summary["initial_guess_preparation_time_s"] = initial_guess_preparation_time_s
@@ -22966,6 +24365,10 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             summary["acados_forced_iteration_cap_summaries"] = (
                 forced_iteration_cap_summaries
             )
+        if getattr(args, "acados_rho_initial_iteration_budget", None) is not None:
+            summary["acados_rho_initial_iteration_budget"] = summarize_acados_rho_initial_iteration_budget(
+                args, initial_iteration_budget_summaries, ipopt_recovery_summaries,
+            )
         summary["rho_replay_checkpoint"] = rho_replay_checkpoint_summary
         summary["rho_prepared_checkpoints"] = rho_prepared_checkpoint_summaries
         summary["execution_timing"] = {
@@ -22990,6 +24393,8 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
             summary["parametric_kkt_prediction_audits"] = (
                 parametric_kkt_prediction_audits
             )
+        attach_pulse_width_command_audit(summary, args)
+        attach_slew_audit(summary, args)
         return summary
     rho_solve_loop_wall_time_s = perf_counter() - rho_solve_loop_start
     post_solve_start = perf_counter()
@@ -23193,6 +24598,10 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         summary["acados_forced_iteration_cap_summaries"] = (
             forced_iteration_cap_summaries
         )
+    if getattr(args, "acados_rho_initial_iteration_budget", None) is not None:
+        summary["acados_rho_initial_iteration_budget"] = summarize_acados_rho_initial_iteration_budget(
+            args, initial_iteration_budget_summaries, ipopt_recovery_summaries,
+        )
     if ipopt_recovery_summaries:
         if recovery_backend == "madnlp":
             summary["madnlp_recovery_summaries"] = ipopt_recovery_summaries
@@ -23254,6 +24663,8 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
         summary["initial_guess_control_traces"] = initial_guess_control_traces
     summary["args"] = args
     summary["control_bounds"] = _control_bounds_summary(nmpc)
+    attach_pulse_width_command_audit(summary, args)
+    attach_slew_audit(summary, args)
     summary["pulse_width_active_set_summary"] = pulse_width_active_set_summary(nmpc)
     summary["initial_guess_audits"] = initial_guess_audits
     summary["integrator_map_initial_guess"] = integrator_map_initial_guess
@@ -23303,6 +24714,19 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                         summary.get("control_traces") or {},
                         cycle_count=audited_cycles,
                         capacity_scales=fatigue_capacity_scales,
+                        crank_velocity_target_rad_s=float(
+                            getattr(
+                                args,
+                                "wheel_qdot_regularization_target",
+                                DEFAULT_CRANK_QDOT_RAD_S,
+                            )
+                        ),
+                        crank_velocity_fast_margin_rad_s=(
+                            _effective_wheel_qdot_bound_margins(args)[0]
+                        ),
+                        crank_velocity_slow_margin_rad_s=(
+                            _effective_wheel_qdot_bound_margins(args)[1]
+                        ),
                     )
                 )
                 summary["high_accuracy_trace_rollout"]["bounded"] = bool(
@@ -23311,6 +24735,18 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                 summary["high_accuracy_trace_rollout"]["covered_cycles"] = (
                     covered_cycles
                 )
+                dense_velocity_audit = summary["high_accuracy_trace_rollout"].get(
+                    "dense_crank_velocity_audit"
+                )
+                if echo and dense_velocity_audit is not None:
+                    print(
+                        "dense_crank_velocity_audit: "
+                        f"omega=[{dense_velocity_audit['minimum_crank_velocity_rad_s']:.8f}, "
+                        f"{dense_velocity_audit['maximum_crank_velocity_rad_s']:.8f}] rad/s "
+                        f"bounds=[{dense_velocity_audit['lower_bound_rad_s']:.8f}, "
+                        f"{dense_velocity_audit['upper_bound_rad_s']:.8f}] "
+                        f"violation={dense_velocity_audit['maximum_bound_violation_rad_s']:.8g} rad/s"
+                    )
             except Exception as exc:
                 summary["high_accuracy_trace_rollout"] = {
                     "available": False,
@@ -23320,6 +24756,11 @@ def solve_case(args: argparse.Namespace, echo: bool = True) -> dict:
                     "covered_cycles": covered_cycles,
                     "bounded": bool(audited_cycles < covered_cycles),
                 }
+                if echo:
+                    print(
+                        "high_accuracy_trace_rollout: unavailable "
+                        f"({type(exc).__name__}: {exc})"
+                    )
         else:
             summary["high_accuracy_trace_rollout"] = {
                 "available": False,

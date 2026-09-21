@@ -346,6 +346,7 @@ def write_rho_seed_prefix(
                 f"Cannot extract {target_cycles} cycles from {source_cycles}."
             )
         payload: dict[str, np.ndarray] = {}
+        discarded_failed_window = False
         for key in data.files:
             if key == "metadata__json":
                 continue
@@ -353,18 +354,33 @@ def write_rho_seed_prefix(
             if key.startswith("states__"):
                 intervals, remainder = divmod(values.shape[-1] - 1, source_cycles)
                 if remainder:
-                    raise ValueError(
-                        f"State seed '{key}' cannot be divided into "
-                        f"{source_cycles} cycles."
+                    # Compact RHO export retains the last attempted window,
+                    # even when that window failed and the metadata correctly
+                    # reports only the certified prefix.  A complete trailing
+                    # attempt has the same per-cycle layout as the prefix and
+                    # must be discarded before an FHO seed is sliced.
+                    intervals, trailing_remainder = divmod(
+                        values.shape[-1] - 1, source_cycles + 1
                     )
+                    if trailing_remainder:
+                        raise ValueError(
+                            f"State seed '{key}' cannot be divided into "
+                            f"{source_cycles} certified cycles (or one trailing failed window)."
+                        )
+                    discarded_failed_window = True
                 payload[key] = values[..., : target_cycles * intervals + 1]
             elif key.startswith("controls__"):
                 nodes, remainder = divmod(values.shape[-1], source_cycles)
                 if remainder:
-                    raise ValueError(
-                        f"Control seed '{key}' cannot be divided into "
-                        f"{source_cycles} cycles."
+                    nodes, trailing_remainder = divmod(
+                        values.shape[-1], source_cycles + 1
                     )
+                    if trailing_remainder:
+                        raise ValueError(
+                            f"Control seed '{key}' cannot be divided into "
+                            f"{source_cycles} certified cycles (or one trailing failed window)."
+                        )
+                    discarded_failed_window = True
                 payload[key] = values[..., : target_cycles * nodes]
             else:
                 payload[key] = values
@@ -373,6 +389,7 @@ def write_rho_seed_prefix(
             "cycles_per_window": target_cycles,
             "producer_mode": "receding_horizon_prefix",
             "producer_source_cycles": source_cycles,
+            "discarded_trailing_failed_rho_window": discarded_failed_window,
         }
     )
     payload["metadata__json"] = np.asarray(
@@ -397,6 +414,7 @@ def write_rho_seed_cycle(
             )
         cycle_index = cycle_number - 1
         payload: dict[str, np.ndarray] = {}
+        discarded_failed_window = False
         for key in data.files:
             if key == "metadata__json":
                 continue
@@ -404,15 +422,23 @@ def write_rho_seed_cycle(
             if key.startswith("states__"):
                 intervals, remainder = divmod(values.shape[-1] - 1, source_cycles)
                 if remainder:
-                    raise ValueError(f"State seed '{key}' has an invalid cycle layout.")
+                    intervals, trailing_remainder = divmod(
+                        values.shape[-1] - 1, source_cycles + 1
+                    )
+                    if trailing_remainder:
+                        raise ValueError(f"State seed '{key}' has an invalid cycle layout.")
+                    discarded_failed_window = True
                 start = cycle_index * intervals
                 payload[key] = values[..., start : start + intervals + 1].copy()
             elif key.startswith("controls__"):
                 nodes, remainder = divmod(values.shape[-1], source_cycles)
                 if remainder:
-                    raise ValueError(
-                        f"Control seed '{key}' has an invalid cycle layout."
-                    )
+                    nodes, trailing_remainder = divmod(values.shape[-1], source_cycles + 1)
+                    if trailing_remainder:
+                        raise ValueError(
+                            f"Control seed '{key}' has an invalid cycle layout."
+                        )
+                    discarded_failed_window = True
                 start = cycle_index * nodes
                 payload[key] = values[..., start : start + nodes].copy()
             else:
@@ -422,6 +448,7 @@ def write_rho_seed_cycle(
             "cycles_per_window": 1,
             "producer_mode": "receding_horizon_cycle_extraction",
             "producer_source_cycles": source_cycles,
+            "discarded_trailing_failed_rho_window": discarded_failed_window,
             "producer_cycle_number": cycle_number,
         }
     )
@@ -467,7 +494,13 @@ def write_rho_initial_state_homotopy_seed(
 
         source_keys = set(source.files) - {"metadata__json"}
         reference_keys = set(reference.files) - {"metadata__json"}
-        if source_keys != reference_keys or not source_keys <= set(target.files):
+        # ``applied_pulse_widths__*`` are RHO export telemetry, not FHO
+        # decision variables.  They are retained from the one-cycle RHO seed
+        # below but are intentionally absent from a monolithic FHO solution.
+        target_required_keys = {
+            key for key in source_keys if key.startswith(("states__", "controls__"))
+        }
+        if source_keys != reference_keys or not target_required_keys <= set(target.files):
             raise ValueError(
                 "The homotopy checkpoints do not expose matching variables."
             )
@@ -478,6 +511,11 @@ def write_rho_initial_state_homotopy_seed(
         for key in sorted(source_keys):
             source_values = np.asarray(source[key])
             reference_values = np.asarray(reference[key])
+            if key.startswith("applied_pulse_widths__"):
+                # Execution telemetry is neither an FHO decision variable nor
+                # part of the homotopy.  It can have a different sampling
+                # layout after a multi-cycle prefix and is intentionally omitted.
+                continue
             if source_values.shape != reference_values.shape:
                 raise ValueError(f"Homotopy variable '{key}' has incompatible shapes.")
             if key.startswith("states__"):
@@ -639,8 +677,14 @@ def append_rho_extension_cycle(
         ):
             raise ValueError("Both concatenated RHO seeds must use reduced mechanics.")
 
-        prefix_keys = set(prefix_data.files) - {"metadata__json"}
-        extension_keys = set(extension_data.files) - {"metadata__json"}
+        prefix_keys = {
+            key for key in prefix_data.files
+            if key != "metadata__json" and not key.startswith("applied_pulse_widths__")
+        }
+        extension_keys = {
+            key for key in extension_data.files
+            if key != "metadata__json" and not key.startswith("applied_pulse_widths__")
+        }
         if prefix_keys != extension_keys:
             raise ValueError("The RHO prefix and extension variables do not match.")
 
@@ -2165,6 +2209,9 @@ def run(args: argparse.Namespace) -> int:
             else "running"
         )
     )
+    # Persist the certified bootstrap before attempting RHO_3 so an unrelated
+    # continuation failure can always resume from FHO_2.
+    _write_report(report_path, report)
     return _continue_adaptively(
         args,
         report=report,

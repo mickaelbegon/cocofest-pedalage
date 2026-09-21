@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Common config-driven runner for rho, rho-physio, rho-pace and fho.
+"""Common config-driven runner for RHO/FHO and the experimental online RTI.
 
-All four conditions use the same parameter factory adapter. FHO requires the
-benchmark's --single-shot form; no weights or FHO trajectory are passed to
-the adaptive policy. Every supplied seed must carry this model's fingerprint.
+All conditions use the same parameter factory adapter. FHO requires the
+benchmark's --single-shot form; no weights or FHO trajectory are passed to the
+adaptive policy. The online ACADOS route is deliberately limited to a
+one-cycle RHO SQP-RTI initialized by a certified IPOPT seed. Every supplied
+seed must carry this model's fingerprint.
 """
 
 import argparse
@@ -33,6 +35,10 @@ def main(argv=None):
     parser.add_argument("--weights-config", type=Path)
     parser.add_argument("--weights-journal", type=Path)
     parser.add_argument("--configuration-audit", type=Path)
+    parser.add_argument("--checkpoint-every", type=int,
+                        help="Save a model-fingerprinted certified shifted primal every N cycles")
+    parser.add_argument("--checkpoint-directory", type=Path,
+                        help="Fresh directory for atomic checkpoint NPZs, receipts and latest.json")
     parser.add_argument("benchmark_args", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     caller_directory = Path.cwd()
@@ -44,6 +50,9 @@ def main(argv=None):
     )
     from examples.fes_multibody.cycling import cycling_fes_solver_comparison as benchmark
     from scripts.run_rho_pace_benchmark import main as run_weighted
+    from cocofest.optimization.configured_rho_checkpoints import (
+        atomic_json, checkpoint_cli, configured_checkpoint_writer,
+    )
 
     model_path = args.model_config.expanduser().resolve()
     model_bytes = model_path.read_bytes()
@@ -53,20 +62,55 @@ def main(argv=None):
         raise ValueError("Configured conditions require an explicit --output-json")
     if parsed.formulation != "dynamic" or parsed.mechanical_formulation != "reduced":
         raise ValueError("Configured comparison requires dynamic reduced mechanics")
-    if tuple(parsed.solvers) != ("ipopt",):
-        raise ValueError("Configured comparison currently supports IPOPT only")
+    supported_solvers = {"ipopt", "madnlp", "fatrop", "acados"}
+    if len(parsed.solvers) != 1 or parsed.solvers[0] not in supported_solvers:
+        raise ValueError(
+            "Configured comparison accepts exactly one solver: IPOPT, MadNLP, Fatrop or ACADOS."
+        )
     if parsed.single_shot != (args.condition == "fho"):
         raise ValueError("Only condition=fho requires --single-shot; RHO conditions must omit it")
-    if not 1 <= parsed.n_windows <= 100:
-        raise ValueError("Configured conditions are limited to 1..100 cycles")
+    # Long RHO endurance experiments need a validated prefix that can exceed
+    # the original 100-cycle campaign template.  Keep a finite guardrail so a
+    # typo cannot silently launch an unbounded experiment; PACE additionally
+    # enforces its own declared campaign limit.
+    if not 1 <= parsed.n_windows <= 3000:
+        raise ValueError("Configured conditions are limited to 1..3000 cycles")
     if args.condition == "fho" and parsed.cycles_per_window != parsed.n_windows:
         raise ValueError("FHO cycles-per-window must equal n-windows")
     if args.condition != "fho" and parsed.cycles_per_window != 1:
         raise ValueError("RHO conditions require cycles-per-window=1")
     if parsed.resistive_torque is None or not 0 < parsed.resistive_torque < float("inf"):
         raise ValueError("Configured comparison requires explicit positive --signed-crank-torque")
+    acados_rti = parsed.solvers[0] == "acados"
+    if acados_rti:
+        if args.condition != "rho" or parsed.single_shot or parsed.cycles_per_window != 1:
+            raise ValueError(
+                "Configured ACADOS is reserved for one-cycle receding-horizon "
+                "condition=rho, not FHO or weighted policies."
+            )
+        if not parsed.experimental_reduced_acados:
+            raise ValueError(
+                "Configured ACADOS RHO requires --experimental-reduced-acados."
+            )
+        if parsed.acados_nlp_solver_type != "SQP_RTI":
+            raise ValueError(
+                "Configured ACADOS RHO requires --acados-nlp-solver-type SQP_RTI."
+            )
+        if parsed.common_initial_solution is None:
+            raise ValueError(
+                "Configured ACADOS RHO requires an IPOPT cycle-1 "
+                "--common-initial-solution."
+            )
     if parsed.rho_prepared_checkpoint_output_template:
         raise ValueError("Templated checkpoint outputs are not fingerprinted by this runner; use explicit output paths")
+    checkpoint_arguments = checkpoint_cli(args.checkpoint_every, args.checkpoint_directory, parsed.n_windows)
+    if checkpoint_arguments:
+        if args.condition == "fho" or acados_rti:
+            raise ValueError("Periodic configured checkpoints currently support IPOPT RHO conditions only")
+        if args.checkpoint_directory.expanduser().resolve().exists():
+            raise FileExistsError("Configured checkpoint directory must be fresh")
+        benchmark_argv = [*benchmark_argv, *checkpoint_arguments]
+        parsed = benchmark.build_cli().parse_args(benchmark_argv)
     # Historical pickles have no parameter fingerprint. The configured model
     # must generate its own warmup unless an explicitly compatible seed exists.
     if not parsed.ipopt_disable_historical_initial_guess:
@@ -102,6 +146,7 @@ def main(argv=None):
              "model_config_path": str(model_path), "model_config_sha256": sha256(model_bytes).hexdigest(),
              "model": config, "weights_requested": weighted, "weights_applied": False,
              "adaptation_enabled": args.condition == "rho-pace", "uses_fho_data_for_weights": False,
+             "online_solver": parsed.solvers[0], "online_rti": acados_rti,
              "arguments": benchmark_argv, "seed_checks": [], "model_builds": records}
     if weighted:
         audit["weights_config_path"] = str(weights_path)
@@ -109,7 +154,7 @@ def main(argv=None):
         audit["weights_journal_path"] = str(args.weights_journal.expanduser().resolve())
 
     def write_audit():
-        audit_path.write_text(json.dumps(audit, indent=2, sort_keys=True, allow_nan=False) + "\n")
+        atomic_json(audit_path, audit)
 
     write_audit()
     try:
@@ -117,7 +162,26 @@ def main(argv=None):
             path = getattr(parsed, name)
             if path is not None:
                 audit["seed_checks"].append(require_seed_fingerprint(path, config[FINGERPRINT_KEY]))
-        with configured_model_factories(config, records):
+        if acados_rti:
+            import numpy as np
+
+            with np.load(parsed.common_initial_solution, allow_pickle=False) as seed:
+                metadata = json.loads(str(seed["metadata__json"].item()))
+            if metadata.get("producer_solver") != "ipopt" or metadata.get("cycles_per_window") != 1:
+                raise ValueError(
+                    "Configured ACADOS RHO requires a common seed produced by "
+                    "a one-cycle IPOPT solve."
+                )
+            audit["acados_rti_seed_provenance"] = {
+                "producer_solver": metadata["producer_solver"],
+                "cycles_per_window": metadata["cycles_per_window"],
+                "stimulations_per_cycle": metadata.get("stimulations_per_cycle"),
+            }
+        with configured_model_factories(config, records), configured_checkpoint_writer(
+            args.checkpoint_directory, config, condition=args.condition, arguments=benchmark_argv,
+            weights_config=weights_path if weighted else None,
+            weights_journal=args.weights_journal if weighted else None,
+        ):
             if weighted:
                 run_weighted(["--pace-config", str(weights_path), "--pace-journal",
                               str(args.weights_journal.expanduser().resolve()), "--", *benchmark_argv],
