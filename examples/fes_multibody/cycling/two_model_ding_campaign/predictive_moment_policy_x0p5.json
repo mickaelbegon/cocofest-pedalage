@@ -1,0 +1,21 @@
+{
+  "initial_weight_basis": "uniform relative fatigue cost; online predictive moment rollout; no FHO data",
+  "initial_weights": {
+    "Delt_ant": 1.0,
+    "Delt_post": 1.0,
+    "Biceps": 1.0,
+    "Triceps": 1.0
+  },
+  "policy": {
+    "adaptation_strategy": "predictive_moment",
+    "update_every_cycles": 20,
+    "projection_horizon_cycles": 500,
+    "projection_tracking_mode": "projected_capacity",
+    "projection_substeps": 16,
+    "projection_budget_seconds": 600.0,
+    "projection_adjustment_factor": 1.5,
+    "min_relative_weight": 0.25,
+    "max_relative_weight": 4.0,
+    "max_cycles": 100
+  }
+}
