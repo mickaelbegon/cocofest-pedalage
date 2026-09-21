@@ -1,0 +1,8 @@
+{
+  "fatigue_weight": 10000.0,
+  "fatigue_shape": "quadratic",
+  "speed_weight": 0.0,
+  "target_omega": -6.283185307179586,
+  "pulse_width_weight": 0.0,
+  "terminal_capacity_weight": 0.0
+}

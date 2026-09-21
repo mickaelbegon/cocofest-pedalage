@@ -19,7 +19,7 @@ mode with the same model adapter; its `--cycles-per-window` must equal
 `--n-windows`. FHO does not supply data to either physiological controller.
 
 Dynamic reduced mechanics, positive explicit signed resistive torque, IPOPT,
-an explicit `--output-json`, and at most 100 cycles are required. Weighted
+an explicit `--output-json`, and at most 2,000 cycles are required. Weighted
 conditions additionally require explicit named weights and a journal, as
 well as the existing PACE restrictions (quadratic fatigue cost, no IPOPT C
 compilation, compact output). Output paths must be fresh and distinct. The

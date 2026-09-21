@@ -262,6 +262,35 @@ that component was not timed separately. ACADOS reduced reaches roughly
 0.10 s/RHO but its strict converged prefix stops after 13 cycles; ACADOS full
 still fails before the first cycle.
 
+### Local 150-RHO comparison: 50 Hz, 100-us PW slew
+
+The following local campaign is a separate, stricter workload than the CI
+matrix above: reduced dynamic mechanics, 50 stimulations/cycle, a hard
+\(\lvert\Delta PW\rvert\leq100\ \mu\mathrm{s}\) bound plus a 0.1 slew
+regularization weight, 0.1 N.m resistive torque, one numerical thread and the
+same certified IPOPT cycle-1 seed. IPOPT and MadNLP use Radau-5; ACADOS uses
+its native IRK integrator (4 stages, 5 steps) and is initialized from that
+same IPOPT seed. Timings are hot solver timings and exclude seed preparation.
+
+| Backend | Runtime / linear solver | Certified RHO | Hot median | Hot P90 | Outcome |
+|---|---|---:|---:|---:|---|
+| IPOPT limited-memory | CasADi 3.8, MA57 | 150/150 | 1.443 s | 2.369 s | 4,554 hot iterations; this is a quasi-Newton approximation, not the exact-Hessian IPOPT default. |
+| MadNLP | CasADi 3.7.2+, MUMPS | 150/150 | 1.634 s | 1.839 s | 150-cycle fatigue trajectory certified. |
+| ACADOS SQP | IRK 4x5, HPIPM | 28/150 | 4.942 s | 10.150 s | Reached the 200-SQP-iteration cap on RHO 29; its feasible but non-converged result is not counted. |
+
+IPOPT limited-memory has a 0.191 s lower hot median than MadNLP in this
+campaign, whereas MadNLP has a 0.530 s (22.4%, relative to IPOPT) lower hot
+P90. This is an operational
+comparison, not a bitwise solver A/B: the IPOPT run uses CasADi 3.8 and an
+approximate Hessian, while MadNLP uses its required CasADi 3.7.2+ libMad
+runtime. ACADOS must not be compared as a 150-cycle solution because its
+strictly certified prefix ends at cycle 28. The raw benchmark artifacts are
+available in
+[`casadi38-limited-memory-150-20260912T1611`](casadi38-limited-memory-150-20260912T1611/),
+[`madnlp-limited-memory-protocol-150-20260912T1700`](madnlp-limited-memory-protocol-150-20260912T1700/)
+and
+[`acados-limited-memory-protocol-150-20260912T1700`](acados-limited-memory-protocol-150-20260912T1700/).
+
 <a id="initial-value-problem"></a>
 ## 🎯 Initial value problem
 

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "sources": ["two-model-ding-100/x2/seed.npz"],
+  "reduced_profile": "benchmark-seed/reduced-cycling-fourier12.npz",
+  "model_config": null,
+  "cost_config": "docs/cycling_solver_benchmark/cross_rollout_cost.example.json",
+  "evaluators": ["dop853", "radau5", "gauss-legendre4x5"],
+  "output_root": "gui-results/cross-rollout-example",
+  "start_cycle": 0,
+  "cycles": 1,
+  "cycle_duration_s": 1.0,
+  "dop853_rtol": 1e-11,
+  "dop853_atol": 1e-13,
+  "samples_per_interval": 65
+}
