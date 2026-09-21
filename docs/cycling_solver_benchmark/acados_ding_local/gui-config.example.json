@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "solver": "acados",
+  "mode": "rho",
+  "mechanics": "reduced",
+  "formulation": "dynamic",
+  "integration": "irk",
+  "acados_sim_stages": 4,
+  "acados_sim_steps": 5,
+  "acados_ding_local_reduction": true,
+  "acados_ipopt_cycle1_seed": "seeds/REMPLACER_PAR_SEED_IPOPT_CYCLE1.npz",
+  "cycles": 3,
+  "cycles_per_window": 1,
+  "stimulations_per_cycle": 50,
+  "signed_crank_torque": 0.1,
+  "output_root": "gui-results/acados-ding-local-smoke",
+  "dry_run": true
+}
