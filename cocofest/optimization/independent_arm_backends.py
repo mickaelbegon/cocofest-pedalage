@@ -49,11 +49,12 @@ def set_terminal_eprod_target(nmpc: Any, target_work_j: float) -> None:
 
 def _solution_metrics(solution: Any) -> dict[str, Any]:
     status = getattr(solution, "status", None)
+    cost = float(getattr(solution, "cost", float("nan")))
     return {
         "status": str(status),
         "success": status in (0, "0", "SUCCESS", "success"),
         "solver_time_s": float(getattr(solution, "real_time_to_optimize", 0.0) or 0.0),
-        "cost": float(getattr(solution, "cost", float("nan"))),
+        "cost": cost if np.isfinite(cost) else None,
     }
 
 
@@ -65,6 +66,7 @@ class BioptimIndependentArmSolver:
     solver: Any
     advance_rho: Callable[[Any, Any], Any] | None = None
     external_force: Any = None
+    retain_all_iterations: bool = False
     _solution: Any = None
     _target_work_j: float = 0.0
 
@@ -109,6 +111,13 @@ class BioptimIndependentArmSolver:
 
         def update_functions(_nmpc, cycle_idx, solution):
             completed.append(solution)
+            # Compact output never uses the historical aggregate model list;
+            # retaining every per-window model duplicates CasADi graphs and
+            # makes two concurrent 100-cycle sessions unnecessarily memory
+            # hungry. The active model and RHO transfer state remain on nmpc.
+            models = getattr(_nmpc, "all_models", None)
+            if isinstance(models, list):
+                models.clear()
             return cycle_idx < cycles
 
         solution = self.nmpc.solve_fes_nmpc(
@@ -117,7 +126,7 @@ class BioptimIndependentArmSolver:
             total_cycles=cycles,
             external_force=self.external_force,
             cycle_solutions=cycle_solutions,
-            get_all_iterations=True,
+            get_all_iterations=self.retain_all_iterations,
             cyclic_options={"states": {}},
             max_consecutive_failing=1,
             compact_solution_output=True,

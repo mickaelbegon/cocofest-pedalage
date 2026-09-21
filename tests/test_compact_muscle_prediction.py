@@ -117,3 +117,44 @@ def test_invalid_domains_and_zero_fatigue_coefficient_are_explicit():
     predictor = CompactMusclePredictor((interval(),), (muscle(),))
     with pytest.raises(ValueError, match="positive"):
         predictor.phase_map([[.16, 20., -1., .06, .137]], 0)
+
+
+@pytest.mark.parametrize("gain", [0.0, -0.0186])
+def test_signed_source_gain_matches_full_ding_without_changing_ode(gain):
+    base = muscle()
+    params = replace(base, fatigue=replace(base.fatigue, alpha_a=0., alpha_tau1=0., alpha_km=0.))
+    state = np.r_[.16298, 20., params.fatigue.rest_state][None, :]
+    phase = replace(interval(), mechanical_gains=(gain,))
+    pw = .00035
+    truth = propagate_ding_pulse_width_interval(
+        state[0], pulse_width=pw, duration=phase.duration,
+        calcium_amplitude=phase.calcium_amplitudes[0], mechanical_gain=gain,
+        parameters=params, integration_substeps=256,
+    )
+    predictor = CompactMusclePredictor((phase,), (params,), substeps=256)
+    response = predictor.phase_map(state, 0)
+    recruitment = [-np.expm1(-(pw - params.pd0) / params.pdt)]
+    np.testing.assert_allclose(response.endpoint(recruitment)[0], truth, atol=1e-6, rtol=1e-6)
+    if gain < 0.0:
+        assert response.slope[0, 1] < 0.0
+
+
+def test_signed_gain_recruitment_envelope_preserves_force_domain():
+    params = muscle()
+    state = np.r_[.16298, .005, params.fatigue.rest_state][None, :]
+    phase = replace(interval(), mechanical_gains=(-.0186,))
+    predictor = CompactMusclePredictor((phase,), (params,), substeps=128)
+    response = predictor.phase_map(state, 0)
+    assert 0 < response.maximum_recruitment[0] < predictor.maximum_recruitment[0]
+    feasible = response.endpoint(response.maximum_recruitment * .99)
+    assert feasible[0, 1] > 0.0
+    with pytest.raises(ValueError, match="bounds"):
+        response.endpoint(predictor.maximum_recruitment)
+    # Verify a feasible interior command independently with all fatigue states.
+    pw = params.pd0 - params.pdt * np.log1p(-response.maximum_recruitment[0] * .99)
+    truth = propagate_ding_pulse_width_interval(
+        state[0], pulse_width=pw, duration=phase.duration,
+        calcium_amplitude=phase.calcium_amplitudes[0], mechanical_gain=-.0186,
+        parameters=params, integration_substeps=256,
+    )
+    assert truth[1] > 0.0
