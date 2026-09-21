@@ -1775,6 +1775,117 @@ après construction vaut `0.121 s/RHO`, et la médiane/P90 de l'appel solveur
 `0.0531/0.0535 s`. L'objectif, la fatigue et les quatre capacités reproduisent
 la campagne verbose; ce chemin est donc le candidat online actuel.
 
+### 6.4 FATROP face à IPOPT/MA57 : RHO-150 Radau-5
+
+Un benchmark complémentaire a été exécuté localement le 12 septembre 2026 sur
+la mécanique reduced dynamique, une résistance constante de `+0.10 N.m`,
+`30` stimulations par cycle, collocation Radau de degré `5`, SX et `150` RHO.
+FATROP utilise un warm-up IPOPT/MA57 local, puis résout les 150 fenêtres avec
+sa factorisation structurée native. **FATROP n'utilise pas MA57** : MA57 est
+uniquement le solveur linéaire de l'étape IPOPT de warm-up.
+
+| Solveur | RHO réussis | Médiane chaude | P90 chaud | Temps solveur total |
+|---|---:|---:|---:|---:|
+| IPOPT/MA57 historique, même cas | 150/150 | `~0.702 s` | `~0.907 s` | — |
+| FATROP, warm-up IPOPT/MA57 local | 150/150 | `3.529 s` | `4.442 s` | `555.637 s` |
+
+FATROP est ainsi environ `5x` plus lent en médiane sur ce cas. Le run FATROP
+est physiquement et numériquement réussi (`150/150`, aucun RHO abandonné),
+mais il ne doit pas être fusionné aux statistiques de la campagne appariée de
+la section précédente : le benchmark historique IPOPT et le nouveau run
+FATROP n'ont pas le même artefact de warm-up initial. Le résultat établit une
+différence de performance robuste, non une comparaison bit à bit des
+trajectoires.
+
+Le profil explique pourquoi l'avantage attendu de FATROP ne se matérialise pas
+ici. La collocation directe Radau-5 crée de gros stages (cinq états de
+collocation et leurs contraintes par intervalle), ce qui rend coûteuse la
+direction de recherche Riccati structurée de FATROP. IPOPT/MA57, au contraire,
+exploite efficacement le KKT sparse global. Le temps dominant est la direction
+de recherche FATROP, et non les dérivées CasADi ; compiler davantage les
+évaluateurs ne suffit donc pas à combler l'écart.
+
+La politique de warm-start amplifie aussi l'écart : IPOPT réinjecte les
+multiplicateurs de bornes à chaque RHO, tandis que ce run FATROP a le
+warm-start dual désactivé (`fatrop_dual_warm_start_mode=off`). Avant toute
+conclusion définitive sur FATROP, il faut donc auditer la consommation des
+multiplicateurs puis mesurer un A/B primal-dual sur quelques RHO identiques,
+ainsi que vérifier la détection et le mapping des stages. Pour un FHO, FATROP
+reste une piste seulement avec un horizon monolithique long et du multiple
+shooting à petits stages ; pour le FHO actuel en Radau-5/collocation, IPOPT/MA57
+est la référence de production.
+
+L'artefact du run FATROP est
+[`result.json`](../../fatrop-linear-solver-150-20260912/resistance-0p10Nm/fatrop-sx-radau5-ma57warmup-150-fresh-max1000/result.json).
+
+#### Exploration DMS : IRK Radau-5 et RK8
+
+La piste DMS a été sondée pour réduire la taille des stages transmis à FATROP.
+Un IRK Radau IIA de degré `5` conserverait la carte d'extrémité d'ordre `9` et
+la stabilité de Radau-5, mais le bridge Bioptim courant impose MX pour IRK.
+Le smoke FATROP/IRK/MX échoue avant toute itération : son rootfinder Newton
+initialise les stages à zéro, ce qui évalue le rapport Ding `Cn / (Km + Cn)` à
+`0 / 0` et produit une Jacobienne non-finie. La correction candidate consiste
+à initialiser les cinq stages par répétition de l'état initial; elle doit être
+validée contre Radau-5 et DOP853 avant une campagne RHO.
+
+Un smoke DMS/FATROP/RK8 à **un pas RK8 par intervalle**, SX, a en revanche
+certifié `1/1` RHO : `42` itérations et `8.275 s` solveur, avec
+`6.08 s` en Hessienne et `2.02 s` en Jacobienne. Il est donc plus lent que le
+premier RHO FATROP/Radau-5 collocation (`6.130 s`) et ne constitue pas encore
+un candidat de performance. Un essai RK8 à huit sous-pas n'a pas atteint le
+solveur après plusieurs minutes de construction symbolique et a été arrêté.
+La précision du RK8 à un pas n'est pas encore validée : ses contraintes de
+chemin sont nodales en DMS et son état final doit être comparé à Radau-5 et
+DOP853 avant de tirer une conclusion physiologique.
+
+Les artefacts exploratoires sont
+[`IRK-MX`](../../fatrop-dms-irk-radau5-smoke-20260912/result.json) et
+[`RK8-DMS`](../../fatrop-dms-rk8-one-step-smoke-20260912/result.json).
+
+#### Condensation symbolique Ding en conservant exactement Radau-5
+
+Une autre voie a été testée pour IPOPT/MA57 reduced : conserver la
+discrétisation Radau-5 elle-même, mais éliminer algébriquement les états Ding
+affines de ses stages. Les états `Cn`, `A`, `Tau1` et `Km` sont reconstruits
+symboliquement depuis les forces de stage ; les bornes, objectifs, contraintes
+et multiplicateurs sont ensuite reconstruits dans le NLP. Cette condensation
+retire `2 400` variables internes (`4 103` vers `1 703`) sans modifier les
+équations discrètes Radau-5. Les bornes des variables éliminées restent des
+contraintes, donc le nombre de lignes de contraintes demeure `3 960`.
+
+Le smoke à un RHO valide l'équivalence : même seed, écart maximal du vecteur
+de décision complet échelonné `1.35e-10`, écart d'objectif `1.58e-14` et
+violations des contraintes originales inférieures à `3e-7`. Douze tests
+vérifient aussi l'élimination, la Jacobienne et la Hessienne du Lagrangien.
+En revanche, l'A/B réel IPOPT/MA57 sur dix RHO ne produit **aucun gain** :
+
+| Mesure | Radau-5 baseline | Radau-5 condensé |
+|---|---:|---:|
+| RHO physiquement réussis | 10/10 | 10/10 |
+| Construction solveur | `4.494 s` | `5.478 s` |
+| Première résolution / itérations | `10.797 s` / `554` | `26.675 s` / `1 133` |
+| Médiane chaude / P90 | `0.947 / 1.040 s` | `1.022 / 1.141 s` |
+| Itérations chaudes moyennes | `52.78` | `55.67` |
+| Total solveur | `19.183 s` | `35.839 s` |
+| Hessienne par évaluation | `5.931 ms` | `7.611 ms` |
+
+La substitution diminue les variables mais densifie et rend plus coûteuse la
+Hessienne ; les bornes conservées comme contraintes empêchent aussi la
+réduction correspondante du KKT. La première résolution condensée est `2.47x`
+plus lente et la médiane chaude est `7.9 %` plus lente. La trajectoire RHO
+fermée bifurque après la première fenêtre, comme attendu pour deux graphes
+équivalents résolus par un NLP non convexe : les deux trajectoires restent
+faisables, mais cet A/B ne doit pas être interprété comme une comparaison
+bit-à-bit au-delà du smoke initial.
+
+Cette condensation maximale n'est donc pas une voie d'accélération à adopter.
+La variante moins agressive, qui conserverait `F,A` aux stages pour préserver
+davantage la structure creuse, reste seulement une hypothèse. Le rapport,
+les scripts reproductibles et les artefacts sont dans
+[`ding_radau5_symbolic_ab.md`](ding_radau5_symbolic_ab.md) et
+[`comparison10.json`](../../ding-radau5-symbolic-ab-20260912/comparison10.json).
+
 ## 7. Reproductibilité
 
 Le workflow de benchmark est
