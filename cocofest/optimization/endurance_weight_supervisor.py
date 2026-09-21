@@ -174,12 +174,25 @@ class WeightSupervisorConfig:
     max_weight: float = 4.0
     adjustment_factor: float = 1.5
     muscle_count: int = 4
+    selection_mode: str = "exact_prefix"
+    max_candidate_log_step: float | None = None
+    minimum_relative_improvement: float = 0.01
+    minimum_absolute_improvement: float = 1e-6
+    fatigue_noninferiority_tolerance: float = 1e-10
+    capacity_noninferiority_tolerance: float = 1e-5
 
     def __post_init__(self) -> None:
         minimum = _positive_finite(self.min_weight, name="min_weight")
         maximum = _positive_finite(self.max_weight, name="max_weight")
         factor = _positive_finite(self.adjustment_factor, name="adjustment_factor")
         count = _strict_positive_integer(self.muscle_count, name="muscle_count")
+        if self.selection_mode not in ("exact_prefix", "full_horizon_deficit", "guarded_fatigue"):
+            raise ValueError("selection_mode must be exact_prefix, full_horizon_deficit or guarded_fatigue.")
+        if self.max_candidate_log_step is not None:
+            _positive_finite(self.max_candidate_log_step, name="max_candidate_log_step")
+        for name in ("minimum_relative_improvement", "minimum_absolute_improvement",
+                     "fatigue_noninferiority_tolerance", "capacity_noninferiority_tolerance"):
+            _nonnegative_finite(getattr(self, name), name=name)
         if minimum > 1.0 or maximum < 1.0 or minimum > maximum:
             raise ValueError("Relative-weight bounds must contain 1.0.")
         if factor <= 1.0:
@@ -209,6 +222,11 @@ class CandidateRolloutResult:
     minimum_signed_margin: float | None
     status: str
     prefix_comparable: bool = False
+    full_horizon_normalized_deficit: float | None = None
+    terminal_normalized_reserve: float | None = None
+    full_horizon_mean_squared_fatigue: float | None = None
+    first_block_mean_squared_fatigue: float | None = None
+    terminal_minimum_capacity: float | None = None
 
     def __post_init__(self) -> None:
         duration = _nonnegative_finite(self.completed_duration, name="completed_duration")
@@ -225,12 +243,26 @@ class CandidateRolloutResult:
             margin = _finite(margin, name="minimum_signed_margin")
         if self.feasible and margin is None:
             raise ValueError("A feasible completed horizon requires a signed margin.")
+        score = self.full_horizon_normalized_deficit
+        reserve = self.terminal_normalized_reserve
+        if score is not None:
+            score = _nonnegative_finite(score, name="full_horizon_normalized_deficit")
+            if not self.completed or reserve is None:
+                raise ValueError("A long-horizon score requires a completed simulation and terminal reserve.")
+            reserve = _finite(reserve, name="terminal_normalized_reserve")
         status = str(self.status)
         if not status:
             raise ValueError("status must not be empty.")
         object.__setattr__(self, "completed_duration", duration)
         object.__setattr__(self, "minimum_signed_margin", margin)
         object.__setattr__(self, "status", status)
+        object.__setattr__(self, "full_horizon_normalized_deficit", score)
+        object.__setattr__(self, "terminal_normalized_reserve", reserve)
+        for name in ("full_horizon_mean_squared_fatigue", "first_block_mean_squared_fatigue",
+                     "terminal_minimum_capacity"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, _nonnegative_finite(value, name=name))
 
 
 @dataclass(frozen=True)
@@ -249,6 +281,7 @@ class CandidateEvaluation:
     def comparable(self) -> bool:
         return self.result is not None and (
             (self.result.completed and self.result.feasible) or self.result.prefix_comparable
+            or self.result.full_horizon_normalized_deficit is not None
         )
 
 
@@ -354,6 +387,11 @@ def _coerce_rollout_result(value: Any) -> CandidateRolloutResult:
         minimum_signed_margin=margin,
         status=status,
         prefix_comparable=prefix_comparable,
+        full_horizon_normalized_deficit=_field(value, "full_horizon_normalized_deficit"),
+        terminal_normalized_reserve=_field(value, "terminal_normalized_reserve"),
+        full_horizon_mean_squared_fatigue=_field(value, "full_horizon_mean_squared_fatigue"),
+        first_block_mean_squared_fatigue=_field(value, "first_block_mean_squared_fatigue"),
+        terminal_minimum_capacity=_field(value, "terminal_minimum_capacity"),
     )
 
 
@@ -380,6 +418,13 @@ class EnduranceWeightSupervisor:
         seen: set[tuple[float, ...]] = set()
 
         def append(kind: str, muscle_name: str | None, log_step: float, weights: Sequence[float]):
+            if kind != "incumbent" and self.config.max_candidate_log_step is not None:
+                # Bound BEFORE evaluating: applying an unevaluated interpolation
+                # afterward would invalidate every claimed rollout improvement.
+                delta = tuple(math.log(w / base) for w, base in zip(weights, snapshot.incumbent_weights))
+                scale = min(1., self.config.max_candidate_log_step / max(max(map(abs, delta)), 1e-300))
+                weights = tuple(base * math.exp(scale * d)
+                                for base, d in zip(snapshot.incumbent_weights, delta))
             key = tuple(round(float(value), 14) for value in weights)
             if key in seen:
                 return
@@ -463,6 +508,24 @@ class EnduranceWeightSupervisor:
             )
 
         comparable = [record for record in evaluations if record.comparable]
+        # Compare long capacity simulations only over the same fully evaluated
+        # duration as the incumbent. An uncomputed tail has no score.
+        incumbent_record = next((r for r in evaluations if r.candidate.kind == "incumbent"), None)
+        guarded = self.config.selection_mode == "guarded_fatigue"
+        long_mode = (self.config.selection_mode in ("full_horizon_deficit", "guarded_fatigue") or
+                     any(r.result is not None and r.result.full_horizon_normalized_deficit is not None
+                         for r in evaluations))
+        if long_mode:
+            incumbent_result = None if incumbent_record is None else incumbent_record.result
+            if incumbent_result is None or incumbent_result.full_horizon_normalized_deficit is None:
+                comparable = []
+            else:
+                comparable = [r for r in comparable if r.result.full_horizon_normalized_deficit is not None
+                              and math.isclose(r.result.completed_duration, incumbent_result.completed_duration,
+                                               rel_tol=1e-10, abs_tol=1e-10)]
+        if guarded and comparable:
+            comparable = [record for record in comparable if self._passes_fatigue_guard(
+                record, incumbent_record)]
         if comparable:
             def rank(record: CandidateEvaluation) -> tuple[float, ...]:
                 assert record.result is not None
@@ -477,6 +540,16 @@ class EnduranceWeightSupervisor:
                         record.candidate.weights, snapshot.incumbent_weights, strict=True
                     )
                 )
+                if long_mode:
+                    if guarded:
+                        return (-round(result.full_horizon_normalized_deficit, 12),
+                                -round(result.full_horizon_mean_squared_fatigue, 12),
+                                float(record.candidate.kind == "incumbent"), -change,
+                                -float(record.candidate.index))
+                    return (-round(result.full_horizon_normalized_deficit, 12),
+                            round(result.terminal_normalized_reserve, 12),
+                            float(record.candidate.kind == "incumbent"), -change,
+                            -float(record.candidate.index))
                 return (
                     float(full),
                     duration,
@@ -492,6 +565,9 @@ class EnduranceWeightSupervisor:
             assert evidence is not None
             full_horizon = evidence.completed and evidence.feasible
             selection_basis = (
+                ("guarded_hold_incumbent" if chosen.kind == "incumbent" else "guarded_fatigue_improvement")
+                if guarded else
+                "full_horizon_normalized_moment_deficit" if long_mode else
                 "completed_horizon_margin" if full_horizon else "longest_explicit_prefix"
             )
             actionable = True
@@ -518,6 +594,34 @@ class EnduranceWeightSupervisor:
             selection_basis=selection_basis,
             has_actionable_evidence=actionable,
         )
+
+    def _passes_fatigue_guard(self, record, incumbent_record):
+        """Require material gain with no predicted damage to fatigue or reserve.
+
+        Reserve-only improvements are insufficient: a tiny numerical deficit
+        change or a better torque envelope must not buy increased fatigue.
+        This is a surrogate safeguard, not a real-system endurance proof.
+        """
+        result, incumbent = record.result, incumbent_record.result
+        names = ("full_horizon_mean_squared_fatigue", "first_block_mean_squared_fatigue",
+                 "terminal_minimum_capacity")
+        if any(getattr(value, name) is None for value in (result, incumbent) for name in names):
+            return False
+        if record.candidate.kind == "incumbent":
+            return True
+        cfg = self.config
+        if any(getattr(result, name) > getattr(incumbent, name) + cfg.fatigue_noninferiority_tolerance
+               for name in names[:2]):
+            return False
+        if result.terminal_minimum_capacity + cfg.capacity_noninferiority_tolerance < incumbent.terminal_minimum_capacity:
+            return False
+        if result.full_horizon_normalized_deficit > incumbent.full_horizon_normalized_deficit + 1e-12:
+            return False
+        def material_gain(name):
+            previous, proposed = getattr(incumbent, name), getattr(result, name)
+            return previous - proposed > max(cfg.minimum_absolute_improvement,
+                                              cfg.minimum_relative_improvement * abs(previous))
+        return material_gain("full_horizon_normalized_deficit") or material_gain("full_horizon_mean_squared_fatigue")
 
 
 def _declared_tolerances(

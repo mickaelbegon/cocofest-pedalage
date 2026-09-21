@@ -218,7 +218,10 @@ def periodic_calcium_state(
 
 def _gain_value(gain: MechanicalGain, local_time: float) -> float:
     value = gain(local_time) if callable(gain) else gain
-    value = _finite(value, name="mechanical_gain", positive=True)
+    # Match Ding2003.f_dot_fun exactly. The currently used passive law can
+    # make fl*fv+fp negative; this is not the signed muscle moment arm.
+    # Preserve that ODE and let the state-domain checks detect invalid force.
+    value = _finite(value, name="mechanical_gain")
     return value
 
 
@@ -311,6 +314,101 @@ def propagate_ding_pulse_width_interval(
     return result
 
 
+def _propagate_ding_pulse_width_interval_batch(
+    state: Sequence[float] | np.ndarray,
+    *,
+    pulse_widths: Sequence[float] | np.ndarray,
+    duration: float,
+    calcium_amplitude: float,
+    mechanical_gain: MechanicalGain,
+    parameters: DingPulseWidthParameters,
+    integration_substeps: int = 8,
+) -> np.ndarray:
+    """Vectorized equivalent of :func:`propagate_ding_pulse_width_interval`.
+
+    All rows start from the same state and differ only by pulse width. This is
+    the exact situation used by the monotonicity/reachability grid in the
+    scalar inversion. Keeping the RK4 stages in one NumPy array avoids nine
+    repetitions of the Python integration loop without changing the grid or
+    the full five-state Ding equations.
+    """
+
+    state = _state(state)
+    widths = np.asarray(pulse_widths, dtype=float)
+    if widths.ndim != 1 or widths.size < 1 or not np.all(np.isfinite(widths)):
+        raise ValueError("pulse_widths must be a non-empty finite vector.")
+    duration = _finite(duration, name="duration", positive=True)
+    calcium_amplitude = _finite(calcium_amplitude, name="calcium_amplitude")
+    if calcium_amplitude < 0.0:
+        raise ValueError("calcium_amplitude must be non-negative.")
+    if isinstance(integration_substeps, bool) or int(integration_substeps) != integration_substeps:
+        raise ValueError("integration_substeps must be a positive integer.")
+    integration_substeps = int(integration_substeps)
+    if integration_substeps < 1:
+        raise ValueError("integration_substeps must be a positive integer.")
+    if np.any(widths < parameters.pd0) or np.any(widths > parameters.pulse_width_max):
+        raise ValueError("pulse_width lies outside [pd0, pulse_width_max].")
+
+    initial_cn = float(state[0])
+    current = np.broadcast_to(state[1:], (widths.size, 4)).copy()
+    recruitment_scale = -np.expm1(-(widths - parameters.pd0) / parameters.pdt)
+    fatigue = parameters.fatigue
+
+    def rhs(local_time: float, values: np.ndarray) -> np.ndarray:
+        force = values[:, 0]
+        capacity = values[:, 1]
+        tau1 = values[:, 2]
+        km = values[:, 3]
+        cn = periodic_calcium_state(
+            initial_cn, local_time, calcium_amplitude, parameters.tauc
+        )
+        if (
+            np.any(force < -1e-10)
+            or np.any(capacity <= 0.0)
+            or np.any(tau1 <= 0.0)
+            or np.any(km <= 0.0)
+            or np.any(km + cn <= 0.0)
+        ):
+            raise DingDomainError(
+                "Ding state left the positive force/capacity/time/calcium domain."
+            )
+        activation = cn / (km + cn)
+        relaxation = tau1 + parameters.tau2 * activation
+        if np.any(relaxation <= 0.0):
+            raise DingDomainError("Ding relaxation time became non-positive.")
+        recruitment = capacity * recruitment_scale
+        force_dot = _gain_value(mechanical_gain, local_time) * (
+            recruitment * activation - force / relaxation
+        )
+        capacity_dot = (
+            -(capacity - fatigue.a_rest) / fatigue.tau_fat
+            + fatigue.alpha_a * force
+        )
+        tau1_dot = (
+            -(tau1 - fatigue.tau1_rest) / fatigue.tau_fat
+            + fatigue.alpha_tau1 * force
+        )
+        km_dot = (
+            -(km - fatigue.km_rest) / fatigue.tau_fat
+            + fatigue.alpha_km * force
+        )
+        return np.column_stack((force_dot, capacity_dot, tau1_dot, km_dot))
+
+    step = duration / integration_substeps
+    for index in range(integration_substeps):
+        time = index * step
+        k1 = rhs(time, current)
+        k2 = rhs(time + step / 2.0, current + step * k1 / 2.0)
+        k3 = rhs(time + step / 2.0, current + step * k2 / 2.0)
+        k4 = rhs(time + step, current + step * k3)
+        current = current + step * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0
+    final_cn = periodic_calcium_state(
+        initial_cn, duration, calcium_amplitude, parameters.tauc
+    )
+    rhs(duration, current)
+    return np.column_stack((np.full(widths.size, final_cn), current))
+
+
 def solve_pulse_width_for_target_moment(
     state: Sequence[float] | np.ndarray,
     *,
@@ -324,6 +422,7 @@ def solve_pulse_width_for_target_moment(
     moment_tolerance: float = 1e-8,
     root_tolerance_s: float = 1e-12,
     monotonic_samples: int = 9,
+    boundary_states: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> PulseWidthTrackingResult:
     """Find the bounded PW whose propagated endpoint force gives the target moment."""
 
@@ -350,11 +449,21 @@ def solve_pulse_width_for_target_moment(
         )
 
     evaluations = 0
+    transition_cache: dict[float, np.ndarray] = {}
+    if boundary_states is not None:
+        if len(boundary_states) != 2:
+            raise ValueError("boundary_states must contain the PD0 and PW_max states.")
+        transition_cache[float(parameters.pd0)] = _state(boundary_states[0])
+        transition_cache[float(parameters.pulse_width_max)] = _state(boundary_states[1])
 
     def transition(pulse_width: float) -> np.ndarray:
         nonlocal evaluations
+        pulse_width = float(pulse_width)
+        cached = transition_cache.get(pulse_width)
+        if cached is not None:
+            return cached
         evaluations += 1
-        return propagate_ding_pulse_width_interval(
+        result = propagate_ding_pulse_width_interval(
             state,
             pulse_width=pulse_width,
             duration=duration,
@@ -363,9 +472,30 @@ def solve_pulse_width_for_target_moment(
             parameters=parameters,
             integration_substeps=integration_substeps,
         )
+        transition_cache[pulse_width] = result
+        return result
 
     try:
         grid = np.linspace(parameters.pd0, parameters.pulse_width_max, monotonic_samples)
+        missing = np.asarray(
+            [float(value) for value in grid if float(value) not in transition_cache],
+            dtype=float,
+        )
+        if missing.size:
+            propagated = _propagate_ding_pulse_width_interval_batch(
+                state,
+                pulse_widths=missing,
+                duration=duration,
+                calcium_amplitude=calcium_amplitude,
+                mechanical_gain=mechanical_gain,
+                parameters=parameters,
+                integration_substeps=integration_substeps,
+            )
+            evaluations += int(missing.size)
+            transition_cache.update(
+                (float(width), propagated[index])
+                for index, width in enumerate(missing)
+            )
         states = [transition(float(value)) for value in grid]
     except (DingDomainError, ValueError) as error:
         return PulseWidthTrackingResult(
@@ -645,6 +775,7 @@ def rollout_bounded_total_moment_reference_policy(
         for interval_index, interval in enumerate(intervals):
             lower_bounds = np.empty(muscle_count)
             upper_bounds = np.empty(muscle_count)
+            boundary_states_by_muscle = []
             for muscle_index, muscle_parameters in enumerate(parameters):
                 try:
                     state_at_pd0 = propagate_ding_pulse_width_interval(
@@ -680,6 +811,7 @@ def rollout_bounded_total_moment_reference_policy(
                 )
                 lower_bounds[muscle_index] = float(np.min(boundary_moments))
                 upper_bounds[muscle_index] = float(np.max(boundary_moments))
+                boundary_states_by_muscle.append((state_at_pd0, state_at_maximum))
 
             reference = np.asarray(interval.target_moments)
             required_total = float(np.sum(reference))
@@ -716,6 +848,7 @@ def rollout_bounded_total_moment_reference_policy(
                     parameters=muscle_parameters,
                     integration_substeps=integration_substeps,
                     moment_tolerance=moment_tolerance,
+                    boundary_states=boundary_states_by_muscle[muscle_index],
                 )
                 evaluations += result.function_evaluations
                 if not result.feasible:

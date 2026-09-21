@@ -5,6 +5,7 @@ import pytest
 from scipy.integrate import solve_ivp
 
 from cocofest.optimization.adaptive_moment_rollout import (
+    _propagate_ding_pulse_width_interval_batch,
     DingPulseWidthParameters,
     MomentTrackingInterval,
     MomentTrackingStatus,
@@ -49,6 +50,32 @@ def _initial(parameters=None, force=35.0):
             1.02 * parameters.fatigue.km_rest,
         ]
     )
+
+
+def test_batched_pw_grid_is_numerically_identical_to_scalar_rk4():
+    parameters = _parameters()
+    initial = _initial(parameters)
+    pulse_widths = np.linspace(parameters.pd0, parameters.pulse_width_max, 9)
+    kwargs = {
+        "duration": 1.0 / 30.0,
+        "calcium_amplitude": 1.0597355478114694,
+        "mechanical_gain": lambda time: 0.91 + 0.02 * math.cos(4.0 * time),
+        "parameters": parameters,
+        "integration_substeps": 8,
+    }
+    batched = _propagate_ding_pulse_width_interval_batch(
+        initial, pulse_widths=pulse_widths, **kwargs
+    )
+    scalar = np.asarray(
+        [
+            propagate_ding_pulse_width_interval(
+                initial, pulse_width=float(pulse_width), **kwargs
+            )
+            for pulse_width in pulse_widths
+        ]
+    )
+
+    np.testing.assert_allclose(batched, scalar, rtol=0.0, atol=2e-13)
 
 
 def test_fixed_rk4_transition_matches_independent_dop853_reference():

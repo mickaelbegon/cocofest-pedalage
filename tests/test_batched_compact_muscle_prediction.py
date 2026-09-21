@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -101,6 +103,23 @@ def test_batched_phase_maps_match_every_scalar_field(substeps):
         direct = scalar.phase_map(states[row], 1)
         for name in ("intercept", "slope", "weighted_force_intercept", "weighted_force_slope"):
             np.testing.assert_allclose(getattr(maps, name)[row], getattr(direct, name), rtol=1e-14, atol=1e-13)
+
+
+def test_signed_gain_batched_force_bounds_are_state_dependent_and_match_scalar():
+    base = predictor()
+    intervals = tuple(replace(phase, mechanical_gains=(-.0186, .95)) for phase in base.intervals)
+    scalar = CompactMusclePredictor(intervals, base.parameters, substeps=64)
+    batch = BatchedCompactMusclePredictor(scalar)
+    states = np.tile([.16298, 20., 1150., .078, .15], (3, 2, 1))
+    states[:, 0, 1] = [.001, .01, 20.]
+    maps = batch.phase_map_many(states, 0)
+    assert maps.maximum_recruitment.shape == (3, 2)
+    assert maps.maximum_recruitment[0, 0] < maps.maximum_recruitment[1, 0] < maps.maximum_recruitment[2, 0]
+    for row in range(3):
+        direct = scalar.phase_map(states[row], 0)
+        np.testing.assert_allclose(maps.maximum_recruitment[row], direct.maximum_recruitment)
+        np.testing.assert_allclose(maps.endpoint(maps.maximum_recruitment * .99)[row],
+                                   direct.endpoint(direct.maximum_recruitment * .99))
 
 
 @pytest.mark.parametrize("coefficients,targets", [((.05, -.03), (.7, -.2)), ((-.05, .03), (-.7, .2)),

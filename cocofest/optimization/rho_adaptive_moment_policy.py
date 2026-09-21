@@ -43,6 +43,9 @@ class RhoAdaptiveMomentPolicy:
     target_moments: np.ndarray
     certification_basis: str
     period_basis: str
+    source_signed_crank_torque_nm: float | None = None
+    source_mechanical_formulation: str | None = None
+    source_formulation: str | None = None
 
 
 def _models_by_name(models: Sequence[Any], muscle_names: tuple[str, ...]) -> dict[str, Any]:
@@ -214,4 +217,9 @@ def build_rho_adaptive_moment_policy(
         target_moments=target_moments,
         certification_basis=cycle.certification_basis,
         period_basis=period_basis,
+        source_signed_crank_torque_nm=cycle.metadata.get(
+            "signed_crank_torque_nm", cycle.metadata.get("constant_crank_torque")
+        ),
+        source_mechanical_formulation=cycle.metadata.get("mechanical_formulation"),
+        source_formulation=cycle.metadata.get("formulation"),
     )

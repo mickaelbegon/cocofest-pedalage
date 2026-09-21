@@ -154,7 +154,27 @@ class WeightedCycleRolloutResult:
 
     @property
     def completed(self):
-        return self.status == "complete"
+        return self.status in ("complete", "complete_with_deficit")
+
+    @property
+    def full_horizon_normalized_deficit(self):
+        return self.metadata.get("full_horizon_normalized_deficit")
+
+    @property
+    def terminal_normalized_reserve(self):
+        return self.metadata.get("terminal_normalized_reserve")
+
+    @property
+    def full_horizon_mean_squared_fatigue(self):
+        return self.metadata.get("full_horizon_mean_squared_fatigue")
+
+    @property
+    def first_block_mean_squared_fatigue(self):
+        return self.metadata.get("first_block_mean_squared_fatigue")
+
+    @property
+    def terminal_minimum_capacity(self):
+        return self.metadata.get("terminal_minimum_capacity")
 
     @property
     def minimum_signed_margin(self):
@@ -164,6 +184,25 @@ class WeightedCycleRolloutResult:
     @property
     def phase_weighted_force_integrals(self):
         return self.weighted_force_integrals
+
+
+def rollout_fatigue_metrics(history, rest_capacity, phase_durations, block_cycles):
+    """Unweighted fatigue trapezoids; candidate weights never enter the audit.
+
+    All candidates must cover the same duration. The first block measures the
+    period until the next supervisor update; the terminal minimum protects
+    the weakest muscle in addition to the across-muscle fatigue average.
+    """
+    ratios = np.asarray(history)[:, :, 2] / np.asarray(rest_capacity)
+    squared_fatigue = np.mean((1. - ratios) ** 2, axis=1)
+    durations = np.resize(np.asarray(phase_durations), len(ratios) - 1)
+    trapezoids = .5 * (squared_fatigue[:-1] + squared_fatigue[1:])
+    block = min(len(trapezoids), int(block_cycles) * len(phase_durations))
+    return {
+        "full_horizon_mean_squared_fatigue": float(np.average(trapezoids, weights=durations)),
+        "first_block_mean_squared_fatigue": float(np.average(trapezoids[:block], weights=durations[:block])),
+        "terminal_minimum_capacity": float(np.min(ratios[-1])),
+    }
 
 
 class WeightedCyclePredictor(CompactMusclePredictor):
@@ -182,7 +221,20 @@ class WeightedCyclePredictor(CompactMusclePredictor):
         if np.any(self.maximum_recruitment >= 1.):
             raise ValueError("PW bounds must produce representable recruitment strictly below one.")
 
-    def rollout(self, initial_states, weights, *, horizon_cycles, moment_tolerance=1e-8):
+    def rollout(self, initial_states, weights, *, horizon_cycles, moment_tolerance=1e-8,
+                tracking_mode="exact", score_block_cycles=20):
+        """Propagate exact tracking or an explicitly deficit-bearing capacity scenario.
+
+        ``projected_capacity`` continues at the closest reachable total moment
+        when the reference cannot be produced. It retains the original demand
+        and its deficit. This makes a fixed long-horizon capacity comparison
+        possible, but is not a feasible movement beyond the first deficit.
+        Numerical or model-domain failures still terminate with unscored tails.
+        """
+        if tracking_mode not in ("exact", "projected_capacity"):
+            raise ValueError("tracking_mode must be exact or projected_capacity.")
+        if isinstance(score_block_cycles, bool) or int(score_block_cycles) != score_block_cycles or score_block_cycles < 1:
+            raise ValueError("score_block_cycles must be a positive integer.")
         if isinstance(horizon_cycles, bool) or int(horizon_cycles) != horizon_cycles or horizon_cycles < 1:
             raise ValueError("horizon_cycles must be a positive integer.")
         if not np.isfinite(moment_tolerance) or moment_tolerance <= 0:
@@ -199,10 +251,42 @@ class WeightedCyclePredictor(CompactMusclePredictor):
         history = np.full((cycles * phases + 1, muscles, 5), np.nan)
         cycle_integrals = np.full((cycles, muscles), np.nan)
         completed, duration = 0, 0.
+        first_deficit = None
+        phase_durations = np.asarray([p.duration for p in self.intervals])
+        # One common, reference-only RMS scale: no candidate-dependent
+        # denominator, and no singular division at zero-moment phases.
+        reference_rms = float(np.sqrt(np.average(original[0]**2, weights=phase_durations)))
+        reference_scale = max(reference_rms, moment_tolerance)
 
         def result(failure=None):
+            diagnostics = {}
+            if tracking_mode == "projected_capacity":
+                diagnostics = {"first_target_deficit": first_deficit,
+                               "normalization_reference_rms_nm": reference_rms,
+                               "normalization_scale_nm": reference_scale,
+                               "score_block_cycles": int(score_block_cycles),
+                               "full_horizon_normalized_deficit": None,
+                               "terminal_normalized_reserve": None,
+                               "cycle_normalized_squared_deficit": [],
+                               "block_diagnostics": [],
+                               "continuation_is_feasible_movement": False}
+                if failure is None:
+                    loss = np.average((errors / reference_scale)**2, axis=1, weights=phase_durations)
+                    reserve = np.average(margins / reference_scale, axis=1, weights=phase_durations)
+                    diagnostics.update({
+                        "full_horizon_normalized_deficit": float(np.mean(loss)),
+                        "terminal_normalized_reserve": float(np.mean(reserve[-int(score_block_cycles):])),
+                        "cycle_normalized_squared_deficit": loss.tolist(),
+                        "block_diagnostics": [
+                            {"start_cycle": k, "stop_cycle": min(k + int(score_block_cycles), cycles),
+                             "mean_squared_deficit": float(np.mean(loss[k:k + int(score_block_cycles)])),
+                             "mean_signed_reserve": float(np.mean(reserve[k:k + int(score_block_cycles)]))}
+                            for k in range(0, cycles, int(score_block_cycles))],
+                    })
+                    diagnostics.update(rollout_fatigue_metrics(
+                        history, self.rest[:, 0], phase_durations, int(score_block_cycles)))
             return WeightedCycleRolloutResult(
-                status=("complete" if failure is None else
+                status=(("complete_with_deficit" if first_deficit else "complete") if failure is None else
                         "numerical_failure" if failure["status"] in (
                             "allocation_numerical_failure", "moment_allocation_residual",
                             "moment_inversion_residual") else "infeasible"),
@@ -221,9 +305,10 @@ class WeightedCyclePredictor(CompactMusclePredictor):
                           "moment_constraint_sampling": "phase_endpoints_only",
                           "full_ode_or_rho_feasibility_certified": False,
                           "future_cycles_explicitly_propagated": True,
-                          "tracking_mode": "exact_with_numerical_tolerance",
+                          "tracking_mode": ("exact_with_numerical_tolerance" if tracking_mode == "exact"
+                                            else "projected_capacity"),
                           "moment_tolerance": float(moment_tolerance),
-                          "substeps": self.substeps},
+                          "substeps": self.substeps, **diagnostics},
             )
 
         try:
@@ -237,16 +322,16 @@ class WeightedCyclePredictor(CompactMusclePredictor):
             for phase, interval in enumerate(self.intervals):
                 transition = self.phase_map(current, phase)
                 failure = {"cycle_index": cycle, "interval_index": phase}
-                # The full PW box defines the reported reachability envelope;
-                # both endpoints must stay in the compact physical domain.
+                # Intersect the PW box with the compact force domain; signed
+                # gains can impose a tighter, state-dependent recruitment cap.
                 for envelope_state in (transition.intercept,
-                                       transition.endpoint(self.maximum_recruitment)):
+                                       transition.endpoint(transition.maximum_recruitment)):
                     if (not np.all(np.isfinite(envelope_state)) or np.any(envelope_state[:, :2] < 0.)
                             or np.any(envelope_state[:, 2:] <= 0.)):
                         return result(dict(failure, status="envelope_domain_invalid"))
                 coefficients = np.asarray(interval.moment_coefficients)
                 moment0 = coefficients * transition.intercept[:, 1]
-                slope = coefficients * transition.slope[:, 1] * self.maximum_recruitment
+                slope = coefficients * transition.slope[:, 1] * transition.maximum_recruitment
                 try:
                     allocation = solve_weighted_recruitment(
                         moment0, slope, interval.target_moments, normalized_weights,
@@ -257,19 +342,35 @@ class WeightedCyclePredictor(CompactMusclePredictor):
                     return result(dict(failure, status="allocation_numerical_failure", message=str(error)))
                 margins[cycle, phase] = allocation.signed_margin
                 if allocation.normalized_recruitment is None:
-                    return result(dict(failure, status=allocation.status))
-                recruitment = allocation.normalized_recruitment * self.maximum_recruitment
+                    if tracking_mode != "projected_capacity" or not allocation.status.startswith("infeasible_total_"):
+                        return result(dict(failure, status=allocation.status))
+                    if first_deficit is None:
+                        first_deficit = dict(failure, status=allocation.status,
+                                             signed_margin_nm=allocation.signed_margin)
+                    # Projection onto a scalar interval is the exact minimum
+                    # absolute total-moment deficit over the PW box. At either
+                    # endpoint all nonzero-gain recruitment coordinates are
+                    # fixed; zero-gain coordinates retain their QP regularizer.
+                    x = (allocation.reference_recruitment * self.reference_regularization
+                         / (allocation.normalized_weights + self.reference_regularization))
+                    active = slope != 0
+                    upper = original[cycle, phase] > allocation.total_upper_bound
+                    x[active] = ((slope[active] > 0) if upper else (slope[active] < 0)).astype(float)
+                    recruitment_fraction = x
+                else:
+                    recruitment_fraction = allocation.normalized_recruitment
+                recruitment = recruitment_fraction * transition.maximum_recruitment
                 next_states = transition.endpoint(recruitment)
                 if (not np.all(np.isfinite(next_states)) or np.any(next_states[:, :2] < 0.)
                         or np.any(next_states[:, 2:] <= 0.)):
                     return result(dict(failure, status="predicted_state_outside_domain"))
                 moment = coefficients * next_states[:, 1]
                 residual = float(np.sum(moment) - original[cycle, phase])
-                if abs(residual) > moment_tolerance:
+                if abs(residual) > moment_tolerance and allocation.normalized_recruitment is not None:
                     return result(dict(failure, status="moment_inversion_residual"))
                 pws[cycle, :, phase] = np.clip(
                     self.pd0 - self.pdt * np.log1p(-recruitment), self.pd0, self.pulse_width_max)
-                allocated[cycle, :, phase] = moment0 + slope * allocation.normalized_recruitment
+                allocated[cycle, :, phase] = moment0 + slope * recruitment_fraction
                 achieved[cycle, :, phase] = moment
                 errors[cycle, phase] = residual
                 integral = transition.weighted_force_intercept + transition.weighted_force_slope * recruitment

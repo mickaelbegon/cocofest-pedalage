@@ -205,3 +205,50 @@ def test_signed_exact_reachable_endpoints(target, expected):
     assert result.status == "ok"
     np.testing.assert_array_equal(result.normalized_recruitment, expected)
     assert result.signed_margin == 0.
+
+
+def test_capacity_projection_propagates_all_500_cycles_and_measures_original_deficit():
+    p = predictor(targets=(100., 100.), phases=1)
+    result = p.rollout(states(), [1., 1.], horizon_cycles=500, tracking_mode="projected_capacity")
+    assert result.status == "complete_with_deficit"
+    assert result.completed_intervals == 500
+    assert result.completed_cycles == 500
+    assert result.metadata["first_target_deficit"]["cycle_index"] == 0
+    assert len(result.metadata["block_diagnostics"]) == 25
+    assert np.all(np.isfinite(result.state_history))
+    np.testing.assert_allclose(result.signed_moment_errors,
+                               result.achieved_moments.sum(axis=1) - result.original_total_moments)
+    assert result.full_horizon_normalized_deficit == pytest.approx(
+        np.mean((result.signed_moment_errors / 200.)**2))
+    assert result.full_horizon_normalized_deficit > 0.
+    assert result.first_failure is None  # Full capacity scenario, not full task feasibility.
+    assert not result.metadata["continuation_is_feasible_movement"]
+
+
+def test_capacity_projection_does_not_score_numerical_or_domain_failures(monkeypatch):
+    def fail(*args, **kwargs):
+        raise RuntimeError("root failure")
+    monkeypatch.setattr("cocofest.optimization.weighted_cycle_prediction.brentq", fail)
+    result = predictor().rollout(states(), [1., 1.], horizon_cycles=500,
+                                tracking_mode="projected_capacity")
+    assert result.status == "numerical_failure"
+    assert result.full_horizon_normalized_deficit is None
+    assert result.terminal_normalized_reserve is None
+    assert result.completed_cycles == 0
+
+
+def test_projected_capacity_equals_exact_prediction_when_reference_is_reachable():
+    p = predictor()
+    exact = p.rollout(states(), [1., 3.], horizon_cycles=4)
+    capacity = p.rollout(states(), [1., 3.], horizon_cycles=4, tracking_mode="projected_capacity")
+    assert capacity.full_horizon_normalized_deficit < 1e-20
+    np.testing.assert_allclose(capacity.state_history, exact.state_history, atol=1e-13)
+    np.testing.assert_allclose(capacity.pulse_widths, exact.pulse_widths, atol=1e-13)
+def test_rollout_fatigue_metric_uses_duration_weighted_trapezoids_without_candidate_weights():
+    from cocofest.optimization.weighted_cycle_prediction import rollout_fatigue_metrics
+    history = np.zeros((5, 2, 5))
+    history[:, :, 2] = np.array([1., .9, .8, .7, .6])[:, None] * np.array([100., 200.])
+    metrics = rollout_fatigue_metrics(history, (100., 200.), (.25, .75), 1)
+    assert metrics["first_block_mean_squared_fatigue"] == pytest.approx(.02)
+    assert metrics["full_horizon_mean_squared_fatigue"] == pytest.approx(.065)
+    assert metrics["terminal_minimum_capacity"] == pytest.approx(.6)

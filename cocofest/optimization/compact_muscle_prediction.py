@@ -108,8 +108,8 @@ class CompactMusclePredictor:
                 time = (j + 0.5) * interval.duration / self.substeps
                 self.gains[k, j] = [gain(time) if callable(gain) else gain
                                     for gain in interval.mechanical_gains]
-        if not np.all(np.isfinite(self.gains)) or np.any(self.gains <= 0.0):
-            raise ValueError("Sampled mechanical gains must be finite and positive.")
+        if not np.all(np.isfinite(self.gains)):
+            raise ValueError("Sampled mechanical gains must be finite.")
 
     def phase_map(self, states, interval_index: int) -> AffineRecruitmentMap:
         states = np.asarray(states, dtype=float)
@@ -127,6 +127,7 @@ class CompactMusclePredictor:
         force1 = np.zeros(self.muscle_count)
         integral0 = np.zeros(self.muscle_count)
         integral1 = np.zeros(self.muscle_count)
+        admissible_recruitment = self.maximum_recruitment.copy()
         slow_decay = np.exp(-dt / self.tau_fat)
         integral_constant = -self.tau_fat * np.expm1(-dt / self.tau_fat)
         for j in range(self.substeps):
@@ -144,6 +145,12 @@ class CompactMusclePredictor:
                          + equilibrium1 * (integral_constant - kernel))
             force0 = force_decay * force0
             force1 = force_decay * force1 - np.expm1(-rate * dt) * equilibrium1
+            # A signed gain is present in the source OCP, so recruitment can
+            # reduce force. Intersect the PW bound with F>=0 at every
+            # exponential substep instead of clamping the gain or the state.
+            force_bound = np.divide(force0, -force1, out=np.full_like(force0, np.inf),
+                                    where=force1 < 0.0)
+            admissible_recruitment = np.minimum(admissible_recruitment, force_bound)
         cn_end = np.exp(-interval.duration / self.tauc) * (
             states[:, 0] + amplitude * interval.duration / self.tauc
         )
@@ -156,7 +163,7 @@ class CompactMusclePredictor:
             slope=np.column_stack((np.zeros(self.muscle_count), force1, slow1)),
             weighted_force_intercept=integral0,
             weighted_force_slope=integral1,
-            maximum_recruitment=self.maximum_recruitment.copy(),
+            maximum_recruitment=admissible_recruitment,
         )
 
     def rollout(self, initial_states, *, horizon_cycles: int,
@@ -198,7 +205,7 @@ class CompactMusclePredictor:
                 coefficients = np.asarray(interval.moment_coefficients)
                 moment0 = coefficients * transition.intercept[:, 1]
                 moment_slope = coefficients * transition.slope[:, 1]
-                moment_max = moment0 + moment_slope * self.maximum_recruitment
+                moment_max = moment0 + moment_slope * transition.maximum_recruitment
                 allocation = solve_bounded_moment_qp_reference(
                     interval.target_moments,
                     required_total_moment=float(np.sum(interval.target_moments)),
@@ -208,16 +215,19 @@ class CompactMusclePredictor:
                 )
                 if allocation.allocated_moments is None:
                     return result({"cycle_index": cycle, "interval_index": k,
-                                   "status": allocation.status, "message": allocation.message})
+                                   "status": allocation.status, "message": allocation.message,
+                                   "required_total_moment": float(np.sum(interval.target_moments)),
+                                   "minimum_total_moment": float(np.sum(np.minimum(moment0, moment_max))),
+                                   "maximum_total_moment": float(np.sum(np.maximum(moment0, moment_max)))})
                 recruitment = np.zeros(self.muscle_count)
                 np.divide(allocation.allocated_moments - moment0, moment_slope,
                           out=recruitment, where=np.abs(moment_slope) > 1e-14)
                 # The allocation is bounded; only floating-point endpoint roundoff
                 # can leave the interval. Reject larger excursions explicitly.
-                if np.any(recruitment < -1e-12) or np.any(recruitment > self.maximum_recruitment + 1e-12):
+                if np.any(recruitment < -1e-12) or np.any(recruitment > transition.maximum_recruitment + 1e-12):
                     return result({"cycle_index": cycle, "interval_index": k,
                                    "status": "recruitment_inversion_outside_bounds"})
-                recruitment = np.clip(recruitment, 0.0, self.maximum_recruitment)
+                recruitment = np.clip(recruitment, 0.0, transition.maximum_recruitment)
                 next_states = transition.endpoint(recruitment)
                 if (not np.all(np.isfinite(next_states)) or np.any(next_states[:, :2] < 0.0)
                         or np.any(next_states[:, 2:] <= 0.0)):

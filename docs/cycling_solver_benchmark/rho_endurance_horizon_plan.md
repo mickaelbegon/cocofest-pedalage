@@ -596,9 +596,51 @@ différences finies centrales (`rtol=2e-6`, `atol=2e-8`). Les Jacobiennes des
 contraintes sont exactement `[1,1,1,1]`, `I` et `-I`. Sur l'ancre réelle du
 cycle 0, l'oracle borné conserve le moment total pendant 10 cycles, alors que
 le suivi de chaque moment individuel échoue au cycle 2. Ce résultat est un
-gate de faisabilité du concept, pas encore un gain d'endurance du RHO : le
-raccordement des variables futures au NLP Bioptim et la comparaison
-prospective restent à faire.
+gate de faisabilité du concept, pas encore un gain d'endurance du RHO.
+
+Le raccordement différentiable au NLP Bioptim est maintenant implémenté sous
+option expérimentale. À l'état terminal du RHO courant, un graphe CasADi de
+taille fixe propage les cinq états de Ding sur `H` cycles futurs. Les PW
+futures sont des paramètres libres du NLP, bornés par `[PD0, PW_max]`; pour
+chaque phase, une égalité impose que la somme des moments musculaires prédits
+reste égale au moment total du cycle RHO de référence. Le coût protège le
+maximum lisse d'utilisation des PW et ajoute une faible pénalité symétrique
+d'écart à l'allocation musculaire de référence. Il n'y a ni QP imbriquée, ni
+donnée FHO, ni dynamique multibody future.
+
+Pour quatre muscles, 30 stimulations et `H=3`, ce sous-problème ajoute 360 PW
+libres, 90 égalités de moment total, 3 240 marges de domaine et 780 paramètres
+fixes. Les gains mécaniques sont échantillonnés aux trois abscisses RK4. La
+fonction SX et MX concorde avec une propagation NumPy indépendante du modèle
+de Ding complet ; sa Jacobienne des résidus de moment est finie. Un petit NLP
+Bioptim réel converge avec les égalités de moment satisfaites à `1e-8`, puis
+une modification du profil numérique et du seed réutilise le même objet NLP et
+le même solveur IPOPT compilé (`nlp.c`, compteur de construction égal à un).
+
+Le chemin principal est exposé par `--experimental-muscle-horizon`. Un poids
+nul n'ouvre aucun fichier et ne modifie ni objectif, ni contrainte, ni
+paramètre. La signature de codegen contient la structure et tous les paramètres
+de Ding, mais exclut les valeurs numériques du profil et du seed ; les
+signatures de solution les incluent par SHA-256. La première validation est
+volontairement limitée à IPOPT. Les marges de domaine actuellement contraintes
+sont celles des extrémités de phase ; l'audit des états intermédiaires RK4 et
+la comparaison prospective sur plusieurs RHO restent des gates avant toute
+interprétation clinique.
+
+Exemple d'activation (l'archive source et le profil réduit doivent être
+certifiés pour la même tâche) :
+
+```bash
+conda run -n cocofest-rho32 python \
+  examples/fes_multibody/cycling/cycling_pulse_width_mhe_acados_periodic.py \
+  --solver ipopt --ipopt-linear-solver ma57 --ipopt-c-compile \
+  --mechanical-formulation reduced \
+  --reduced-cycling-profile benchmark-seed/reduced-cycling-fourier12.npz \
+  --experimental-muscle-horizon --muscle-horizon-weight 0.1 \
+  --muscle-horizon-source path/to/validated-rho-trajectory.npz \
+  --muscle-horizon-source-cycle-index 0 --muscle-horizon-cycle-period 1.0 \
+  --muscle-horizon-cycles 3
+```
 
 Exemple reproductible :
 

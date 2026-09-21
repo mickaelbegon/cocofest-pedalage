@@ -22,31 +22,77 @@ from cocofest.optimization.endurance_weight_supervisor import (
 @dataclass(frozen=True)
 class RhoPaceConfig:
     adaptation_enabled: bool = True
-    update_every_cycles: int = 5
+    update_every_cycles: int = 20
     smoothing: float = 0.2
     capacity_gain: float = 1.0
     min_relative_weight: float = 0.25
     max_relative_weight: float = 4.0
     max_log_step: float = math.log(1.1)
     max_cycles: int = 100
+    adaptation_strategy: str = "capacity_feedback"
+    projection_horizon_cycles: int = 500
+    projection_substeps: int = 16
+    projection_budget_seconds: float = 600.0
+    projection_adjustment_factor: float = 1.5
+    projection_tracking_mode: str = "projected_capacity"
+    projection_async: bool = True
+    # Keep the slow rollout off the fast RHO core when the campaign uses
+    # taskset.  JSON lists are accepted and normalized to an immutable tuple.
+    projection_worker_cpu_ids: tuple[int, ...] | list[int] | None = None
+    target_cycle_seconds: float = 1.0
+    projection_budget_fraction: float = 0.8
+    projection_fatigue_guard: bool = True
+    projection_minimum_relative_improvement: float = 0.01
+    projection_minimum_absolute_improvement: float = 1e-6
 
     def __post_init__(self):
         if not isinstance(self.adaptation_enabled, bool):
             raise ValueError("adaptation_enabled must be boolean")
-        for name in ("update_every_cycles", "max_cycles"):
+        if not isinstance(self.projection_async, bool):
+            raise ValueError("projection_async must be boolean")
+        if self.projection_worker_cpu_ids is not None:
+            try:
+                cpu_ids = tuple(self.projection_worker_cpu_ids)
+            except TypeError as error:
+                raise ValueError("projection_worker_cpu_ids must be a sequence of CPU ids") from error
+            if not cpu_ids or any(isinstance(cpu, bool) or not isinstance(cpu, int) or cpu < 0
+                                  for cpu in cpu_ids):
+                raise ValueError("projection_worker_cpu_ids must contain nonnegative integer CPU ids")
+            if len(set(cpu_ids)) != len(cpu_ids):
+                raise ValueError("projection_worker_cpu_ids must not contain duplicates")
+            object.__setattr__(self, "projection_worker_cpu_ids", cpu_ids)
+        if not isinstance(self.projection_fatigue_guard, bool):
+            raise ValueError("projection_fatigue_guard must be boolean")
+        for name in ("projection_minimum_relative_improvement", "projection_minimum_absolute_improvement"):
+            if not math.isfinite(getattr(self, name)) or getattr(self, name) < 0:
+                raise ValueError(f"{name} must be finite and nonnegative")
+        for name in ("update_every_cycles", "max_cycles", "projection_horizon_cycles", "projection_substeps"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
-        if self.max_cycles > 100:
-            raise ValueError("RHO-PACE campaign is limited to 100 cycles")
+        if self.projection_tracking_mode not in {"exact", "projected_capacity"}:
+            raise ValueError("projection_tracking_mode must be exact or projected_capacity")
+        if self.projection_adjustment_factor <= 1:
+            raise ValueError("projection_adjustment_factor must be greater than one")
+        if self.adaptation_strategy not in {"capacity_feedback", "predictive_moment"}:
+            raise ValueError("adaptation_strategy must be 'capacity_feedback' or 'predictive_moment'")
         for name in ("smoothing", "capacity_gain", "min_relative_weight",
-                     "max_relative_weight", "max_log_step"):
+                     "max_relative_weight", "max_log_step", "projection_budget_seconds",
+                     "projection_adjustment_factor", "target_cycle_seconds", "projection_budget_fraction"):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be finite and positive")
         if self.smoothing > 1:
             raise ValueError("smoothing must not exceed 1")
+        if self.projection_budget_fraction > 1:
+            raise ValueError("projection_budget_fraction must not exceed 1")
         if not self.min_relative_weight <= 1 <= self.max_relative_weight:
             raise ValueError("Relative weight bounds must contain 1")
+
+    @property
+    def effective_projection_budget_seconds(self):
+        """A slow update must finish within its next real-time call period."""
+        return min(self.projection_budget_seconds, self.update_every_cycles
+                   * self.target_cycle_seconds * self.projection_budget_fraction)
 
 
 class RhoPaceController:
@@ -92,8 +138,11 @@ class RhoPaceController:
             with self.journal_path.open("x", encoding="utf-8"):
                 pass
         self._record({"event": "configuration", "arm": self.arm,
-                      "policy": ("causal_capacity_feedback_v1" if self.config.adaptation_enabled
-                                 else "static_initial_physiological_cost_v1"), "config": asdict(self.config),
+                      "policy": (
+                          f"{self.config.adaptation_strategy}_v1"
+                          if self.config.adaptation_enabled
+                          else "static_initial_physiological_cost_v1"
+                      ), "config": asdict(self.config),
                       "muscle_names": self.muscle_names, "parameters": self.parameters,
                       "initial_weights": self.initial_weights,
                       "supplied_initial_weights": supplied_weights,
@@ -119,7 +168,8 @@ class RhoPaceController:
         return self.events[-1]
 
     def boundary(self, cycle_index, capacity_ratios, *, certified,
-                 signed_crank_torque_nm, apply_weights: Callable | None):
+                 signed_crank_torque_nm, apply_weights: Callable | None,
+                 predictive_weights=None, predictive_audit=None):
         """Prepare window ``cycle_index``; zero is the certified common seed.
 
         ``certified`` refers to the previous completed solution for later
@@ -154,23 +204,54 @@ class RhoPaceController:
         if self.connected and not self.config.adaptation_enabled:
             self.last_cycle = cycle_index
             return self._record({**event, "status": "held", "reasons": ["static_physiological_weights"]})
-        if self.connected and cycle_index % self.config.update_every_cycles:
+        async_result_ready = (self.config.projection_async
+                              and self.config.adaptation_strategy == "predictive_moment"
+                              and predictive_weights is not None)
+        if self.connected and cycle_index % self.config.update_every_cycles and not async_result_ready:
             self.last_cycle = cycle_index
             return self._record({**event, "status": "held", "reasons": ["slow_update_not_due"]})
         if not self.connected and cycle_index != 0:
             return self._record({**event, "status": "refused", "reasons": ["initial_cost_not_connected"]})
         proposed = self.initial_weights
         if self.connected:
-            target = _project_centered_logs(
-                [math.log(w) - self.config.capacity_gain * math.log(r)
-                 for w, r in zip(self.initial_weights, ratios)],
-                lower=math.log(self.config.min_relative_weight),
-                upper=math.log(self.config.max_relative_weight))
-            logs = tuple(math.log(w) for w in self.weights)
-            delta = tuple(self.config.smoothing * (t - w) for t, w in zip(target, logs))
-            scale = min(1.0, self.config.max_log_step / max(max(map(abs, delta)), 1e-300))
-            proposed = tuple(math.exp(w + scale * d) for w, d in zip(logs, delta))
+            if self.config.adaptation_strategy == "predictive_moment":
+                if predictive_weights is None:
+                    self.last_cycle = cycle_index
+                    return self._record({**event, "status": "held", "reasons": [
+                        "predictive_proposal_unavailable"], "predictive_audit": predictive_audit})
+                try:
+                    normalized = normalize_relative_weights(predictive_weights)
+                    if len(normalized) != len(self.weights):
+                        raise ValueError("wrong dimension")
+                    proposed = tuple(math.exp(value) for value in _project_centered_logs(
+                        [math.log(value) for value in normalized],
+                        lower=math.log(self.config.min_relative_weight),
+                        upper=math.log(self.config.max_relative_weight)))
+                    if self.config.projection_fatigue_guard and self.config.projection_tracking_mode == "projected_capacity":
+                        if not predictive_audit or predictive_audit.get("selection_basis") not in {
+                                "guarded_hold_incumbent", "guarded_fatigue_improvement"}:
+                            raise ValueError("missing guarded rollout evidence")
+                        if any(abs(math.log(w / old)) > self.config.max_log_step + 1e-12
+                               for w, old in zip(proposed, self.weights)):
+                            raise ValueError("predictive proposal exceeds evaluated trust region")
+                except (TypeError, ValueError, OverflowError) as error:
+                    self.last_cycle = cycle_index
+                    return self._record({**event, "status": "held", "reasons": [
+                        "invalid_predictive_proposal"], "predictive_audit": predictive_audit,
+                        "error": f"{type(error).__name__}: {error}"})
+            else:
+                target = _project_centered_logs(
+                    [math.log(w) - self.config.capacity_gain * math.log(r)
+                     for w, r in zip(self.initial_weights, ratios)],
+                    lower=math.log(self.config.min_relative_weight),
+                    upper=math.log(self.config.max_relative_weight))
+                logs = tuple(math.log(w) for w in self.weights)
+                delta = tuple(self.config.smoothing * (t - w) for t, w in zip(target, logs))
+                scale = min(1.0, self.config.max_log_step / max(max(map(abs, delta)), 1e-300))
+                proposed = tuple(math.exp(w + scale * d) for w, d in zip(logs, delta))
         event["proposed_weights"] = proposed
+        if predictive_audit is not None:
+            event["predictive_audit"] = predictive_audit
         if apply_weights is None:
             return self._record({**event, "status": "refused", "reasons": ["ocp_cost_not_integrated"]})
         try:

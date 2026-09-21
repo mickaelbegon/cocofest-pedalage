@@ -99,8 +99,8 @@ complète, donc l'oracle refuse une valeur scalaire et ne calcule ni coût de
 marge final ni coût de suivi. Le poids exploratoire fixé à 1 n'a ainsi produit
 aucun candidat H30 utilisable et ne doit pas être interprété comme calibré.
 
-Aucun des trois cas H30 pré-déclarés n'étant complet, aucun rejeu Ding sur
-30 cycles complets n'a été lancé. On ne revendique donc pas un contrôle
+Aucun des trois cas H30 pré-déclarés n'étant complet, aucun rejeu Ding H30
+complet n'a été lancé. On ne revendique donc pas un contrôle
 `<= 1e-3 N·m` sur cet horizon. Cela n'interdit pas un diagnostic Ding
 explicitement limité au préfixe complété. Les trois bandes ont été fixées
 avant le calcul.

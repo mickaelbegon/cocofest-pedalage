@@ -164,6 +164,7 @@ class BatchedCompactMusclePredictor:
         dt = interval.duration / self.substeps
         force0 = states[:, :, 1].copy()
         force1, integral0, integral1 = (np.zeros_like(force0) for _ in range(3))
+        admissible_recruitment = np.broadcast_to(p.maximum_recruitment, force0.shape).copy()
         slow_decay = np.exp(-dt / p.tau_fat)
         integral_constant = -p.tau_fat * np.expm1(-dt / p.tau_fat)
         for j in range(self.substeps):
@@ -179,6 +180,9 @@ class BatchedCompactMusclePredictor:
             integral1 = slow_decay * integral1 + kernel * force1 + equilibrium1 * (integral_constant - kernel)
             force0 *= force_decay
             force1 = force_decay * force1 - np.expm1(-rate * dt) * equilibrium1
+            force_bound = np.divide(force0, -force1, out=np.full_like(force0, np.inf),
+                                    where=force1 < 0.0)
+            admissible_recruitment = np.minimum(admissible_recruitment, force_bound)
         cn_end = np.exp(-interval.duration / p.tauc) * (states[:, :, 0] + amplitude * interval.duration / p.tauc)
         decay = np.exp(-interval.duration / p.tau_fat)
         slow0 = p.rest + decay[:, None] * (states[:, :, 2:] - p.rest) + p.alpha * integral0[:, :, None]
@@ -186,7 +190,7 @@ class BatchedCompactMusclePredictor:
         return BatchedAffineRecruitmentMap(
             np.concatenate((cn_end[:, :, None], force0[:, :, None], slow0), axis=2),
             np.concatenate((np.zeros_like(force1)[:, :, None], force1[:, :, None], slow1), axis=2),
-            integral0, integral1, p.maximum_recruitment.copy())
+            integral0, integral1, admissible_recruitment)
 
     def rollout_many(self, initial_states, *, horizon_cycles, moment_tolerance=1e-8, tracking_band_nm=0.):
         if isinstance(horizon_cycles, bool) or int(horizon_cycles) != horizon_cycles or horizon_cycles < 1:
@@ -231,7 +235,7 @@ class BatchedCompactMusclePredictor:
             required = float(np.sum(interval.target_moments))
             lower[rows, cycle, k], upper[rows, cycle, k] = lo.sum(axis=1), hi.sum(axis=1)
             original[rows, cycle, k] = required
-            maximal_endpoint = transition.intercept + transition.slope * transition.maximum_recruitment[None, :, None]
+            maximal_endpoint = transition.intercept + transition.slope * transition.maximum_recruitment[:, :, None]
             envelope_valid[rows, cycle, k] = _physical(transition.intercept) & _physical(maximal_endpoint)
             allocation = solve_bounded_moment_qp_many(
                 interval.target_moments, required_total_moment=required, lower_bounds=lo, upper_bounds=hi,
@@ -246,9 +250,9 @@ class BatchedCompactMusclePredictor:
             selected = rows[good]
             recruitment = np.divide(allocation.allocated_moments[good] - moment0[good], slope[good],
                                     out=np.zeros_like(slope[good]), where=np.abs(slope[good]) > 1e-14)
-            in_bounds = np.all((recruitment >= -1e-12) & (recruitment <= transition.maximum_recruitment + 1e-12), axis=1)
+            in_bounds = np.all((recruitment >= -1e-12) & (recruitment <= transition.maximum_recruitment[good] + 1e-12), axis=1)
             fail(selected[~in_bounds], cycle, k, "recruitment_inversion_outside_bounds")
-            recruitment = np.clip(recruitment, 0., transition.maximum_recruitment)
+            recruitment = np.clip(recruitment, 0., transition.maximum_recruitment[good])
             next_states = transition.intercept[good] + transition.slope[good] * recruitment[:, :, None]
             physical = _physical(next_states)
             fail(selected[in_bounds & ~physical], cycle, k, "predicted_state_outside_domain")

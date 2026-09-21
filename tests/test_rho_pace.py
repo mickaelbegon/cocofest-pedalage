@@ -30,7 +30,7 @@ def boundary(policy, index, ratios=(.5, 1.), **kwargs):
 
 
 def test_slow_updates_preserve_common_scale_and_limit_change(tmp_path):
-    policy = controller(tmp_path)
+    policy = controller(tmp_path, config=RhoPaceConfig(update_every_cycles=5))
     assert boundary(policy, 0)["status"] == "applied"
     for cycle in range(1, 5):
         assert boundary(policy, cycle)["status"] == "held"
@@ -83,8 +83,17 @@ def test_duplicate_and_maximum_cycle_are_rejected():
     boundary(policy, 0)
     assert "duplicate_or_out_of_order_cycle" in boundary(policy, 0)["reasons"]
     assert "maximum_cycles_reached" in boundary(policy, 100)["reasons"]
-    with pytest.raises(ValueError, match="100"):
-        RhoPaceConfig(max_cycles=101)
+    assert RhoPaceConfig(max_cycles=1000).max_cycles == 1000
+    assert RhoPaceConfig().update_every_cycles == 20
+    assert RhoPaceConfig().projection_horizon_cycles == 500
+
+
+def test_worker_cpu_ids_are_validated_and_json_friendly():
+    assert RhoPaceConfig(projection_worker_cpu_ids=[4, 5]).projection_worker_cpu_ids == (4, 5)
+    with pytest.raises(ValueError, match="duplicates"):
+        RhoPaceConfig(projection_worker_cpu_ids=[4, 4])
+    with pytest.raises(ValueError, match="nonnegative"):
+        RhoPaceConfig(projection_worker_cpu_ids=[-1])
 
 
 def test_static_physio_applies_initial_weights_once_even_at_update_boundaries(tmp_path):
@@ -104,6 +113,48 @@ def test_static_physio_applies_initial_weights_once_even_at_update_boundaries(tm
         assert policy.weights == initial
     assert calls == [initial]
     assert policy.events[0]["uses_fho_data"] is False
+
+
+def test_predictive_strategy_applies_only_a_valid_slow_proposal():
+    policy = controller(config=RhoPaceConfig(
+        adaptation_strategy="predictive_moment", update_every_cycles=2, projection_fatigue_guard=False,
+    ))
+    assert boundary(policy, 0)["status"] == "applied"
+    held = boundary(policy, 1)
+    assert held["status"] == "held"
+    assert held["reasons"] == ["slow_update_not_due"]
+    missing = boundary(policy, 2)
+    assert missing["status"] == "held"
+    assert missing["reasons"] == ["predictive_proposal_unavailable"]
+
+    # A proposal is normalized and bounded before it reaches the objective.
+    applied = boundary(policy, 4, predictive_weights=(4., .25),
+                       predictive_audit={"selection_basis": "completed_horizon_margin"})
+    assert applied["status"] == "applied"
+    assert policy.weights == pytest.approx((4., .25))
+    assert applied["predictive_audit"]["selection_basis"] == "completed_horizon_margin"
+
+
+@pytest.mark.parametrize("strategy", ("", "future_magic"))
+def test_unknown_adaptation_strategy_is_rejected(strategy):
+    with pytest.raises(ValueError, match="adaptation_strategy"):
+        RhoPaceConfig(adaptation_strategy=strategy)
+
+
+def test_predictive_guard_rejects_an_unscored_or_oversized_step():
+    policy = controller(config=RhoPaceConfig(adaptation_strategy="predictive_moment"))
+    boundary(policy, 0)
+    refused = boundary(policy, 20, predictive_weights=(1.05, 1 / 1.05))
+    assert refused["status"] == "held"
+    assert policy.weights == (1., 1.)
+    refused = boundary(policy, 40, predictive_weights=(2., .5),
+                       predictive_audit={"selection_basis": "guarded_fatigue_improvement"})
+    assert refused["status"] == "held"
+    assert policy.weights == (1., 1.)
+    accepted = boundary(policy, 60, predictive_weights=(1.05, 1 / 1.05),
+                        predictive_audit={"selection_basis": "guarded_fatigue_improvement"})
+    assert accepted["status"] == "applied"
+    assert policy.weights == pytest.approx((1.05, 1 / 1.05))
 
 
 @pytest.mark.parametrize("declared", [

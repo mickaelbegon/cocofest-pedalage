@@ -73,6 +73,52 @@ def test_completed_candidate_with_better_declared_margin_changes_weights():
     assert proposal.chosen_evidence.minimum_signed_margin == pytest.approx(0.4)
 
 
+@pytest.mark.parametrize("change", [
+    {"full_horizon_normalized_deficit": .19999999},  # sub-threshold numerical gain
+    {"full_horizon_normalized_deficit": .1, "full_horizon_mean_squared_fatigue": .101},
+    {"full_horizon_normalized_deficit": .1, "first_block_mean_squared_fatigue": .011},
+    {"full_horizon_normalized_deficit": .1, "terminal_minimum_capacity": .69},
+    {"terminal_normalized_reserve": 100.},  # reserve alone cannot trigger weight drift
+    {"full_horizon_mean_squared_fatigue": None},  # missing evidence fails closed
+])
+def test_guarded_selection_refuses_weak_or_damaging_candidates(change):
+    supervisor = EnduranceWeightSupervisor(WeightSupervisorConfig(selection_mode="guarded_fatigue"))
+    baseline = CandidateRolloutResult(
+        120., True, False, -.1, "complete_with_deficit", full_horizon_normalized_deficit=.2,
+        terminal_normalized_reserve=-.1, full_horizon_mean_squared_fatigue=.1,
+        first_block_mean_squared_fatigue=.01, terminal_minimum_capacity=.7)
+    proposal = supervisor.evaluate(_snapshot(), lambda weights, _: (
+        baseline if weights == (1.,) * 4 else replace(baseline, **change)), budget_seconds=10.)
+    assert proposal.weights == (1.,) * 4
+    assert proposal.selection_basis == "guarded_hold_incumbent"
+
+
+def test_guarded_selection_allows_meaningful_fatigue_gain_with_zero_deficit():
+    supervisor = EnduranceWeightSupervisor(WeightSupervisorConfig(
+        selection_mode="guarded_fatigue", max_candidate_log_step=math.log(1.1)))
+    baseline = CandidateRolloutResult(
+        120., True, True, .1, "complete", full_horizon_normalized_deficit=0.,
+        terminal_normalized_reserve=.1, full_horizon_mean_squared_fatigue=.1,
+        first_block_mean_squared_fatigue=.01, terminal_minimum_capacity=.7)
+    proposal = supervisor.evaluate(_snapshot(), lambda weights, _: (
+        baseline if weights == (1.,) * 4 else replace(baseline, full_horizon_mean_squared_fatigue=.09)),
+        budget_seconds=10.)
+    assert proposal.weights != (1.,) * 4
+    assert proposal.selection_basis == "guarded_fatigue_improvement"
+    assert max(abs(math.log(w)) for w in proposal.weights) <= math.log(1.1) + 1e-12
+    assert math.prod(proposal.weights) == pytest.approx(1.)
+
+
+def test_trust_region_is_applied_to_every_evaluated_candidate_including_reference():
+    supervisor = EnduranceWeightSupervisor(WeightSupervisorConfig(max_candidate_log_step=math.log(1.1)))
+    snapshot = _snapshot(incumbent_weights=(4., .25, 1., 1.))
+    for candidate in supervisor.candidates(snapshot):
+        assert all(.25 - 1e-12 <= w <= 4 + 1e-12 for w in candidate.weights)
+        assert max(abs(math.log(w / previous)) for w, previous in
+                   zip(candidate.weights, snapshot.incumbent_weights)) <= math.log(1.1) + 1e-12
+        assert math.prod(candidate.weights) == pytest.approx(1.)
+
+
 def test_exact_tie_preserves_incumbent_before_small_change_tiebreaks():
     supervisor = EnduranceWeightSupervisor()
     snapshot = _snapshot(incumbent_weights=(1.2, 0.9, 1.1, 0.85))
@@ -86,6 +132,36 @@ def test_exact_tie_preserves_incumbent_before_small_change_tiebreaks():
 
     assert proposal.chosen_candidate.kind == "incumbent"
     assert proposal.weights == snapshot.incumbent_weights
+
+
+def test_long_horizon_deficit_distinguishes_same_first_failure_and_rejects_short_tails():
+    supervisor = EnduranceWeightSupervisor(WeightSupervisorConfig(selection_mode="full_horizon_deficit"))
+    def evaluate(weights, context):
+        score = .2 if weights[0] > weights[1] else .5
+        duration = 500.
+        if weights[2] > weights[0]:
+            duration, score = 499., 0.  # Unequal horizons cannot win with an uncomputed tail.
+        return CandidateRolloutResult(duration, True, False, -.1, "complete_with_deficit",
+                                      full_horizon_normalized_deficit=score,
+                                      terminal_normalized_reserve=-.1)
+    proposal = supervisor.evaluate(_snapshot(horizon_cycles=500), evaluate,
+                                   budget_seconds=100., clock=lambda: 0.)
+    assert proposal.weights[0] > proposal.weights[1]
+    assert proposal.selection_basis == "full_horizon_normalized_moment_deficit"
+    assert proposal.chosen_evidence.completed_duration == 500.
+
+
+def test_long_horizon_mode_requires_a_completed_incumbent():
+    supervisor = EnduranceWeightSupervisor(WeightSupervisorConfig(selection_mode="full_horizon_deficit"))
+    def evaluate(weights, context):
+        if weights == context.incumbent_weights:
+            return _result(completed=False, feasible=False, duration=1., status="numerical_failure")
+        return CandidateRolloutResult(500., True, False, -.1, "complete_with_deficit",
+                                      full_horizon_normalized_deficit=.01, terminal_normalized_reserve=-.1)
+    proposal = supervisor.evaluate(_snapshot(horizon_cycles=500), evaluate,
+                                   budget_seconds=100., clock=lambda: 0.)
+    assert not proposal.has_actionable_evidence
+    assert proposal.weights == _snapshot().incumbent_weights
 
 
 def test_all_incomplete_rollouts_select_only_longest_explicit_prefix():
