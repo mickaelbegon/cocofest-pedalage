@@ -24,6 +24,7 @@
       "reason": "Headless application/configuration, launch contracts, fixture reports and command generation; no scientific solver stack.",
       "modules": [
         "tests/test_result_schema.py",
+        "tests/test_experiment_catalog.py",
         "tests/test_benchmark_readme.py",
         "tests/test_certify_configured_seed_preparation.py",
         "tests/test_cross_rollout_gui.py",
@@ -44,7 +45,9 @@
         "tests/test_simulation_core.py",
         "tests/test_simulation_resolved_config.py",
         "tests/test_simulation_gui.py",
+        "tests/test_rho_solve.py",
         "tests/test_solver_recovery.py",
+        "tests/test_runtime_preflight.py",
         "tests/test_trajectory_io.py",
         "tests/test_solver_option_screen_summary.py"
       ]

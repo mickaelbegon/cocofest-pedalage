@@ -68,6 +68,7 @@ from cocofest.optimization.trajectory_io import (
     save_rho_replay_checkpoint,
 )
 from cocofest.optimization.cycling_problem import CyclingProblemFactory
+from cocofest.optimization.rho_solve import RhoSolveRequest, run_rho_solve
 from cocofest.optimization.solver_recovery import (
     RecoveryOperations,
     run_frozen_nlp_recovery,
@@ -25115,32 +25116,35 @@ def solve_case(
     pre_solve_setup_wall_time_s = perf_counter() - pre_solve_setup_start
     rho_solve_loop_start = perf_counter()
     try:
-        sol = nmpc.solve_fes_nmpc(
-            update_functions,
-            solver=solver,
-            solver_first_iter=solver_first_iter,
-            total_cycles=args.n_windows,
-            external_force=cycling_info.get("resistive_torque"),
-            cycle_solutions=MultiCyclicCycleSolutions.ALL_CYCLES,
-            get_all_iterations=True,
-            cyclic_options={"states": {}},
-            max_consecutive_failing=receding_horizon_solver_failure_budget(
-                args.max_consecutive_failing,
-                retry_without_advance=args.retry_failed_rho_without_advance,
-                recovery_requires_target_certification=(
-                    nlp_recovery_enabled
-                    or getattr(args, "ipopt_failed_rho_pw_micro_retry", False)
-                    or getattr(args, "nlp_failed_rho_phase_one_recovery", False)
-                    or getattr(args, "acados_failed_rho_phase_one_recovery", False)
+        sol = run_rho_solve(
+            nmpc,
+            RhoSolveRequest(
+                update_functions=update_functions,
+                solver=solver,
+                solver_first_iter=solver_first_iter,
+                total_cycles=args.n_windows,
+                external_force=cycling_info.get("resistive_torque"),
+                cycle_solutions=MultiCyclicCycleSolutions.ALL_CYCLES,
+                get_all_iterations=True,
+                cyclic_options={"states": {}},
+                max_consecutive_failing=receding_horizon_solver_failure_budget(
+                    args.max_consecutive_failing,
+                    retry_without_advance=args.retry_failed_rho_without_advance,
+                    recovery_requires_target_certification=(
+                        nlp_recovery_enabled
+                        or getattr(args, "ipopt_failed_rho_pw_micro_retry", False)
+                        or getattr(args, "nlp_failed_rho_phase_one_recovery", False)
+                        or getattr(args, "acados_failed_rho_phase_one_recovery", False)
+                    ),
+                    fallback_advances_physical_rho=bool(
+                        args.acados_ipopt_fallback_advance
+                        or getattr(args, "nlp_ipopt_fallback_advance", False)
+                        or getattr(args, "ipopt_madnlp_fallback_advance", False)
+                    ),
+                    requested_physical_rhos=requested_window_solves,
                 ),
-                fallback_advances_physical_rho=bool(
-                    args.acados_ipopt_fallback_advance
-                    or getattr(args, "nlp_ipopt_fallback_advance", False)
-                    or getattr(args, "ipopt_madnlp_fallback_advance", False)
-                ),
-                requested_physical_rhos=requested_window_solves,
+                compact_solution_output=args.compact_rho_output,
             ),
-            compact_solution_output=args.compact_rho_output,
         )
     except RuntimeError as exc:
         rho_solve_loop_wall_time_s = perf_counter() - rho_solve_loop_start

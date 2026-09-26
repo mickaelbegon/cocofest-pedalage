@@ -1,0 +1,25 @@
+{
+  "schema_version": 4,
+  "configurations": {
+    "ipopt": {
+      "formulation": "dynamic",
+      "mechanical_formulation": "reduced",
+      "calcium_forcing_formulation": "exact_exponential_periodic_node",
+      "calcium_stimulation_interval_s": 0.03333333333333333,
+      "ipopt_linear_solver": "ma57"
+    }
+  },
+  "results": [
+    {
+      "solver": "ipopt",
+      "success": true,
+      "solver_success": true,
+      "physical_success": false,
+      "requested_cycles": 100,
+      "validated_cycles": 99,
+      "hot_solver_time_median_s": 0.42,
+      "hot_solver_time_p90_s": 0.68,
+      "mechanical_equivalence_audit": {"passes_tolerance": false}
+    }
+  ]
+}

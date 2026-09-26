@@ -63,3 +63,20 @@ legacy driver imports, scoped hook restoration, fingerprint receipts and replay.
 The focused suite is `tests/test_trajectory_io.py`,
 `tests/test_configured_rho_checkpoints.py`, `tests/test_solution_archive.py`, and
 `tests/test_result_schema.py`.
+
+The advancing solve invocation now crosses
+`cocofest.optimization.rho_solve.RhoSolveRequest` and `run_rho_solve`.
+The request makes every historical backend argument explicit, including the
+first-iteration solver, cycle export policy, failure budget and compact output.
+Live callbacks, solver instances and cyclic options keep their identity; return
+values and exceptions pass through unchanged. The package performs exactly one
+backend call. Retry, recovery certification, timing and failure summaries remain
+owned by the existing driver and NMPC callbacks. The backend's `total_cycles`
+argument is preserved and must not be read as a certified-cycle count.
+
+`tests/test_rho_solve.py` checks the package with a fake NMPC and executes the
+production dispatch statement with the real failure-budget helper. It covers
+ordinary solves, seed certification, PW micro retries, phase-one recovery and
+each certifying fallback option without loading numerical solver libraries.
+This is an invocation boundary; extraction of the callback state and complete
+RHO orchestration remains tracked by issue #8.
