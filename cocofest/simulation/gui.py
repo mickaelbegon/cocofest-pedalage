@@ -6,6 +6,7 @@ Scientific dependencies are only loaded inside the child solver process.
 from __future__ import annotations
 
 import argparse
+from dataclasses import asdict
 from datetime import datetime
 import json
 from pathlib import Path
@@ -17,22 +18,29 @@ from .launch import ROOT, build_launch_plan
 from .gui_model import FORM_FIELDS, config_from_form, form_values, result_summary, scientific_summary
 from .execution import SimulationProcess, runtime_helpers
 from .bayesian_model import BayesianCampaignConfig, campaign_summary
-from .async_bayesian_model import AsyncBayesianCampaignConfig
+from .async_bayesian_model import (
+    AsyncBayesianCampaignConfig, configured_muscle_names, muscle_weight_coordinate_name,
+    muscle_weight_reference, relative_weight_bounds,
+)
 from .launch import LaunchPlan
 from .cross_rollout_model import CrossRolloutConfig, build_cross_rollout_plan, cross_rollout_summary, cross_rollout_report
 from .independent_arms_gui_model import IndependentArmsGuiConfig, independent_arms_summary
+from .bilateral_endurance_campaign import BilateralEnduranceCampaignConfig, BilateralEnduranceCandidate, BilateralTorqueBracketConfig
 
 
 _MUSCLE_WEIGHT_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 
 
 def muscle_weight_search_space(raw_names, low, high):
-    """Build the explicit, log-scaled per-muscle BO domain used by the GUI.
+    """Build a non-redundant centred-log coordinate domain for muscle BO.
 
-    Weight names are deliberately part of the JSON parameter name: this avoids
-    relying on a positional order which could silently change between models.
+    ``low`` and ``high`` are the controller's effective relative-weight box,
+    not an arbitrary multiplier range.  One muscle fixes the common-scale
+    gauge (Biceps when present); the remaining coordinates lie in [-1, 1] and
+    are transformed by the runner into weights with geometric mean exactly 1.
     """
-    names = tuple(name.strip() for name in str(raw_names).split(",") if name.strip())
+    raw = str(raw_names).split(",") if isinstance(raw_names, str) else raw_names
+    names = tuple(str(name).strip() for name in raw if str(name).strip())
     if not names:
         raise ValueError("Indiquez au moins un muscle à pondérer.")
     if len(set(names)) != len(names):
@@ -41,10 +49,11 @@ def muscle_weight_search_space(raw_names, low, high):
     if invalid:
         raise ValueError(f"Nom musculaire invalide : {', '.join(invalid)}.")
     low, high = float(low), float(high)
-    if not (0 < low <= high):
-        raise ValueError("Les bornes de multiplicateur doivent vérifier 0 < min ≤ max.")
-    return {f"muscle_weight__{name}": {"type": "float", "low": low, "high": high, "log": True}
-            for name in names}
+    if not (0 < low < 1 < high):
+        raise ValueError("Les bornes effectives doivent vérifier 0 < min < 1 < max.")
+    reference = muscle_weight_reference(names)
+    return {muscle_weight_coordinate_name(name): {"type": "float", "low": -1.0, "high": 1.0}
+            for name in names if name != reference}
 
 
 def muscle_weight_campaign(base_config, *, output_root, study_name, muscle_names,
@@ -59,12 +68,20 @@ def muscle_weight_campaign(base_config, *, output_root, study_name, muscle_names
         raise ValueError("Le BO des poids musculaires requiert une configuration musculaire JSON.")
     if not base_config.weights_config:
         raise ValueError("Le BO des poids musculaires requiert le JSON de poids de référence.")
+    declared_names = configured_muscle_names(base_config.model_config)
+    requested_names = tuple(name.strip() for name in str(muscle_names).split(",") if name.strip())
+    if tuple(requested_names) != declared_names:
+        raise ValueError("Les muscles BO doivent suivre exactement l'ordre déclaré par model_config.")
+    configured_low, configured_high = relative_weight_bounds(base_config.weights_config)
+    if (float(scale_min), float(scale_max)) != (configured_low, configured_high):
+        raise ValueError("Les bornes BO doivent reproduire la boîte effective déclarée dans weights_config.policy "
+                         f"({configured_low:g}, {configured_high:g}).")
     return AsyncBayesianCampaignConfig(
         base_config=base_config.to_dict(), output_root=str(output_root), study_name=str(study_name).strip(),
         study_kind="controller", phase="screening", max_cycles=int(max_cycles),
         metric="continuous_endurance", n_trials=int(trials), workers=int(workers),
         n_startup_trials=int(startup_trials), seed=int(seed), timeout_s=float(timeout_s),
-        search_space=muscle_weight_search_space(muscle_names, scale_min, scale_max),
+        search_space=muscle_weight_search_space(declared_names, configured_low, configured_high),
     ).validate()
 
 
@@ -172,12 +189,12 @@ class SimulationApp:
         self.form_notebook.add(arms, text="Deux bras indépendants")
         ttk.Label(
             arms,
-            text=("Deux problèmes unilatéraux, synchronisés sur la même cadence imposée, sont lancés en parallèle. "
+            text=("Deux problèmes unilatéraux partagent la même cadence imposée, mais ne sont pas synchronisés cycle par cycle par défaut. "
                   "Ils ne partagent ni états Ding/fatigue, ni commandes, ni couple mécanique. Cette voie est exclusivement "
                   "isocinétique. Chaque cible est un travail positif par tour ou son couple moyen équivalent : W = 2π·τ̄.\n\n"
                   "Le couple instantané reste déduit du bilan isocinétique par le moteur; ce formulaire ne prescrit pas un couple "
-                  "externe instantané. Après le résultat, une proposition peut être reportée dans les deux champs puis relancée; "
-                  "la réutilisation des artefacts compilés reste déclarée et vérifiée par le coordinateur."),
+                  "externe instantané. La politique expérimentale « retour capacité » installe une barrière après chaque cycle, "
+                  "puis répartit le travail total du cycle suivant entre les bras; elle exige des métriques de réserve certifiées."),
             wraplength=970,
         ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
         arms_defaults = {
@@ -185,7 +202,12 @@ class SimulationApp:
             "isokinetic_omega": str(-2.0 * 3.141592653589793),
             "right_work_j_per_cycle": "", "right_equivalent_mean_torque_nm": "0.1",
             "left_work_j_per_cycle": "", "left_equivalent_mean_torque_nm": "0.1",
-            "factory": "", "right_runner_config": "", "left_runner_config": "",
+            "resistance_pace_policy": "fixed", "resistance_pace_update_every_cycles": "10", "resistance_pace_capacity_gain": "1.0",
+            "resistance_pace_smoothing": "0.25", "resistance_pace_max_fraction_step": "0.10",
+            "resistance_pace_minimum_arm_torque_nm": "0.0",
+            "endurance_torque_upper_nm": "0.6", "endurance_torque_tolerance_nm": "0.02",
+            "parametric_fatigue_weights": "false",
+            "factory": "cocofest.simulation.independent_arms_process:build_process_independent_arms", "right_runner_config": "", "left_runner_config": "",
             "output_root": f"gui-results/independent-arms-{datetime.now():%Y%m%d-%H%M%S}",
         }
         self.independent_arms_variables = {name: tk.StringVar(value=value) for name, value in arms_defaults.items()}
@@ -198,6 +220,15 @@ class SimulationApp:
             ("Bras droit : couple moyen équivalent τ̄ (N.m, optionnel)", "right_equivalent_mean_torque_nm"),
             ("Bras gauche : travail cible / cycle (J, optionnel)", "left_work_j_per_cycle"),
             ("Bras gauche : couple moyen équivalent τ̄ (N.m, optionnel)", "left_equivalent_mean_torque_nm"),
+            ("Répartition de résistance", "resistance_pace_policy"),
+            ("Mise à jour de répartition tous les N cycles", "resistance_pace_update_every_cycles"),
+            ("Retour capacité : gain", "resistance_pace_capacity_gain"),
+            ("Retour capacité : lissage [0,1]", "resistance_pace_smoothing"),
+            ("Retour capacité : pas max. de fraction [0,1]", "resistance_pace_max_fraction_step"),
+            ("Retour capacité : τ̄ minimal / bras (N.m)", "resistance_pace_minimum_arm_torque_nm"),
+            ("Endurance : borne haute τ total (N.m)", "endurance_torque_upper_nm"),
+            ("Endurance : tolérance τ total (N.m)", "endurance_torque_tolerance_nm"),
+            ("Poids de fatigue paramétriques (préserve le NLP compilé)", "parametric_fatigue_weights"),
             ("Fabrique runtime (module:fonction, optionnel si les configs la déclarent)", "factory"),
             ("Bras droit : configuration du modèle/worker (chemin ou référence)", "right_runner_config"),
             ("Bras gauche : configuration du modèle/worker (chemin ou référence)", "left_runner_config"),
@@ -208,6 +239,12 @@ class SimulationApp:
             if name == "solver":
                 control = ttk.Combobox(arms, textvariable=self.independent_arms_variables[name], state="readonly", width=34,
                                        values=("ipopt", "acados"))
+            elif name == "resistance_pace_policy":
+                control = ttk.Combobox(arms, textvariable=self.independent_arms_variables[name], state="readonly", width=34,
+                                       values=("fixed", "capacity_feedback"))
+            elif name == "parametric_fatigue_weights":
+                control = ttk.Combobox(arms, textvariable=self.independent_arms_variables[name], state="readonly", width=34,
+                                       values=("false", "true"))
             else:
                 control = ttk.Entry(arms, textvariable=self.independent_arms_variables[name], width=55)
             control.grid(row=row, column=1, sticky="ew", pady=3)
@@ -219,8 +256,14 @@ class SimulationApp:
         arm_buttons.grid(row=len(arm_labels)+2, column=0, columnspan=3, sticky="w")
         self.preview_independent_arms_button = ttk.Button(arm_buttons, text="Prévisualiser les deux bras", command=self.preview_independent_arms)
         self.preview_independent_arms_button.pack(side="left")
-        self.start_independent_arms_button = ttk.Button(arm_buttons, text="Lancer simultanément", command=self.start_independent_arms)
+        self.start_independent_arms_button = ttk.Button(arm_buttons, text="Lancer les deux bras", command=self.start_independent_arms)
         self.start_independent_arms_button.pack(side="left", padx=6)
+        self.preview_endurance_button = ttk.Button(arm_buttons, text="Prévisualiser endurance 10 min", command=self.preview_endurance)
+        self.preview_endurance_button.pack(side="left", padx=6)
+        self.start_endurance_button = ttk.Button(arm_buttons, text="Lancer endurance 10 min", command=self.start_endurance)
+        self.start_endurance_button.pack(side="left", padx=6)
+        self.start_endurance_search_button = ttk.Button(arm_buttons, text="Chercher τ maximal", command=self.start_endurance_search)
+        self.start_endurance_search_button.pack(side="left", padx=6)
         self.apply_independent_adjustment_button = ttk.Button(arm_buttons, text="Reporter la proposition", command=self.apply_independent_adjustment, state="disabled")
         self.apply_independent_adjustment_button.pack(side="left", padx=6)
         ttk.Button(arm_buttons, text="Charger requête…", command=self.load_independent_arms).pack(side="left")
@@ -269,7 +312,7 @@ class SimulationApp:
         muscle_campaign.columnconfigure(1, weight=1)
         muscle_defaults = {
             "muscle_bo_names": "Delt_ant, Delt_post, Biceps, Triceps",
-            "muscle_bo_min": "0.05", "muscle_bo_max": "20", "muscle_bo_trials": "32",
+            "muscle_bo_min": "0.25", "muscle_bo_max": "4", "muscle_bo_trials": "32",
             "muscle_bo_workers": "4", "muscle_bo_startup": "8", "muscle_bo_seed": "42",
             "muscle_bo_cycles": "500", "muscle_bo_timeout": "7200",
             "muscle_bo_output": f"gui-results/muscle-weights-bo-{datetime.now():%Y%m%d-%H%M%S}",
@@ -277,7 +320,7 @@ class SimulationApp:
         self.muscle_campaign_variables = {key: tk.StringVar(value=value) for key, value in muscle_defaults.items()}
         muscle_labels = (
             ("Muscles (noms exacts, séparés par virgule)", "muscle_bo_names"),
-            ("Multiplicateur min / max (échelle log)", "muscle_bo_min"),
+            ("Boîte effective poids relatifs min / max", "muscle_bo_min"),
             ("Essais / workers", "muscle_bo_trials"),
             ("Initialisation aléatoire / graine", "muscle_bo_startup"),
             ("Cycles maximum / timeout essai (s)", "muscle_bo_cycles"),
@@ -392,6 +435,11 @@ class SimulationApp:
         def optional_text(name):
             raw = fields[name].get().strip()
             return raw or None
+        def boolean(name):
+            raw = fields[name].get().strip().lower()
+            if raw not in {"true", "false"}:
+                raise ValueError(f"{name} doit être true ou false.")
+            return raw == "true"
         return IndependentArmsGuiConfig(
             solver=fields["solver"].get().strip(), cycles=int(fields["cycles"].get()),
             cycles_per_window=int(fields["cycles_per_window"].get()),
@@ -401,6 +449,13 @@ class SimulationApp:
             left_work_j_per_cycle=optional_float("left_work_j_per_cycle"),
             right_equivalent_mean_torque_nm=optional_float("right_equivalent_mean_torque_nm"),
             left_equivalent_mean_torque_nm=optional_float("left_equivalent_mean_torque_nm"),
+            resistance_pace_policy=fields["resistance_pace_policy"].get().strip(),
+            resistance_pace_update_every_cycles=int(fields["resistance_pace_update_every_cycles"].get()),
+            resistance_pace_capacity_gain=float(fields["resistance_pace_capacity_gain"].get()),
+            resistance_pace_smoothing=float(fields["resistance_pace_smoothing"].get()),
+            resistance_pace_max_fraction_step=float(fields["resistance_pace_max_fraction_step"].get()),
+            resistance_pace_minimum_arm_torque_nm=float(fields["resistance_pace_minimum_arm_torque_nm"].get()),
+            parametric_fatigue_weights=boolean("parametric_fatigue_weights"),
             factory=optional_text("factory"),
             right_runner_config=optional_text("right_runner_config"),
             left_runner_config=optional_text("left_runner_config"),
@@ -413,7 +468,7 @@ class SimulationApp:
             right, left = config.target_work_j("right"), config.target_work_j("left")
             self.independent_arms_validation.configure(
                 text=(f"Deux problèmes isocinétiques indépendants · Wdroite={right:.6g} J/tour · "
-                      f"Wgauche={left:.6g} J/tour · lancement parallèle. "
+                      f"Wgauche={left:.6g} J/tour · exécution indépendante. "
                       "Le couple instantané est calculé par le coordinateur, non prescrit ici."),
                 style="Success.TLabel")
             valid = not self.process.running
@@ -422,6 +477,108 @@ class SimulationApp:
             valid = False
         self.preview_independent_arms_button.configure(state="normal" if valid else "disabled")
         self.start_independent_arms_button.configure(state="normal" if valid else "disabled")
+        endurance_valid = valid and config.solver == "ipopt" and config.cycles_per_window == 1 and config.resistance_pace_policy == "capacity_feedback"
+        self.preview_endurance_button.configure(state="normal" if endurance_valid else "disabled")
+        self.start_endurance_button.configure(state="normal" if endurance_valid else "disabled")
+        self.start_endurance_search_button.configure(state="normal" if endurance_valid else "disabled")
+
+    def current_endurance_campaign(self):
+        """Translate the two-arm form into one certified 600-cycle candidate."""
+        config = self.current_independent_arms()
+        if config.solver != "ipopt" or config.cycles_per_window != 1 or config.resistance_pace_policy != "capacity_feedback":
+            raise ValueError("L'endurance 10 min exige IPOPT, fenêtres RHO d'un cycle et retour capacité.")
+        runtime = config.to_runtime_dict()
+        runtime["runtime_prefix"] = str(Path(self.prefix.get()).expanduser())
+        total = runtime["right_equivalent_mean_torque_nm"] + runtime["left_equivalent_mean_torque_nm"]
+        names = ("Delt_ant", "Delt_post", "Biceps", "Triceps")
+        candidate = BilateralEnduranceCandidate(total, runtime["right_equivalent_mean_torque_nm"] / total,
+                                                 dict.fromkeys(names, 1.), dict.fromkeys(names, 1.)).validate()
+        root = Path(config.output_root).expanduser()
+        if not root.is_absolute():
+            root = ROOT / root
+        campaign = BilateralEnduranceCampaignConfig(
+            base_payload=runtime, output_root=str(root) + "-endurance-600",
+            fidelities=(30, 120, 300, 600), target_cycles=600,
+            update_every_cycles=config.resistance_pace_update_every_cycles,
+            adaptation_enabled=False,
+        ).validate()
+        return campaign, candidate
+
+    def preview_endurance(self):
+        from tkinter import messagebox
+        try:
+            campaign, candidate = self.current_endurance_campaign()
+            path = Path(campaign.output_root).parent / f"{Path(campaign.output_root).name}.input.json"
+            command = [str(Path(self.prefix.get()).expanduser() / "bin/python"), "-m",
+                       "cocofest.simulation.bilateral_endurance_runner", "--campaign", str(path)]
+            manifest = {"campaign": campaign.to_dict(), "candidate": candidate.canonical_dict()}
+            self.set_text(self.command_text, " ".join(command) + "\n\n" + json.dumps(manifest, indent=2, ensure_ascii=False))
+            self.lower.select(self.command_text)
+            return campaign, candidate, path, command
+        except (ValueError, OSError) as error:
+            messagebox.showerror("Endurance bilatérale invalide", str(error), parent=self.window)
+            return None
+
+    def current_endurance_bracket(self):
+        campaign, candidate = self.current_endurance_campaign()
+        fields = self.independent_arms_variables
+        bracket = BilateralTorqueBracketConfig(candidate.total_equivalent_mean_torque_nm,
+            float(fields["endurance_torque_upper_nm"].get()),
+            float(fields["endurance_torque_tolerance_nm"].get())).validate()
+        return campaign, candidate, bracket
+
+    def start_endurance(self):
+        from tkinter import messagebox
+        preview = self.preview_endurance()
+        if preview is None:
+            return
+        campaign, candidate, path, command = preview
+        try:
+            root = Path(campaign.output_root)
+            if root.exists():
+                raise FileExistsError(f"Dossier de campagne existant : {root}")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"campaign": campaign.to_dict(), "candidate": candidate.canonical_dict()}, indent=2) + "\n", encoding="utf-8")
+            prefix = Path(self.prefix.get()).expanduser()
+            plan = LaunchPlan(tuple(command), ROOT, {}, "rho32", None)
+            self.process.start(plan, runtime_helpers().base_environment(prefix, "rho32", 1, 1), path.with_suffix(".log"))
+            self.active_plan, self.active_config, self.active_campaign = plan, None, campaign
+            self.active_rollout, self.active_independent_arms = None, None
+            self._completion_shown = False
+            self.set_text(self.log_text, "")
+            self.process_status.set(f"Endurance bilatérale : en cours (PID {self.process.process.pid})")
+            self.scientific_status.set("Promotion stricte 30 → 120 → 300 → 600 cycles ; seul le palier 600 certifie le couple.")
+            self.stop_button.configure(state="normal")
+            self.lower.select(self.log_text)
+        except (ValueError, OSError, RuntimeError) as error:
+            messagebox.showerror("Lancement endurance impossible", str(error), parent=self.window)
+
+    def start_endurance_search(self):
+        """Launch a bounded scalar torque search; technical stops remain visible."""
+        from tkinter import messagebox
+        try:
+            campaign, candidate, bracket = self.current_endurance_bracket()
+            root = Path(campaign.output_root)
+            if root.exists():
+                raise FileExistsError(f"Dossier de campagne existant : {root}")
+            path = root.parent / f"{root.name}.bracket-input.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"campaign": campaign.to_dict(), "candidate": candidate.canonical_dict(),
+                                        "bracket": asdict(bracket)}, indent=2) + "\n", encoding="utf-8")
+            prefix = Path(self.prefix.get()).expanduser()
+            command = (str(prefix / "bin/python"), "-m", "cocofest.simulation.bilateral_endurance_runner", "--campaign", str(path))
+            plan = LaunchPlan(command, ROOT, {}, "rho32", None)
+            self.process.start(plan, runtime_helpers().base_environment(prefix, "rho32", 1, 1), path.with_suffix(".log"))
+            self.active_plan, self.active_config, self.active_campaign = plan, None, campaign
+            self.active_rollout, self.active_independent_arms = None, None
+            self._completion_shown = False
+            self.set_text(self.log_text, "")
+            self.process_status.set(f"Recherche endurance : en cours (PID {self.process.process.pid})")
+            self.scientific_status.set("Dichotomie de τ : une erreur technique arrête la campagne, elle n'est jamais assimilée à de la fatigue.")
+            self.stop_button.configure(state="normal")
+            self.lower.select(self.log_text)
+        except (ValueError, OSError, RuntimeError) as error:
+            messagebox.showerror("Recherche endurance impossible", str(error), parent=self.window)
 
     def browse_independent_arms(self, field):
         from tkinter import filedialog
@@ -496,7 +653,7 @@ class SimulationApp:
             self._completion_shown = False
             self.set_text(self.log_text, "")
             self.process_status.set(f"Deux bras : en cours (PID {self.process.process.pid})")
-            self.scientific_status.set("Deux problèmes indépendants en parallèle : attente de la synthèse du coordinateur.")
+            self.scientific_status.set("Deux problèmes indépendants : attente de la synthèse du coordinateur.")
             self.stop_button.configure(state="normal")
             self.lower.select(self.log_text)
             self.validate()
@@ -647,6 +804,8 @@ class SimulationApp:
             plan = build_launch_plan(config, Path(self.prefix.get()).expanduser())
             text = (plan.command + "\n\nRépertoire : " + str(plan.cwd) + "\n\nVariables :\n" +
                     json.dumps(plan.environment_updates, indent=2, ensure_ascii=False))
+            if plan.resolved_config is not None:
+                text += "\n\nConfiguration SHA-256 : " + plan.resolved_config.config_hash
             self.set_text(self.command_text, text)
             self.lower.select(self.command_text)
             return config, plan
@@ -746,10 +905,13 @@ class SimulationApp:
     def validate_muscle_campaign(self, *_):
         try:
             campaign = self.current_muscle_campaign()
-            names = [name.removeprefix("muscle_weight__") for name in campaign.search_space]
+            names = [name.removeprefix("muscle_weight_coordinate__") for name in campaign.search_space]
+            reference = next(name for name in configured_muscle_names(self.current_config().model_config)
+                             if name not in names)
             self.muscle_campaign_validation.configure(
                 text=(f"BO Optuna parallèle · {campaign.n_trials} essais, {campaign.workers} workers · "
-                      f"{campaign.max_cycles} cycles max. Poids log-échelle : {', '.join(names)}.\n"
+                      f"{campaign.max_cycles} cycles max. Coordonnées log centrées : {', '.join(names)} "
+                      f"(référence {reference}).\n"
                       "Les horizons terminés sont censurés ; seuls les arrêts fatigue certifiés deviennent des observations."),
                 style="Success.TLabel")
             valid = not self.process.running

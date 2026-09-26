@@ -109,6 +109,9 @@ def load_source(path, profile, *, model_config=None, cycle_start=0, cycles=1, cy
         if "metadata__json" not in data:
             raise ValueError("Source archive has no metadata__json")
         metadata = json.loads(str(data["metadata__json"].item()))
+        from cocofest.optimization.solution_archive import validate_physical_archive
+
+        validate_physical_archive(data, metadata)
         # JSON permits NaN by default in Python; scientific provenance does not.
         json.dumps(metadata, allow_nan=False)
         if metadata.get("model_formulation") != "periodic_node":
@@ -236,6 +239,7 @@ def load_source(path, profile, *, model_config=None, cycle_start=0, cycles=1, cy
     if metadata.get("muscle_parameter_fingerprint") not in (None, fingerprint):
         raise ValueError("Effective muscle parameters do not match archive fingerprint")
     provenance = {"source": file_stamp(path), "parameters_basis": basis, "state_stride": stride,
+                  "archive_schema": metadata.get("physical_archive_schema", "legacy_unversioned"),
                   "cycle_duration_basis": "archive" if declared_period is not None else "explicit_or_isokinetic",
                   "effective_muscle_parameters": parameters, "muscle_parameter_fingerprint": fingerprint,
                   "source_solver": metadata.get("producer_solver"), "source_transcription": metadata.get("producer_transcription_profile")}
@@ -606,6 +610,14 @@ def run_matrix(paths, profile_path, output_dir, *, model_config=None, evaluators
     profile = ReducedCyclingDynamics.load(profile_path)
     sources = [load_source(path, profile, model_config=model_config, cycle_start=cycle_start,
                            cycles=cycles, cycle_duration=cycle_duration) for path in paths]
+    profile_stamp = file_stamp(profile_path)
+    for source in sources:
+        declared = source.metadata.get("reduced_profile")
+        if declared is not None and declared.get("sha256") != profile_stamp["sha256"]:
+            raise ValueError("Reduced profile differs from the physical source archive")
+        source.provenance["mechanical_profile_basis"] = (
+            "verified_archive_sha256" if declared is not None else "explicit_legacy_profile_not_verified"
+        )
     gate = compatibility(sources)
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)

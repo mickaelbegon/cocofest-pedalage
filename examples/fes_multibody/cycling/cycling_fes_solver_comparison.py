@@ -35,6 +35,11 @@ os.environ.setdefault("OMP_DYNAMIC", "FALSE")
 import numpy as np
 from bioptim import SolutionMerge
 
+from cocofest.evaluation.result_schema import (
+    RESULT_SCHEMA_VERSION,
+    audit_registry,
+    timing_populations,
+)
 from cocofest.optimization.muscle_reserve import DEFAULT_SMOOTH_MIN_TEMPERATURE
 from cocofest.optimization.endurance_rollout_ocp import add_endurance_rollout_cli
 from cocofest.optimization.muscle_horizon_ocp import add_muscle_horizon_cli
@@ -171,6 +176,7 @@ BENCHMARK_CONFIGURATION_FIELDS = (
     "pulse_width_max_step_us",
     "pulse_width_slew_weight",
     "pulse_width_slew_reference_us",
+    "pulse_width_slew_formulation",
     "pulse_width_active_set",
     "pulse_width_active_threshold",
     "pulse_width_active_margin",
@@ -301,11 +307,17 @@ BENCHMARK_CONFIGURATION_FIELDS = (
     "nlp_tolerance",
     "primal_feasibility_threshold",
     "ipopt_linear_solver",
+    "ipopt_hessian_approximation",
+    "ipopt_limited_memory_max_history",
+    "parametric_fatigue_weights",
+    "fatigue_weight_values",
     "warmup_ipopt_linear_solver",
     "standard_warmup_seed",
     "standard_warmup_seed_continuation",
     "legacy_standard_warmup_seed_signed_torque",
     "common_initial_solution",
+    "allow_primal_feasible_common_initial_solution_output",
+    "allow_finite_uncertified_common_initial_solution_output",
     "full_horizon_prefix_solution",
     "common_initial_solution_output",
     "allow_partial_receding_horizon_solution_output",
@@ -843,6 +855,7 @@ def _window_performance(result: dict) -> dict:
 
     return {
         "rows": rows,
+        "timing_populations": timing_populations(rows, prefix),
         "successful_prefix_windows": prefix,
         "nlp_validated_cycles": nlp_validated_cycles,
         "physically_validated_cycles": validated_cycles,
@@ -2391,7 +2404,9 @@ def _failed_solver_result(
 ) -> dict:
     """Return a benchmark-shaped failure so one missing plugin does not abort the matrix."""
 
+    single_shot = bool(getattr(args, "single_shot", False))
     return {
+        "mode": "single_shot" if single_shot else "rho",
         "args": args,
         "success": False,
         "solver_success": False,
@@ -2402,7 +2417,10 @@ def _failed_solver_result(
         "wall_time_s": wall_time_s,
         "end_to_end_wall_time_s": wall_time_s,
         "final_wheel_angle": None,
-        "requested_windows": args.n_windows,
+        "requested_windows": 1 if single_shot else args.n_windows,
+        "requested_cycles": (
+            int(getattr(args, "cycles_per_window", 1)) if single_shot else args.n_windows
+        ),
         "attempted_windows": 0,
         "successful_windows": 0,
         "exported_cycles": 0,
@@ -3456,6 +3474,12 @@ def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
                     result.get("args"), result
                 ),
                 "mode": result.get("mode"),
+                "requested_windows": (
+                    1 if result.get("mode") == "single_shot"
+                    else result.get("requested_windows")
+                ),
+                "timing_populations": performance["timing_populations"],
+                "audit_registry": audit_registry(result),
                 "success": bool(result.get("success")),
                 "solver_success": bool(result.get("solver_success")),
                 "physical_success": bool(result.get("physical_success")),
@@ -3682,6 +3706,12 @@ def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
                 "integrator_map_initial_guess": result.get(
                     "integrator_map_initial_guess"
                 ),
+                "integrator_map_final_solution": result.get(
+                    "integrator_map_final_solution"
+                ),
+                "integrator_map_final_solution_wall_time_s": result.get(
+                    "integrator_map_final_solution_wall_time_s"
+                ),
                 "rho_replay_checkpoint": result.get("rho_replay_checkpoint"),
                 "rho_prepared_checkpoints": (
                     result.get("rho_prepared_checkpoints") or []
@@ -3805,7 +3835,7 @@ def write_benchmark_summary(output_path: str | Path, results: dict[str, dict]) -
         }
 
     payload = {
-        "schema_version": 3,
+        "schema_version": RESULT_SCHEMA_VERSION,
         "runtime": {
             "python": platform.python_version(),
             "platform": platform.platform(),
@@ -3934,6 +3964,7 @@ def main(
     mechanical_formulation: str = "reduced",
     bilateral_reduced: bool = False,
     formulation: str = "dynamic",
+    reduced_dynamic_residual: str = "direct",
     energy_equivalent_torque: float = 0.2,
     isokinetic_omega: float = -float(2 * np.pi),
     load_torque_min: float = -3.0,
@@ -3953,11 +3984,17 @@ def main(
     ipopt_max_iter: int = 2000,
     standard_warmup_max_iter: int | None = None,
     ipopt_linear_solver: str = "ma57",
+    ipopt_hessian_approximation: str = "exact",
+    ipopt_limited_memory_max_history: int | None = None,
+    parametric_fatigue_weights: bool = False,
+    fatigue_weight_values: tuple[float, ...] | list[float] | None = None,
     warmup_ipopt_linear_solver: str | None = None,
     standard_warmup_seed: str | Path | None = None,
     standard_warmup_seed_continuation: bool = False,
     legacy_standard_warmup_seed_signed_torque: float | None = None,
     common_initial_solution: str | Path | None = None,
+    allow_primal_feasible_common_initial_solution_output: bool = False,
+    allow_finite_uncertified_common_initial_solution_output: bool = False,
     common_initial_solution_recenter_first_node_bounds: bool = False,
     common_initial_solution_feasibility_probe: bool = False,
     full_horizon_prefix_solution: str | Path | None = None,
@@ -4055,7 +4092,9 @@ def main(
     pulse_width_max_step_us: float | None = None,
     pulse_width_slew_weight: float = 0.0,
     pulse_width_slew_reference_us: float = 100.0,
+    pulse_width_slew_formulation: str = "lifting",
     reduced_internal_crank_velocity_guard: str = "auto",
+    reduced_terminal_half_step_velocity_guard: bool = False,
     pulse_width_active_set: str = "none",
     pulse_width_active_threshold: float = 0.01,
     pulse_width_active_margin: int = 3,
@@ -4590,6 +4629,10 @@ def main(
     )
     ipopt_args.common_initial_solution = common_initial_solution
     acados_args.common_initial_solution = common_initial_solution
+    ipopt_args.parametric_fatigue_weights = bool(parametric_fatigue_weights)
+    acados_args.parametric_fatigue_weights = bool(parametric_fatigue_weights)
+    ipopt_args.fatigue_weight_values = fatigue_weight_values
+    acados_args.fatigue_weight_values = fatigue_weight_values
     ipopt_args.common_initial_solution_recenter_first_node_bounds = (
         common_initial_solution_recenter_first_node_bounds
     )
@@ -4601,6 +4644,18 @@ def main(
     )
     acados_args.common_initial_solution_feasibility_probe = (
         common_initial_solution_feasibility_probe
+    )
+    ipopt_args.allow_primal_feasible_common_initial_solution_output = (
+        allow_primal_feasible_common_initial_solution_output
+    )
+    acados_args.allow_primal_feasible_common_initial_solution_output = (
+        allow_primal_feasible_common_initial_solution_output
+    )
+    ipopt_args.allow_finite_uncertified_common_initial_solution_output = (
+        allow_finite_uncertified_common_initial_solution_output
+    )
+    acados_args.allow_finite_uncertified_common_initial_solution_output = (
+        allow_finite_uncertified_common_initial_solution_output
     )
     ipopt_args.full_horizon_prefix_solution = full_horizon_prefix_solution
     acados_args.full_horizon_prefix_solution = full_horizon_prefix_solution
@@ -4628,6 +4683,9 @@ def main(
         shared_guard_mode = "on"
     for solver_args in (ipopt_args, acados_args):
         solver_args.reduced_internal_crank_velocity_guard = shared_guard_mode
+        solver_args.reduced_terminal_half_step_velocity_guard = bool(
+            reduced_terminal_half_step_velocity_guard
+        )
     ipopt_args.receding_horizon_solution_output = receding_horizon_solution_output
     acados_args.receding_horizon_solution_output = receding_horizon_solution_output
     ipopt_args.allow_partial_receding_horizon_solution_output = (
@@ -4674,6 +4732,8 @@ def main(
     for name, value in (
         ("ipopt_print_level", ipopt_print_level),
         ("ipopt_print_timing_statistics", ipopt_print_timing_statistics),
+        ("ipopt_hessian_approximation", ipopt_hessian_approximation),
+        ("ipopt_limited_memory_max_history", ipopt_limited_memory_max_history),
         ("ipopt_linear_system_scaling", ipopt_linear_system_scaling),
         ("ipopt_linear_scaling_on_demand", ipopt_linear_scaling_on_demand),
         ("ipopt_ma57_automatic_scaling", ipopt_ma57_automatic_scaling),
@@ -4953,6 +5013,7 @@ def main(
         solver_args.pulse_width_max_step_us = pulse_width_max_step_us
         solver_args.pulse_width_slew_weight = pulse_width_slew_weight
         solver_args.pulse_width_slew_reference_us = pulse_width_slew_reference_us
+        solver_args.pulse_width_slew_formulation = pulse_width_slew_formulation
         solver_args.rho_pulse_width_extrapolation_factor = (
             rho_pulse_width_extrapolation_factor
         )
@@ -5171,6 +5232,16 @@ def main(
         raise ValueError("--bilateral-reduced requires --mechanical-formulation reduced.")
     if formulation not in ("dynamic", "isokinetic"):
         raise ValueError("formulation must be 'dynamic' or 'isokinetic'.")
+    if reduced_dynamic_residual not in ("direct", "implicit_inverse"):
+        raise ValueError(
+            "reduced_dynamic_residual must be direct or implicit_inverse."
+        )
+    if reduced_dynamic_residual == "implicit_inverse" and (
+        formulation != "dynamic" or mechanical_formulation != "reduced"
+    ):
+        raise ValueError(
+            "implicit_inverse requires dynamic reduced mechanics."
+        )
     if formulation == "isokinetic" and mechanical_formulation != "reduced":
         raise ValueError(
             "The isokinetic formulation currently requires reduced mechanics."
@@ -5190,6 +5261,7 @@ def main(
     for solver_configuration in solver_args.values():
         solver_configuration.bilateral_reduced = bilateral_reduced
         solver_configuration.formulation = formulation
+        solver_configuration.reduced_dynamic_residual = reduced_dynamic_residual
         solver_configuration.energy_equivalent_torque = float(
             energy_equivalent_torque
         )
@@ -5299,6 +5371,11 @@ def build_cli() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--reduced-terminal-half-step-velocity-guard",
+        action="store_true",
+        help="Enforce the reduced midpoint cadence guard at the terminal RHO node.",
+    )
+    parser.add_argument(
         "--reduced-internal-crank-velocity-rk4-fraction",
         type=float,
         default=None,
@@ -5350,6 +5427,16 @@ def build_cli() -> argparse.ArgumentParser:
         choices=("dynamic", "isokinetic"),
         default="dynamic",
         help="Use forward crank dynamics or the reduced isokinetic inverse dynamics.",
+    )
+    parser.add_argument(
+        "--reduced-dynamic-residual",
+        choices=("direct", "implicit_inverse"),
+        default="direct",
+        help=(
+            "Experimental reduced dynamic collocation row. "
+            "implicit_inverse is algebraically equivalent to direct at a "
+            "feasible point but changes NLP conditioning."
+        ),
     )
     parser.add_argument("--energy-equivalent-torque", type=float, default=0.2)
     parser.add_argument(
@@ -5479,6 +5566,27 @@ def build_cli() -> argparse.ArgumentParser:
     )
     parser.add_argument("--ipopt-linear-solver", default="ma57")
     parser.add_argument(
+        "--parametric-fatigue-weights", action="store_true",
+        help="Keep four fatigue weights as numerical NLP parameters for RHO fitting or PACE.",
+    )
+    parser.add_argument(
+        "--fatigue-weight-values", type=float, nargs=4,
+        metavar=("DELT_ANT", "DELT_POST", "BICEPS", "TRICEPS"), default=None,
+        help="Fixed [0,1] weights in Delt_ant, Delt_post, Biceps, Triceps order; requires --parametric-fatigue-weights.",
+    )
+    parser.add_argument(
+        "--ipopt-hessian-approximation",
+        choices=("exact", "limited-memory"),
+        default="exact",
+        help="IPOPT Hessian model; limited-memory uses L-BFGS instead of exact second derivatives.",
+    )
+    parser.add_argument(
+        "--ipopt-limited-memory-max-history",
+        type=int,
+        default=None,
+        help="Optional L-BFGS history length when --ipopt-hessian-approximation=limited-memory.",
+    )
+    parser.add_argument(
         "--warmup-ipopt-linear-solver",
         default=None,
         help="Fixed linear solver used to build a shared warmup across targets.",
@@ -5550,6 +5658,22 @@ def build_cli() -> argparse.ArgumentParser:
         help=(
             "Write the first converged target window as a solver-neutral "
             "periodic initial solution."
+        ),
+    )
+    parser.add_argument(
+        "--allow-primal-feasible-common-initial-solution-output",
+        action="store_true",
+        help=(
+            "Mark a finite, primal-feasible nonzero-status IPOPT iterate as "
+            "a warm-start-only common solution; it is not a certified result."
+        ),
+    )
+    parser.add_argument(
+        "--allow-finite-uncertified-common-initial-solution-output",
+        action="store_true",
+        help=(
+            "Export a finite, possibly infeasible nonzero-status IPOPT "
+            "iterate only for a subsequent certifying warm start."
         ),
     )
     parser.add_argument(
@@ -6962,6 +7086,7 @@ if __name__ == "__main__":
         mechanical_formulation=args.mechanical_formulation,
         bilateral_reduced=args.bilateral_reduced,
         formulation=args.formulation,
+        reduced_dynamic_residual=args.reduced_dynamic_residual,
         energy_equivalent_torque=args.energy_equivalent_torque,
         isokinetic_omega=args.isokinetic_omega,
         load_torque_min=args.load_torque_min,
@@ -6986,6 +7111,10 @@ if __name__ == "__main__":
         ipopt_max_iter=args.ipopt_max_iter,
         standard_warmup_max_iter=args.standard_warmup_max_iter,
         ipopt_linear_solver=args.ipopt_linear_solver,
+        ipopt_hessian_approximation=args.ipopt_hessian_approximation,
+        ipopt_limited_memory_max_history=args.ipopt_limited_memory_max_history,
+        parametric_fatigue_weights=args.parametric_fatigue_weights,
+        fatigue_weight_values=args.fatigue_weight_values,
         warmup_ipopt_linear_solver=args.warmup_ipopt_linear_solver,
         standard_warmup_seed=args.standard_warmup_seed,
         standard_warmup_seed_continuation=(args.standard_warmup_seed_continuation),
@@ -6993,6 +7122,12 @@ if __name__ == "__main__":
             args.legacy_standard_warmup_seed_signed_torque
         ),
         common_initial_solution=args.common_initial_solution,
+        allow_primal_feasible_common_initial_solution_output=(
+            args.allow_primal_feasible_common_initial_solution_output
+        ),
+        allow_finite_uncertified_common_initial_solution_output=(
+            args.allow_finite_uncertified_common_initial_solution_output
+        ),
         common_initial_solution_recenter_first_node_bounds=(
             args.common_initial_solution_recenter_first_node_bounds
         ),
@@ -7123,8 +7258,12 @@ if __name__ == "__main__":
         pulse_width_max_step_us=args.pulse_width_max_step_us,
         pulse_width_slew_weight=args.pulse_width_slew_weight,
         pulse_width_slew_reference_us=args.pulse_width_slew_reference_us,
+        pulse_width_slew_formulation=args.pulse_width_slew_formulation,
         reduced_internal_crank_velocity_guard=(
             args.reduced_internal_crank_velocity_guard
+        ),
+        reduced_terminal_half_step_velocity_guard=(
+            args.reduced_terminal_half_step_velocity_guard
         ),
         reduced_internal_crank_velocity_rk4_fraction=(
             args.reduced_internal_crank_velocity_rk4_fraction

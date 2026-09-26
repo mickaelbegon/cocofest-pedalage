@@ -23,7 +23,8 @@ import sys
 import time
 
 from .async_bayesian_model import (
-    AsyncBayesianCampaignConfig, SimResult, classify_result, muscle_weight_parameters,
+    AsyncBayesianCampaignConfig, SimResult, classify_result, configured_muscle_names,
+    muscle_weight_coordinates, relative_weight_bounds,
 )
 from .async_bayesian_study import (
     finish_trial, open_study, recover_interrupted_trials, require_optuna,
@@ -85,14 +86,16 @@ def _administrative_evidence(result, requested_cycles):
 def write_trial_weights_config(base_config, parameters, trial_root, number):
     """Materialize one immutable named-weight candidate beside its observation.
 
-    The supplied baseline is copied so PACE policy settings remain part of the
-    scientific input.  Only the complete, model-validated initial weight map
-    is replaced; the candidate and baseline digest are both recorded locally.
+    The baseline is copied for its solver policy and calibration provenance.
+    The candidate itself is an *absolute relative cost* in the controller's
+    effective geometry, rather than a multiplier of the baseline: otherwise
+    geometric normalization and box projection make Optuna's requested
+    parameters many-to-one.
     """
-    multipliers = muscle_weight_parameters(parameters)
-    if not multipliers:
+    coordinate_names = [name for name in parameters if name.startswith("muscle_weight_coordinate__")]
+    if not coordinate_names:
         return None
-    if not base_config.weights_config:
+    if not base_config.weights_config or not base_config.model_config:
         raise ValueError("weights_config absent pour le candidat de poids musculaires")
     source = Path(base_config.weights_config).expanduser()
     if not source.is_absolute():
@@ -107,22 +110,21 @@ def write_trial_weights_config(base_config, parameters, trial_root, number):
     basis = payload.get("initial_weight_basis")
     if not isinstance(basis, str) or not basis.strip():
         raise ValueError("weights_config doit documenter initial_weight_basis")
+    muscle_names = configured_muscle_names(base_config.model_config)
     baseline_weights = payload.get("initial_weights")
-    if not isinstance(baseline_weights, dict) or set(baseline_weights) != set(multipliers):
+    if not isinstance(baseline_weights, dict) or set(baseline_weights) != set(muscle_names):
         raise ValueError("weights_config doit contenir exactement les poids initiaux des muscles recherchés")
     if any(not isinstance(value, (int, float)) or isinstance(value, bool)
            or not math.isfinite(value) or value <= 0 for value in baseline_weights.values()):
         raise ValueError("weights_config contient un poids initial non positif ou non fini")
-    # The BO domain is deliberately expressed as a dimensionless multiplier.
-    # Retaining the baseline's calibrated relative scale matters especially
-    # when muscle weights differ by several orders of magnitude.
-    effective_weights = {
-        name: float(baseline_weights[name]) * multiplier
-        for name, multiplier in multipliers.items()
-    }
+    min_weight, max_weight = relative_weight_bounds(str(source))
+    geometry = muscle_weight_coordinates(
+        parameters, muscle_names, min_weight=min_weight, max_weight=max_weight,
+    )
+    effective_weights = geometry["effective_initial_weights"]
     payload["initial_weights"] = effective_weights
     payload["initial_weight_basis"] = (
-        f"{basis}; bayesian_initial_muscle_weight_multipliers_v1; trial={number}; "
+        f"{basis}; bayesian_centered_log_relative_weights_v2; trial={number}; "
         f"baseline_sha256={sha256(raw).hexdigest()}"
     )
     # ``run_rho_pace_benchmark`` intentionally accepts only policy, weights,
@@ -130,10 +132,15 @@ def write_trial_weights_config(base_config, parameters, trial_root, number):
     # permitted calibration evidence instead of creating a rejected field.
     calibration = dict(payload.get("calibration") or {})
     calibration["bayesian_optimization"] = {
-        "schema": "initial_muscle_weight_multipliers_v1", "trial": int(number),
+        "schema": geometry["schema"], "trial": int(number),
         "source_weights_config": str(source), "source_weights_sha256": sha256(raw).hexdigest(),
-        "parameters": {f"muscle_weight__{name}": value for name, value in multipliers.items()},
-        "multipliers": multipliers,
+        "parameters": {name: float(parameters[name]) for name in coordinate_names},
+        "reference_muscle": geometry["reference_muscle"],
+        "coordinates": geometry["coordinates"],
+        "effective_centered_log_weights": geometry["effective_centered_log_weights"],
+        "min_relative_weight": geometry["min_relative_weight"],
+        "max_relative_weight": geometry["max_relative_weight"],
+        "geometric_mean": geometry["geometric_mean"],
         "baseline_initial_weights": {name: float(value) for name, value in baseline_weights.items()},
         "effective_initial_weights": effective_weights,
     }
@@ -141,6 +148,49 @@ def write_trial_weights_config(base_config, parameters, trial_root, number):
     destination = trial_root / "weights-config.json"
     write_json(destination, payload)
     return str(destination)
+
+
+def read_applied_weight_audit(plan, requested_weights):
+    """Read the controller's own initial-weight receipt without affecting score.
+
+    The configuration file records the intended effective cost.  The JSONL
+    receipt is the additional evidence that the live RHO controller accepted
+    it without a hidden normalization/projection change.  A missing receipt is
+    an audit gap, not a reason to reclassify an otherwise valid simulation.
+    """
+    requested_weights = dict(requested_weights or {})
+    journal = plan.result_json.parent / "weights.jsonl" if plan.result_json else None
+    audit = {"requested_effective_initial_weights": requested_weights,
+             "journal_path": None if journal is None else str(journal),
+             "status": "journal_missing"}
+    if journal is None or not journal.is_file():
+        return audit
+    try:
+        rows = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines() if line.strip()]
+        configuration = next(row for row in rows if row.get("event") == "configuration")
+        applied = configuration.get("initial_weights")
+        if not isinstance(applied, (list, tuple)) or len(applied) != len(requested_weights):
+            raise ValueError("configuration initial_weights missing")
+        names = configuration.get("muscle_names")
+        if not isinstance(names, (list, tuple)) or set(names) != set(requested_weights):
+            raise ValueError("configuration muscle_names mismatch")
+        if any(isinstance(value, bool) or not isinstance(value, (int, float))
+               or not math.isfinite(value) or value <= 0 for value in applied):
+            raise ValueError("configuration initial_weights invalid")
+        applied_map = {name: float(value) for name, value in zip(names, applied, strict=True)}
+        audit.update({
+            "status": "controller_receipt",
+            "controller_applied_initial_weights": applied_map,
+            "controller_normalization": configuration.get("initial_weight_normalization"),
+            "controller_projection_changed_ratios": configuration.get("initial_projection_changed_ratios"),
+            "matches_requested_relative_weights": all(
+                math.isclose(applied_map[name], requested_weights[name], rel_tol=1e-10, abs_tol=1e-12)
+                for name in requested_weights
+            ),
+        })
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        audit.update({"status": "journal_invalid", "error": f"{type(exc).__name__}: {exc}"})
+    return audit
 
 
 def _cycle1_seed_evidence(result):
@@ -191,6 +241,7 @@ def evaluate_trial(campaign_data, parameters, number, prefix, coordinator_pid):
     result, error, returncode = None, None, None
     stopped_at = None
     config = None
+    weight_audit = None
     try:
         base = SimulationConfig.from_dict(campaign.base_config)
         trial_extras = tuple(base.extra_arguments)
@@ -202,7 +253,8 @@ def evaluate_trial(campaign_data, parameters, number, prefix, coordinator_pid):
             trial_extras += ("--codegen-tag", f"bo-trial-{number:06d}")
         candidate_weights = write_trial_weights_config(base, parameters, trial_root, number)
         simulation_parameters = {
-            name: value for name, value in parameters.items() if not name.startswith("muscle_weight__")
+            name: value for name, value in parameters.items()
+            if not name.startswith("muscle_weight__") and not name.startswith("muscle_weight_coordinate__")
         }
         config = replace(base, **simulation_parameters, cycles=campaign.max_cycles,
                          output_root=str(trial_root / "simulation"), numeric_threads=1,
@@ -286,6 +338,11 @@ def evaluate_trial(campaign_data, parameters, number, prefix, coordinator_pid):
                 result = _selected_result(json.loads(plan.result_json.read_text(encoding="utf-8")), config.solver)
             if result is None and error is None:
                 error = "missing_or_invalid_solver_result"
+            if candidate_weights is not None:
+                candidate_payload = json.loads(Path(candidate_weights).read_text(encoding="utf-8"))
+                requested = (candidate_payload.get("calibration", {}).get("bayesian_optimization", {})
+                             .get("effective_initial_weights"))
+                weight_audit = read_applied_weight_audit(plan, requested)
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
     observation = classify_result(result, campaign.max_cycles, campaign.metric, error=error,
@@ -294,7 +351,7 @@ def evaluate_trial(campaign_data, parameters, number, prefix, coordinator_pid):
                                   _administrative_evidence(result, campaign.max_cycles))
     entry = {"trial": number, "parameters": parameters, "sim_result": observation.to_dict(),
              "elapsed_s": time.monotonic() - started, "returncode": returncode,
-             "error": error, "result": result}
+             "error": error, "result": result, "effective_weight_audit": weight_audit}
     write_json(trial_root / "observation.json", entry)
     return entry
 

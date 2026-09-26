@@ -28,9 +28,11 @@ class SimulationConfig:
     pulse_width_slew_weight: float = 0.0
     pulse_width_slew_reference_us: float = 100.0
     reduced_internal_crank_velocity_guard: str = "auto"
+    reduced_terminal_half_step_velocity_guard: bool = False
     terminal_q_slack: float = 0.002
     integration: str = "radau"
     collocation_degree: int = 5
+    ipopt_enforce_start_constraints: bool = True
     acados_sim_stages: int = 4
     acados_sim_steps: int = 5
     acados_qp_solver: str = "auto"
@@ -39,10 +41,13 @@ class SimulationConfig:
     ipopt_linear_solver: str = "ma57"
     madnlp_linear_solver: str = "mumps"
     acados_ipopt_cycle1_seed: str | None = None
+    common_initial_solution: str | None = None
     threads: int = 1
     numeric_threads: int = 1
     output_root: str = "pycharm-results"
     compile_evaluators: bool = True
+    compile_hessian_only: bool = False
+    compact_rho_output: bool = True
     madnlp_hot_max_iterations: int = 100
     madnlp_hot_max_wall_time: float = 20
     madnlp_recovery: bool = True
@@ -59,7 +64,8 @@ class SimulationConfig:
         # Keep the frozen configuration deeply stable at its only sequence field.
         if isinstance(self.extra_arguments, list):
             object.__setattr__(self, "extra_arguments", tuple(self.extra_arguments))
-        for name in ("output_root", "acados_ipopt_cycle1_seed", "weights_config", "model_config"):
+        for name in ("output_root", "acados_ipopt_cycle1_seed", "common_initial_solution",
+                     "weights_config", "model_config"):
             value = getattr(self, name)
             if isinstance(value, Path):
                 object.__setattr__(self, name, str(value))

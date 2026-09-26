@@ -8,6 +8,32 @@ la suite des commandes déjà enregistrées et les états restent continus.
 
 ## Entrées et provenance
 
+Les nouveaux exports communs FHO et RHO unilatéraux à mécanique réduite et
+Ding `periodic_node` portent le contrat `cocofest-physical-solution-v1`, dans
+`metadata__json.physical_archive_schema`. Le module
+`cocofest.optimization.solution_archive` ajoute ce contrat au même écrivain de
+seeds utilisé par les deux pilotes; il ne crée pas un autre moteur de replay.
+Il contient les paramètres Ding effectifs copiés du modèle construit (y compris
+les variantes configurées), leur empreinte SHA-256, la durée du cycle, les
+conventions physiques et le solveur producteur. Les empreintes des fichiers
+modèle et profil mécanique sont également conservées. Le profil fourni au replay
+doit avoir la même empreinte; les noms de fichiers peuvent changer.
+
+`physical__initial_state` conserve l'état physique entrant, dont l'ordre est
+déclaré dans `physical_state_names`. `physical__shooting_time_s` donne la grille
+temporelle relative au début de l'archive. Les anciennes clés `states__*` et
+`controls__*` restent disponibles pour les seeds, avec un stride déclaré pour
+les états de collocation. La grille shooting ne prétend pas décrire les stages
+internes Radau. Le lecteur vérifie la cohérence de l'état entrant, de la grille,
+des dimensions et de l'empreinte des paramètres. Un contrat v1 incomplet ou
+inconnu est refusé; il ne repasse pas silencieusement en mode legacy.
+
+Pour ces nouvelles archives, `--model-config` et `--cycle-duration` ne sont plus
+nécessaires. Le profil mécanique est encore passé par `--reduced-profile`.
+Les caches internes incomplets, les états Ding non reconstruits et les variantes
+non prises en charge (bilatéral ou commande PW en état de taux) ne sont pas
+étiquetés v1. Leurs limites restent celles du lecteur historique.
+
 L'API est `cocofest.optimization.solver_cross_rollout.run_matrix`. La CLI est
 `scripts/evaluate_solver_cross_rollout.py`. Elle accepte un ou plusieurs NPZ du
 projet contenant `states__*`, `controls__last_pulse_width_*` et `metadata__json`.

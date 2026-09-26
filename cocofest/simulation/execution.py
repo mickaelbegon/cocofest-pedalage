@@ -56,6 +56,7 @@ class SimulationProcess:
         log_path = Path(log_path)
         if log_path.exists():
             raise FileExistsError(f"Journal existant : choisissez un nouveau dossier ({log_path})")
+        plan.save_effective_configuration()
         plan.cwd.mkdir(parents=True, exist_ok=True)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log = log_path.open("x", encoding="utf-8")

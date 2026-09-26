@@ -61,6 +61,12 @@ from cocofest.optimization.receding_horizon_initial_guess import (
     snapshot_container,
     snapshot_initial_guess,
 )
+from cocofest.optimization.trajectory_io import (
+    WarmupSolutionAdapter as _WarmupSolutionAdapter,
+    load_trajectory,
+    save_trajectory,
+    save_rho_replay_checkpoint,
+)
 from cocofest.optimization.solver_backends import (
     add_ipopt_performance_arguments,
     NLP_SOLVER_NAMES,
@@ -1136,6 +1142,16 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default="dynamic",
         help="Use forward dynamics or reduced isokinetic inverse dynamics.",
     )
+    parser.add_argument(
+        "--reduced-dynamic-residual",
+        choices=("direct", "implicit_inverse"),
+        default="direct",
+        help=(
+            "Experimental reduced dynamic collocation row: the historical "
+            "explicit direct defect or its algebraically equivalent implicit "
+            "inverse-balance scaling. Available only for dynamic reduced IPOPT."
+        ),
+    )
     parser.add_argument("--energy-equivalent-torque", type=float, default=0.2)
     parser.add_argument(
         "--isokinetic-omega", type=float, default=-float(2 * np.pi)
@@ -1553,6 +1569,25 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help=(
             "Save the first converged and independently feasible target window "
             "as a reusable solver-neutral initial solution."
+        ),
+    )
+    parser.add_argument(
+        "--allow-primal-feasible-common-initial-solution-output",
+        action="store_true",
+        help=(
+            "Also save a finite, independently primal-feasible IPOPT iterate "
+            "when its native solver status is nonzero. The archive is marked "
+            "uncertified and is intended only as a warm start for a subsequent "
+            "certifying solve."
+        ),
+    )
+    parser.add_argument(
+        "--allow-finite-uncertified-common-initial-solution-output",
+        action="store_true",
+        help=(
+            "Also save a finite but infeasible IPOPT iterate solely as a "
+            "warm start for a following certifying solve. The archive is "
+            "explicitly marked unsafe for continuation or reporting."
         ),
     )
     parser.add_argument(
@@ -2478,6 +2513,26 @@ def build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--parametric-fatigue-weights",
+        action="store_true",
+        help=(
+            "Represent the four relative fatigue weights as fixed numerical NLP "
+            "parameters. This preserves the IPOPT/MadNLP objective graph when "
+            "RHO-PACE updates weights between windows."
+        ),
+    )
+    parser.add_argument(
+        "--fatigue-weight-values",
+        type=float,
+        nargs=4,
+        metavar=("DELT_ANT", "DELT_POST", "BICEPS", "TRICEPS"),
+        default=None,
+        help=(
+            "Four fixed fatigue weights in model-muscle order. Requires "
+            "--parametric-fatigue-weights; zero is permitted for local FHO-to-RHO fitting."
+        ),
+    )
+    parser.add_argument(
         "--ipopt-hsl-library",
         default=os.environ.get("IPOPT_HSL_LIBRARY"),
         help=(
@@ -2785,12 +2840,76 @@ def build_argument_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--ipopt-failed-rho-pw-micro-retry",
+        action="store_true",
+        help=(
+            "On an uncertified IPOPT reduced RHO, restore the exact prepared "
+            "checkpoint, reset IPOPT duals, apply a deterministic bounded "
+            "direct-pulse-width offset (at most 1% of every active bound "
+            "range), and retry without advancing. Auxiliary lifting and "
+            "pulse-width-rate representations are refused."
+        ),
+    )
+    parser.add_argument(
+        "--ipopt-frozen-rho-feasibility-probe",
+        action="store_true",
+        help=(
+            "After the final failed reduced IPOPT RHO, solve the identical "
+            "frozen window with every objective weight set to zero. This is "
+            "a diagnostic feasibility witness only: it never advances the "
+            "RHO and does not relax work, dynamics, bounds, or fatigue."
+        ),
+    )
+    parser.add_argument(
+        "--ipopt-frozen-rho-work-relief-fraction",
+        type=float,
+        nargs="+",
+        default=(0.005, 0.02),
+        metavar="FRACTION",
+        help=(
+            "After a terminal frozen-RHO failure, solve the same OCP with its "
+            "ordinary objective and each listed fractional reduction of the "
+            "terminal E_prod target (for example 0.005 0.02). Diagnostic only."
+        ),
+    )
+    parser.add_argument(
+        "--ipopt-frozen-rho-pw-upper-relief-fraction",
+        type=float,
+        default=0.05,
+        help=(
+            "Diagnostic-only fractional expansion of every direct PW control "
+            "range above pd0 on the final frozen RHO. It does not change the "
+            "model graph and never advances the physical RHO."
+        ),
+    )
+    parser.add_argument(
+        "--ipopt-frozen-rho-fatigue-rest-probe",
+        action="store_true",
+        default=True,
+        help=(
+            "Diagnostic-only frozen-RHO counterfactual: reset A, Tau1 and Km "
+            "to each muscle's rest values while retaining F, Cn, kinematics, "
+            "work target and pulse-width bounds."
+        ),
+    )
+    parser.add_argument(
         "--nlp-ipopt-recovery",
         action="store_true",
         help=(
             "After an uncertified reduced IPOPT/MadNLP/Fatrop RHO, restore the "
             "same frozen RHO with IPOPT and require a final certification by "
             "the requested target solver before advancing."
+        ),
+    )
+    parser.add_argument(
+        "--nlp-ipopt-recovery-ma57-tuned",
+        action="store_true",
+        help=(
+            "Opt in to a second, frozen-RHO IPOPT/MA57 restoration with a "
+            "distinct MA57 numerical profile. This is only meaningful with "
+            "--nlp-ipopt-recovery when both the target and recovery linear "
+            "solvers are MA57; the target IPOPT solve still has to certify the "
+            "injected primal before the RHO can advance."
         ),
     )
     parser.add_argument("--nlp-ipopt-recovery-max-iterations", type=int, default=2000)
@@ -3136,6 +3255,18 @@ def build_argument_parser() -> argparse.ArgumentParser:
         help="Linear solver used by direct IPOPT MHE runs.",
     )
     parser.add_argument(
+        "--ipopt-hessian-approximation",
+        choices=("exact", "limited-memory"),
+        default="exact",
+        help="IPOPT Hessian model used by direct IPOPT solves.",
+    )
+    parser.add_argument(
+        "--ipopt-limited-memory-max-history",
+        type=int,
+        default=None,
+        help="Optional IPOPT L-BFGS history length when limited-memory is selected.",
+    )
+    parser.add_argument(
         "--warmup-ipopt-linear-solver",
         default="mumps",
         help=(
@@ -3452,6 +3583,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "Control the reduced midpoint crank-velocity inequality. 'auto' "
             "preserves the historical backend-specific behavior; use 'on' for "
             "both an IPOPT cycle-1 seed and its ACADOS target."
+        ),
+    )
+    parser.add_argument(
+        "--reduced-terminal-half-step-velocity-guard",
+        action="store_true",
+        help=(
+            "Also enforce the reduced midpoint cadence guard at the terminal "
+            "node, so the next frozen RHO start remains feasible."
         ),
     )
     parser.add_argument(
@@ -4131,6 +4270,7 @@ def _periodic_ipopt_refinement_cache_path(
         ),
         "ding_sum_stim_truncation": getattr(args, "ding_sum_stim_truncation", 6),
         "mechanical_formulation": args.mechanical_formulation,
+        "reduced_dynamic_residual": getattr(args, "reduced_dynamic_residual", "direct"),
         "formulation": getattr(args, "formulation", "dynamic"),
         "isokinetic_omega": getattr(args, "isokinetic_omega", None),
         "energy_equivalent_torque": getattr(
@@ -4250,6 +4390,7 @@ def _acados_seed_cache_path(args: argparse.Namespace, model_path: Path) -> Path 
         "cache_version": 4,
         "model_formulation": args.model_formulation,
         "mechanical_formulation": args.mechanical_formulation,
+        "reduced_dynamic_residual": getattr(args, "reduced_dynamic_residual", "direct"),
         "formulation": getattr(args, "formulation", "dynamic"),
         "isokinetic_omega": getattr(args, "isokinetic_omega", None),
         "energy_equivalent_torque": getattr(
@@ -4303,38 +4444,11 @@ def _save_warmup_cache(
 ) -> None:
     states = solution.decision_states(to_merge=SolutionMerge.NODES)
     controls = solution.decision_controls(to_merge=SolutionMerge.NODES)
-    payload = {}
-    for key, values in states.items():
-        payload[f"states__{key}"] = np.asarray(values)
-    for key, values in controls.items():
-        payload[f"controls__{key}"] = np.asarray(values)
-    for key, values in (applied_pulse_widths or {}).items():
-        payload[f"applied_pulse_widths__{key}"] = np.asarray(values)
-    if metadata is not None:
-        payload["metadata__json"] = np.asarray(
-            json.dumps(metadata, sort_keys=True, separators=(",", ":"))
-        )
-    np.savez(cache_path, **payload)
+    save_trajectory(cache_path, states, controls, metadata, applied_pulse_widths)
 
 
 def _load_warmup_cache(cache_path: Path) -> "_WarmupSolutionAdapter":
-    with np.load(cache_path, allow_pickle=False) as data:
-        states = {
-            key.split("__", 1)[1]: np.asarray(data[key])
-            for key in data.files
-            if key.startswith("states__")
-        }
-        controls = {
-            key.split("__", 1)[1]: np.asarray(data[key])
-            for key in data.files
-            if key.startswith("controls__")
-        }
-        metadata = (
-            json.loads(str(data["metadata__json"].item()))
-            if "metadata__json" in data.files
-            else None
-        )
-    return _WarmupSolutionAdapter(states, controls, metadata=metadata)
+    return load_trajectory(cache_path)
 
 
 def _terminal_wheel_q_target_slack(args: argparse.Namespace) -> float:
@@ -4378,6 +4492,10 @@ def _common_initial_solution_metadata(args: argparse.Namespace) -> dict:
     )
     return {
         "schema": "cocofest-common-periodic-initial-solution-v3",
+        **getattr(args, "physical_model_archive_metadata", {}),
+        "cycle_duration_s": getattr(args, "physical_archive_cycle_duration_s", None),
+        "producer_mode": "full_horizon" if getattr(args, "single_shot", False) else "rho_window",
+        "reduced_dynamic_residual": getattr(args, "reduced_dynamic_residual", "direct"),
         **endurance_rollout_signature_fields(args),
         **muscle_horizon_signature_fields(args),
         **pulse_width_slew_signature(args),
@@ -4767,29 +4885,9 @@ def _save_rho_replay_checkpoint(
 ) -> None:
     """Persist the exact shifted primal that will initialize the next RHO."""
 
-    nlp = nmpc.nlp[0]
-    states = {
-        key: np.asarray(nlp.x_init[key].init, dtype=float).copy()
-        for key in nlp.x_init.keys()
-    }
-    controls = {
-        key: np.asarray(nlp.u_init[key].init, dtype=float).copy()
-        for key in nlp.u_init.keys()
-    }
-    if not states or not controls:
-        raise RuntimeError("The shifted RHO primal has no state or control trace.")
-    metadata = _common_initial_solution_metadata(args)
-    metadata.update(
-        {
-            "producer_mode": "rho_replay_checkpoint",
-            "producer_completed_windows": int(completed_windows),
-        }
-    )
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    _save_warmup_cache(
-        output_path,
-        _WarmupSolutionAdapter(states, controls),
-        metadata=metadata,
+    save_rho_replay_checkpoint(
+        output_path, nmpc, args, completed_windows=completed_windows,
+        metadata_factory=_common_initial_solution_metadata,
     )
 
 
@@ -5217,6 +5315,7 @@ def _continuation_cache_signature(args: argparse.Namespace) -> str:
         "nmpc_builder_version": 2,
         "model_formulation": args.model_formulation,
         "mechanical_formulation": args.mechanical_formulation,
+        "reduced_dynamic_residual": getattr(args, "reduced_dynamic_residual", "direct"),
         "formulation": getattr(args, "formulation", "dynamic"),
         "isokinetic_omega": getattr(args, "isokinetic_omega", None),
         "energy_equivalent_torque": getattr(args, "energy_equivalent_torque", None),
@@ -5423,8 +5522,8 @@ def _codegen_signature(args: argparse.Namespace) -> str:
         **reduced_internal_crank_velocity_guard_signature(args),
         # Increment when solve_case changes the generated OCP structure in a way that is
         # not represented by the arguments or the model sources below.
-        "problem_builder_version": 2,
-        "nmpc_builder_version": 2,
+        "problem_builder_version": 3,
+        "nmpc_builder_version": 3,
         "solver": args.solver,
         "transcription_profile": getattr(args, "transcription_profile", None),
         "model_formulation": args.model_formulation,
@@ -5447,6 +5546,9 @@ def _codegen_signature(args: argparse.Namespace) -> str:
         "collocation_method": args.collocation_method,
         "objective": args.objective,
         "objective_shape": args.objective_shape,
+        "parametric_fatigue_weights": bool(
+            getattr(args, "parametric_fatigue_weights", False)
+        ),
         "terminal_reserve_weight": args.terminal_reserve_weight,
         "terminal_reserve_temperature": args.terminal_reserve_temperature,
         "constant_crank_torque": args.constant_crank_torque,
@@ -5839,6 +5941,19 @@ def _ipopt_advanced_options(args: argparse.Namespace) -> dict:
     """Return explicit IPOPT diagnostics/tuning options selected by the CLI."""
 
     options = {}
+    hessian_approximation = getattr(args, "ipopt_hessian_approximation", "exact")
+    if hessian_approximation != "exact":
+        options["hessian_approximation"] = hessian_approximation
+    limited_memory_history = getattr(args, "ipopt_limited_memory_max_history", None)
+    if limited_memory_history is not None:
+        if limited_memory_history <= 0:
+            raise ValueError("--ipopt-limited-memory-max-history must be positive.")
+        if hessian_approximation != "limited-memory":
+            raise ValueError(
+                "--ipopt-limited-memory-max-history requires "
+                "--ipopt-hessian-approximation limited-memory."
+            )
+        options["limited_memory_max_history"] = limited_memory_history
     if getattr(args, "ipopt_print_timing_statistics", False):
         options["print_timing_statistics"] = "yes"
     for argument_name, option_name in (
@@ -8780,6 +8895,29 @@ def _window_accounting(
     }
 
 
+def _wheel_diagnostic_window_count(requested_windows: int, accounting: dict) -> int:
+    """Return the number of complete cycles represented by an exported trace.
+
+    A receding-horizon solve can legitimately stop before its requested
+    horizon. In that case the concatenated trace contains the cycles that
+    were actually exported, not ``requested_windows`` cycles. Passing the
+    requested horizon to :func:`diagnose_wheel_trace` makes its regular-grid
+    check fail by construction (for example, 133 exported cycles cannot have
+    a number of intervals divisible by a 2000-cycle request).
+
+    This only selects the grid on which to audit the trace; solver and
+    feasibility accounting still use the requested horizon and therefore
+    continue to report the early stop as unsuccessful.
+    """
+
+    if requested_windows < 1:
+        raise ValueError("requested_windows must be at least one.")
+    exported_cycles = int(accounting.get("exported_cycles") or 0)
+    return min(int(requested_windows), exported_cycles) if exported_cycles else int(
+        requested_windows
+    )
+
+
 def _window_objective_values(
     source_window_solutions: list,
 ) -> list[float | None]:
@@ -8901,17 +9039,52 @@ def _decision_vector_block(solution, index: int | None) -> str | None:
     return None
 
 
-def _constraint_vector_block(solution, index: int | None) -> dict | None:
-    """Map one flattened NLP constraint row back to its Bioptim penalty."""
+def _constraint_row_layout(ocp, interface) -> list[dict] | None:
+    """Cache diagnostic row metadata while the solved constraint graph is unchanged.
 
-    if index is None:
-        return None
-    ocp = getattr(solution, "ocp", None)
-    interface = getattr(ocp, "ocp_solver", None)
-    if ocp is None or interface is None or not hasattr(
-        interface, "get_all_penalties"
+    Numerical values and bounds are deliberately never cached: RHO changes
+    them at every window. Re-dispatching symbolic penalties just to label the
+    largest residual can otherwise cost more than the numerical audit itself.
+    Keep the graph object alive in the cache and compare by identity, avoiding
+    both symbolic equality and Python object-id reuse after a graph rebuild.
+    """
+
+    backend_nlp = getattr(interface, "nlp", None)
+    graph = backend_nlp.get("g") if isinstance(backend_nlp, dict) else None
+    owners = (ocp, *getattr(ocp, "nlp", ()))
+    signature = (
+        bool(getattr(interface, "stage_wise_multi_thread_constraints", False)),
+        tuple(
+            (
+                id(owner),
+                getattr(owner, "ns", None),
+                tuple(
+                    tuple(
+                        (
+                            penalty_index,
+                            id(penalty),
+                            getattr(penalty, "name", None),
+                            str(getattr(penalty, "type", None)),
+                            tuple(getattr(penalty, "node_idx", ())),
+                            bool(getattr(penalty, "multi_thread", False)),
+                        )
+                        for penalty_index, penalty in enumerate(getattr(owner, category, ()))
+                        if penalty
+                    )
+                    for category in ("g_internal", "g")
+                ),
+            )
+            for owner in owners
+        ),
+    )
+    cached = getattr(interface, "_cocofest_constraint_row_layout", None)
+    if (
+        graph is not None
+        and cached is not None
+        and cached[0] is graph
+        and cached[1] == signature
     ):
-        return None
+        return cached[2]
 
     def penalty_rows(owner, penalties, *, scope, category, phase=None):
         buckets = {}
@@ -8985,12 +9158,30 @@ def _constraint_vector_block(solution, index: int | None) -> dict | None:
         for node in sorted(phase_buckets):
             ordered_entries.extend(phase_buckets[node])
 
+    if graph is not None:
+        interface._cocofest_constraint_row_layout = (graph, signature, ordered_entries)
+    return ordered_entries
+
+
+def _constraint_vector_block(solution, index: int | None) -> dict | None:
+    """Map one flattened NLP constraint row back to its Bioptim penalty."""
+
+    if index is None:
+        return None
+    ocp = getattr(solution, "ocp", None)
+    interface = getattr(ocp, "ocp_solver", None)
+    if ocp is None or interface is None or not hasattr(interface, "get_all_penalties"):
+        return None
+    ordered_entries = _constraint_row_layout(ocp, interface)
+    if ordered_entries is None:
+        return None
     offset = 0
     for entry in ordered_entries:
         stop = offset + entry["row_count"]
         if offset <= index < stop:
             block = {
                 **entry,
+                "declared_nodes": list(entry["declared_nodes"]),
                 "global_start": offset,
                 "global_stop": stop,
                 "local_row": index - offset,
@@ -10161,7 +10352,9 @@ def summarize_windows(
     )
     diagnostics = diagnose_wheel_trace(
         wheel_trace,
-        requested_windows=requested_windows,
+        requested_windows=_wheel_diagnostic_window_count(
+            requested_windows, accounting
+        ),
         expected_cycle_shift=expected_cycle_shift,
         cycle_progress_tolerance=cycle_progress_tolerance,
         absolute_cycle_reference=absolute_cycle_reference,
@@ -10262,7 +10455,9 @@ def build_window_summary(
     windows_feasible = all(item["passes_tolerance"] for item in window_feasibility)
     diagnostics = diagnose_wheel_trace(
         wheel_trace,
-        requested_windows=requested_windows,
+        requested_windows=_wheel_diagnostic_window_count(
+            requested_windows, accounting
+        ),
         expected_cycle_shift=expected_cycle_shift,
         cycle_progress_tolerance=cycle_progress_tolerance,
         absolute_cycle_reference=absolute_cycle_reference,
@@ -10389,7 +10584,7 @@ def build_single_shot_summary(
         "window_iterations": [getattr(sol, "iterations", None)],
         "window_objectives": [objective],
         "window_feasibility": [feasibility],
-        "requested_windows": int(cycle_count),
+        "requested_windows": 1,
         "requested_cycles": int(cycle_count),
         "attempted_windows": 1,
         "successful_windows": int(solver_success),
@@ -10404,6 +10599,61 @@ def build_single_shot_summary(
         "diagnostics": diagnostics,
         "success": bool(solver_success and physical_success),
     }
+
+
+def attach_single_shot_diagnostics(summary, nmpc, sol, args) -> None:
+    """Persist requested FHO diagnostics independently of console verbosity.
+
+    Map errors use a local reset at each inspected interval and do not certify
+    the complete open-loop trajectory. Diagnostic failures retain their cause
+    without changing the solver or mechanical certification.
+    """
+
+    if args.validate_integrator_maps:
+        started = perf_counter()
+        try:
+            apply_solution_directly_to_periodic_nmpc_initial_guess(nmpc, sol)
+            interval_count = int(nmpc.nlp[0].ns)
+            inspected_nodes = tuple(sorted({
+                0, min(int(nmpc.cycle_len) - 1, interval_count - 1),
+                interval_count // 2, interval_count - 1,
+            }))
+            summary["integrator_map_final_solution"] = (
+                high_accuracy_integrator_map_diagnostics(nmpc, nodes=inspected_nodes)
+            )
+        except Exception as error:
+            summary["integrator_map_final_solution"] = [{
+                "available": False,
+                "reason": "evaluation_failed",
+                "error": f"{type(error).__name__}: {error}",
+            }]
+        summary["integrator_map_final_solution_wall_time_s"] = perf_counter() - started
+        # The RHO prefix evaluator resets the dynamics clock after each cycle;
+        # it must not be silently used for a monolithic FHO's continuous clock.
+        summary["high_accuracy_trace_rollout"] = {
+            "available": False,
+            "reason": "single_shot_requires_continuous_clock_replay",
+            "covered_cycles": int(summary.get("covered_cycles") or 0),
+            "local_interval_diagnostics_field": "integrator_map_final_solution",
+        }
+    if getattr(args, "parametric_kkt_audit", False):
+        if not summary.get("solver_success"):
+            audit = {"available": False, "reason": "solution_not_certified"}
+        else:
+            try:
+                audit = canonical_solution_kkt_audit(
+                    sol,
+                    test_zero_rhs_factorization=not getattr(args, "parametric_kkt_predictor", False),
+                )
+            except Exception as error:
+                audit = {
+                    "available": False,
+                    "reason": "evaluation_failed",
+                    "error": f"{type(error).__name__}: {error}",
+                }
+        audit["window"] = 0
+        audit["covered_cycles"] = int(summary.get("covered_cycles") or 0)
+        summary["parametric_kkt_audits"] = [audit]
 
 
 def _strictly_increasing_solution_samples(time_s, traces):
@@ -13466,6 +13716,105 @@ def apply_failed_rho_alternate_pulse_width_predictor(
     }
 
 
+def apply_failed_rho_micro_pulse_width_perturbation(
+    periodic_nmpc,
+    checkpoint: dict,
+    *,
+    retry_index: int,
+) -> dict[str, object]:
+    """Restore one frozen RHO and make a bounded deterministic PW seed change.
+
+    This is deliberately a *primal-seed* experiment.  It must not be used for
+    the auxiliary lifting or PW-rate representations: independently moving a
+    direct PW trace there would silently break its equality representation.
+    For direct PW controls a constant offset over a muscle's complete window
+    preserves every intra-window adjacent-PW difference, including a direct
+    slew constraint.  The first-node active bounds already encode the seam to
+    the last certified cycle, so using the active per-node bounds protects it
+    too.
+    """
+    if isinstance(retry_index, bool) or not isinstance(retry_index, int) or retry_index < 0:
+        raise ValueError("retry_index must be a non-negative integer.")
+    _restore_initial_guess_snapshot(periodic_nmpc, checkpoint)
+    nlp = periodic_nmpc.nlp[0]
+    control_keys = tuple(nlp.u_init.keys())
+    unsupported = tuple(
+        key for key in control_keys
+        if key.startswith(PW_SLEW_PREFIX) or key.startswith("pulse_width_rate_")
+    )
+    pw_keys = tuple(key for key in control_keys if key.startswith("last_pulse_width_"))
+    if unsupported or not pw_keys:
+        return {
+            "applied": False,
+            "reason": "unsupported_pulse_width_representation" if unsupported else "no_direct_pulse_width_controls",
+            "unsupported_control_keys": list(unsupported),
+            "pulse_width_control_keys": list(pw_keys),
+            "retry_index": retry_index,
+        }
+
+    # The detached checkpoint gives us an exact reference for the mandatory
+    # protected-state/control audit after the change.
+    protected_before = snapshot_initial_guess(periodic_nmpc)
+    changes: dict[str, dict[str, object]] = {}
+    for muscle_index, key in enumerate(sorted(pw_keys)):
+        values = np.asarray(nlp.u_init[key].init, dtype=float)
+        lower, upper = _trajectory_bounds_for_guess(nlp.u_bounds[key], values.shape[1])
+        if values.shape != lower.shape or not np.all(np.isfinite(values)):
+            raise RuntimeError(f"Direct PW seed '{key}' has incompatible or non-finite values.")
+        if not np.all(np.isfinite(lower)) or not np.all(np.isfinite(upper)) or np.any(upper < lower):
+            raise RuntimeError(f"Direct PW bounds for '{key}' are invalid.")
+        if np.any(values < lower) or np.any(values > upper):
+            raise RuntimeError(f"Frozen direct PW seed '{key}' is outside its active bounds.")
+        # Constant muscle offsets preserve direct slew differences.  Sign is
+        # deterministic and reversed on the second retry; choosing the common
+        # feasible magnitude avoids clipping and preserves the seam bound.
+        sign = 1.0 if (retry_index + muscle_index) % 2 == 0 else -1.0
+        range_limit = .01 * (upper - lower)
+        headroom = upper - values if sign > 0.0 else values - lower
+        magnitude = float(np.min(np.minimum(range_limit, headroom)))
+        if not np.isfinite(magnitude) or magnitude < 0.0:
+            raise RuntimeError(f"Unable to determine a bounded PW perturbation for '{key}'.")
+        delta = sign * magnitude
+        values[:, :] = values + delta
+        # This is a hard assertion rather than a projection: a projected seed
+        # could conceal an invalid perturbation at a narrowed RHO seam.
+        if np.any(values < lower) or np.any(values > upper):
+            raise RuntimeError(f"Bounded PW perturbation escaped active bounds for '{key}'.")
+        numerical_slack = np.finfo(float).eps * np.maximum(1.0, np.abs(range_limit))
+        if np.any(np.abs(values - checkpoint["controls"][key]) > range_limit + numerical_slack):
+            raise RuntimeError(f"PW perturbation exceeded one percent of active range for '{key}'.")
+        changes[key] = {
+            "sign": int(sign),
+            "constant_offset_s": delta,
+            "maximum_absolute_change_s": float(np.max(np.abs(values - checkpoint["controls"][key]))),
+            "maximum_allowed_change_s": float(np.max(range_limit)),
+            "minimum_active_range_s": float(np.min(upper - lower)),
+            "skipped_at_active_bound": bool(magnitude == 0.0),
+        }
+
+    protected_after = snapshot_initial_guess(periodic_nmpc)
+    state_exact = all(np.array_equal(protected_after["states"][key], values)
+                      for key, values in protected_before["states"].items())
+    non_pw_controls_exact = all(
+        np.array_equal(protected_after["controls"][key], values)
+        for key, values in protected_before["controls"].items() if key not in pw_keys
+    )
+    if not state_exact or not non_pw_controls_exact:
+        _restore_initial_guess_snapshot(periodic_nmpc, checkpoint)
+        raise RuntimeError("PW perturbation changed protected states or non-PW controls.")
+    return {
+        "applied": any(item["constant_offset_s"] != 0.0 for item in changes.values()),
+        "reason": "bounded_direct_pw_seed_perturbation",
+        "retry_index": retry_index,
+        "representation": "direct_last_pulse_width_constant_muscle_offset",
+        "one_percent_of_active_range": True,
+        "preserves_direct_intra_window_slew": True,
+        "protected_states_exact": state_exact,
+        "protected_non_pw_controls_exact": non_pw_controls_exact,
+        "controls": changes,
+    }
+
+
 def _initial_guess_snapshot_max_difference(periodic_nmpc, snapshot: dict) -> dict:
     """Measure physical initial-guess differences against a detached snapshot."""
 
@@ -15612,24 +15961,6 @@ def project_periodic_fes_initial_guess(
     }
 
 
-class _WarmupSolutionAdapter:
-    def __init__(
-        self,
-        states: dict[str, np.ndarray],
-        controls: dict[str, np.ndarray],
-        metadata: dict | None = None,
-    ):
-        self._states = states
-        self._controls = controls
-        self.metadata = metadata
-
-    def decision_states(self, to_merge=None):
-        return self._states
-
-    def decision_controls(self, to_merge=None):
-        return self._controls
-
-
 def certified_recovery_fallback_adapter(
     periodic_nmpc,
     solution,
@@ -15997,7 +16328,8 @@ def _adapt_warmup_solution_to_periodic_nodes(
         key.startswith(PW_SLEW_PREFIX)
         for key in (*warmup_states.keys(), *warmup_controls.keys())
     )
-    initialize_target_only_slew = slew_enabled and not source_has_slew
+    target_has_slew_lift = any(key.startswith(PW_SLEW_PREFIX) for key in target_state_keys)
+    initialize_target_only_slew = slew_enabled and target_has_slew_lift and not source_has_slew
     if initialize_target_only_slew:
         for key in target_state_keys:
             if key.startswith(PW_SLEW_PREFIX):
@@ -17299,6 +17631,418 @@ def solution_trace_compatibility_summary(
     }
 
 
+_TUNED_MA57_RECOVERY_OPTIONS = {
+    # These settings are deliberately confined to a fresh restoration solve.
+    # The target MA57 solve keeps its user-selected profile and must still
+    # certify the recovered primal before a physical RHO advances.
+    "linear_system_scaling": "mc19",
+    "ma57_automatic_scaling": "yes",
+    "ma57_pivtol": 1e-6,
+    "ma57_pivtolmax": 1e-2,
+    "ma57_pre_alloc": 1.2,
+}
+
+
+def _ipopt_recovery_advanced_options(args: argparse.Namespace) -> dict:
+    """Return the opt-in MA57 profile used only by a frozen-RHO recovery.
+
+    Increasing MA57's pivot tolerance and enabling both IPOPT/MA57 scaling
+    trades a little factorization speed for a less fragile restoration path.
+    It intentionally does not alter the target solver, model, target work,
+    bounds, or prepared primal state.
+    """
+    if not getattr(args, "nlp_ipopt_recovery_ma57_tuned", False):
+        return {}
+    return dict(_TUNED_MA57_RECOVERY_OPTIONS)
+
+
+def validate_tuned_ma57_recovery_options(args: argparse.Namespace) -> None:
+    """Reject an ambiguous or non-distinct MA57 recovery configuration."""
+    if not getattr(args, "nlp_ipopt_recovery_ma57_tuned", False):
+        return
+    if not getattr(args, "nlp_ipopt_recovery", False):
+        raise ValueError(
+            "--nlp-ipopt-recovery-ma57-tuned requires --nlp-ipopt-recovery."
+        )
+    recovery_linear_solver = (
+        getattr(args, "nlp_ipopt_recovery_linear_solver", None)
+        or args.ipopt_linear_solver
+    )
+    if not (
+        args.solver == "ipopt"
+        and args.ipopt_linear_solver == "ma57"
+        and recovery_linear_solver == "ma57"
+    ):
+        raise ValueError(
+            "--nlp-ipopt-recovery-ma57-tuned requires an IPOPT/MA57 target "
+            "and --nlp-ipopt-recovery-linear-solver ma57."
+        )
+    target_options = _ipopt_advanced_options(args)
+    recovery_options = _ipopt_recovery_advanced_options(args)
+    if not any(
+        target_options.get(name) != value for name, value in recovery_options.items()
+    ):
+        raise ValueError(
+            "--nlp-ipopt-recovery-ma57-tuned must differ from the target "
+            "MA57 numerical options."
+        )
+
+
+def run_frozen_rho_zero_objective_feasibility_probe(
+    periodic_nmpc,
+    *,
+    max_iterations: int,
+    tolerance: float,
+    linear_solver: str,
+    echo: bool = False,
+) -> dict[str, object]:
+    """Seek a feasible point of one frozen RHO without a preference objective.
+
+    IPOPT still requires a scalar objective, so every existing objective term
+    is assigned the exact weight zero.  The dynamics, terminal work equality,
+    state/control bounds, and all continuity constraints remain untouched.
+    The original objective weights and topology are restored in ``finally``;
+    this diagnostic can therefore never alter a subsequent nominal
+    certification attempt.
+    """
+    original = [
+        (penalty, deepcopy(penalty.weight))
+        for nlp in periodic_nmpc.nlp
+        for penalty in nlp.J
+        if penalty
+    ]
+    summary: dict[str, object] = {
+        "kind": "zero_objective_frozen_rho_feasibility_probe",
+        "objective": "identically_zero",
+        "constraints_unchanged": True,
+        "available": bool(original),
+        "feasible_witness": False,
+        "max_iterations": int(max_iterations),
+        "objective_slots": [
+            {
+                "name": getattr(penalty, "name", None),
+                "node": str(getattr(penalty, "node", None)),
+                "type": str(getattr(penalty, "type", None)),
+                "list_index": getattr(penalty, "list_index", None),
+            }
+            for penalty, _ in original
+        ],
+    }
+    if not original:
+        summary["reason"] = "no_objective_terms_to_zero"
+        return summary
+
+    def _public_update_node(penalty):
+        """Normalize Bioptim's post-build one-element node tuple for its API."""
+        node = penalty.node
+        return node[0] if isinstance(node, tuple) and len(node) == 1 else node
+
+    start = perf_counter()
+    try:
+        for penalty, original_weight in original:
+            # Bioptim's Objective instances retain enum identity in their
+            # node/type fields.  A deep-copied Objective can lose that
+            # identity and be rejected as an invalid Lagrange node.  Keep a
+            # shallow structural copy, replacing only the numerical Weight.
+            zero_penalty = copy(penalty)
+            zero_weight = deepcopy(original_weight)
+            zero_weight[...] = 0.0
+            zero_penalty.weight = zero_weight
+            zero_penalty.node = _public_update_node(penalty)
+            periodic_nmpc.update_objectives(zero_penalty)
+        reset_cached_nlp_solver_for_option_change(periodic_nmpc)
+        solver = configure_ipopt_solver(
+            max_iterations=max_iterations,
+            linear_solver=linear_solver,
+            tolerance=tolerance,
+        )
+        solution = super(RecedingHorizonOptimization, periodic_nmpc).solve(
+            solver=solver, warm_start=None,
+        )
+        populate_solution_inf_pr_from_solver_stats(solution, periodic_nmpc)
+        feasibility = _solution_feasibility_summary(solution, tolerance)
+        summary.update({
+            "status": int(solution.status),
+            "solver_stats": snapshot_nlp_solver_stats(periodic_nmpc),
+            "feasibility": feasibility,
+            "feasible_witness": bool(
+                _status_is_success(solution.status)
+                and feasibility.get("passes_tolerance", False)
+            ),
+        })
+    except Exception as exc:
+        summary["error"] = f"{type(exc).__name__}: {exc}"
+        summary["traceback"] = traceback.format_exc()
+    finally:
+        # ``list_index``/phase are retained by the copied Bioptim objectives,
+        # so this restores the exact objective topology rather than merely an
+        # equivalent aggregate cost.
+        try:
+            for penalty, original_weight in original:
+                restored_penalty = copy(penalty)
+                restored_penalty.weight = original_weight
+                restored_penalty.node = _public_update_node(penalty)
+                periodic_nmpc.update_objectives(restored_penalty)
+            reset_cached_nlp_solver_for_option_change(periodic_nmpc)
+            summary["objective_restored"] = True
+        except Exception as exc:
+            # Do not disguise a restoration failure as evidence about the
+            # physiological feasibility of the frozen window.
+            summary["objective_restored"] = False
+            summary["restore_error"] = f"{type(exc).__name__}: {exc}"
+            summary.setdefault("error", summary["restore_error"])
+        summary["wall_time_s"] = perf_counter() - start
+    if echo:
+        print(
+            "frozen_rho_zero_objective_feasibility_probe: "
+            f"feasible_witness={summary['feasible_witness']} "
+            f"status={summary.get('status')}"
+        )
+    return summary
+
+
+def run_frozen_rho_nominal_objective_probe(
+    periodic_nmpc,
+    *,
+    kind: str,
+    max_iterations: int,
+    tolerance: float,
+    linear_solver: str,
+    metadata: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """Solve one already-mutated frozen RHO with its ordinary objective.
+
+    The caller owns the reversible numerical mutation (work target, PW bound,
+    or counterfactual fatigue initial state).  This function deliberately does
+    not call ``advance_window`` and therefore cannot advance physical time.
+    """
+    summary: dict[str, object] = {
+        "kind": str(kind), "objective": "nominal", "constraints_modified": True,
+        "feasible_witness": False, "max_iterations": int(max_iterations),
+        **(metadata or {}),
+    }
+    start = perf_counter()
+    try:
+        reset_cached_nlp_solver_for_option_change(periodic_nmpc)
+        solution = super(RecedingHorizonOptimization, periodic_nmpc).solve(
+            solver=configure_ipopt_solver(max_iterations=max_iterations,
+                linear_solver=linear_solver, tolerance=tolerance),
+            warm_start=None,
+        )
+        populate_solution_inf_pr_from_solver_stats(solution, periodic_nmpc)
+        feasibility = _solution_feasibility_summary(solution, tolerance)
+        summary.update({
+            "status": int(solution.status),
+            "solver_stats": snapshot_nlp_solver_stats(periodic_nmpc),
+            "feasibility": feasibility,
+            "feasible_witness": bool(_status_is_success(solution.status)
+                and feasibility.get("passes_tolerance", False)),
+        })
+    except Exception as exc:
+        summary["error"] = f"{type(exc).__name__}: {exc}"
+        summary["traceback"] = traceback.format_exc()
+    finally:
+        reset_cached_nlp_solver_for_option_change(periodic_nmpc)
+        summary["wall_time_s"] = perf_counter() - start
+    return summary
+
+
+def _run_terminal_rho_counterfactuals(
+    periodic_nmpc,
+    prepared_primal_checkpoint,
+    args: argparse.Namespace,
+    *,
+    tolerance: float,
+) -> dict[str, object]:
+    """Run reversible physiological endpoint diagnostics on one frozen RHO.
+
+    This is deliberately a unilateral counterpart to the independent-arm
+    campaign probes.  It operates on the already prepared, *unadvanced* RHO
+    and restores its exact primal after every diagnostic solve.  Therefore the
+    reported witnesses distinguish a declared stimulation or work boundary
+    from a genuine fatigue-state counterfactual without changing the RHO
+    trajectory used for scientific reporting.
+    """
+    from cocofest.optimization.independent_arm_backends import (
+        set_terminal_eprod_target,
+    )
+
+    work_reliefs = tuple(
+        getattr(
+            args, "ipopt_frozen_rho_work_relief_fraction", (0.005, 0.02)
+        )
+        or ()
+    )
+    pw_relief = float(
+        getattr(args, "ipopt_frozen_rho_pw_upper_relief_fraction", 0.05) or 0.0
+    )
+    fatigue_rest = bool(getattr(args, "ipopt_frozen_rho_fatigue_rest_probe", True))
+    summary: dict[str, object] = {
+        "available": bool(work_reliefs or pw_relief or fatigue_rest),
+        "ordinary_objective": True,
+        "frozen_physical_rho": True,
+        "probes": {},
+    }
+    if not summary["available"]:
+        return summary
+    if any(not 0.0 < float(value) < 1.0 for value in work_reliefs):
+        raise ValueError("Every frozen-RHO work relief fraction must lie in (0, 1).")
+    if not 0.0 <= pw_relief <= 1.0:
+        raise ValueError("The frozen-RHO PW upper relief fraction must lie in [0, 1].")
+
+    nlp = periodic_nmpc.nlp[0]
+
+    def restore() -> None:
+        _restore_initial_guess_snapshot(periodic_nmpc, prepared_primal_checkpoint)
+        apply_nlp_dual_warm_start(
+            periodic_nmpc, None, solver_name="ipopt", mode="off"
+        )
+        reset_cached_nlp_solver_for_option_change(periodic_nmpc)
+
+    def solve(kind: str, metadata: dict[str, object]) -> dict[str, object]:
+        # The caller has restored the prepared primal before applying its
+        # particular reversible mutation.  Restoring here would erase the
+        # fatigue-at-rest initial condition before the diagnostic solve.
+        apply_nlp_dual_warm_start(
+            periodic_nmpc, None, solver_name="ipopt", mode="off"
+        )
+        reset_cached_nlp_solver_for_option_change(periodic_nmpc)
+        return run_frozen_rho_nominal_objective_probe(
+            periodic_nmpc,
+            kind=kind,
+            # The standalone periodic CLI names this ``ipopt_max_iter``;
+            # the solver-comparison and configured runners expose the same
+            # budget as ``max_ipopt_iterations``.
+            max_iterations=int(
+                getattr(
+                    args,
+                    "ipopt_max_iter",
+                    getattr(args, "max_ipopt_iterations", 4000),
+                )
+            ),
+            tolerance=tolerance,
+            linear_solver=str(args.ipopt_linear_solver),
+            metadata={"physical_rho_advanced": False, **metadata},
+        )
+
+    try:
+        if work_reliefs:
+            # ``E_prod`` is the explicit work equality of the reduced
+            # isokinetic OCP.  A direct-dynamics resistive RHO has no
+            # equivalent mutable terminal-work variable: changing its torque
+            # would change the physical protocol.  Report this transparently
+            # rather than silently treating a load perturbation as work relief.
+            if "E_prod" not in nlp.x_bounds.keys() or "E_prod" not in nlp.x_init.keys():
+                summary["probes"]["work_relief"] = {
+                    "available": False,
+                    "reason": "terminal_E_prod_not_defined_for_dynamic_resistance",
+                }
+            else:
+                original_target = float(nlp.x_bounds["E_prod"].min[0, 2])
+                work_probes = []
+                for fraction in work_reliefs:
+                    fraction = float(fraction)
+                    relieved_target = original_target * (1.0 - fraction)
+                    restore()
+                    set_terminal_eprod_target(periodic_nmpc, relieved_target)
+                    try:
+                        work_probes.append(
+                            solve(
+                                "nominal_objective_work_relief",
+                                {
+                                    "work_target_original_j": original_target,
+                                    "work_target_relaxed_j": relieved_target,
+                                    "work_relief_fraction": fraction,
+                                    "counterfactual": "relaxes_terminal_work_only",
+                                },
+                            )
+                        )
+                    finally:
+                        set_terminal_eprod_target(periodic_nmpc, original_target)
+                summary["probes"]["work_relief"] = work_probes
+
+        pw_original = {
+            key: (
+                np.array(nlp.u_bounds[key].min, copy=True),
+                np.array(nlp.u_bounds[key].max, copy=True),
+            )
+            for key in nlp.u_bounds.keys()
+            if key.startswith("last_pulse_width_")
+        }
+        if pw_relief:
+            if not pw_original:
+                summary["probes"]["pw_upper_relief"] = {
+                    "available": False,
+                    "reason": "no_direct_pulse_width_controls",
+                }
+            else:
+                restore()
+                for key, (lower, upper) in pw_original.items():
+                    nlp.u_bounds[key].max[:, :] = upper + pw_relief * (upper - lower)
+                try:
+                    summary["probes"]["pw_upper_relief"] = solve(
+                        "nominal_objective_pw_upper_relief",
+                        {
+                            "pw_upper_relief_fraction": pw_relief,
+                            "counterfactual": "relaxes_declared_direct_pw_bounds_only",
+                        },
+                    )
+                finally:
+                    for key, (lower, upper) in pw_original.items():
+                        nlp.u_bounds[key].min[:, :] = lower
+                        nlp.u_bounds[key].max[:, :] = upper
+
+        fatigue_bounds = {
+            key: (
+                np.array(nlp.x_bounds[key].min, copy=True),
+                np.array(nlp.x_bounds[key].max, copy=True),
+            )
+            for key in nlp.x_bounds.keys()
+            if key.startswith(("A_", "Tau1_", "Km_"))
+        }
+        if fatigue_rest:
+            rest = {}
+            for muscle in nlp.model.muscles_dynamics_model:
+                rest.update(
+                    {
+                        f"A_{muscle.muscle_name}": float(muscle.a_scale),
+                        f"Tau1_{muscle.muscle_name}": float(muscle.tau1_rest),
+                        f"Km_{muscle.muscle_name}": float(muscle.km_rest),
+                    }
+                )
+            missing = sorted(set(rest) - set(fatigue_bounds))
+            if missing:
+                summary["probes"]["fatigue_rest"] = {
+                    "available": False,
+                    "reason": f"missing_fatigue_states:{missing}",
+                }
+            else:
+                restore()
+                for key, value in rest.items():
+                    nlp.x_bounds[key].min[:, 0] = value
+                    nlp.x_bounds[key].max[:, 0] = value
+                    nlp.x_init[key].init[:, :] = value
+                try:
+                    summary["probes"]["fatigue_rest"] = solve(
+                        "nominal_objective_fatigue_rest",
+                        {
+                            "counterfactual": (
+                                "A_Tau1_Km_rest__F_Cn_kinematics_work_and_pw_retained"
+                            ),
+                            "restored_states": sorted(rest),
+                        },
+                    )
+                finally:
+                    for key, (lower, upper) in fatigue_bounds.items():
+                        nlp.x_bounds[key].min[:, :] = lower
+                        nlp.x_bounds[key].max[:, :] = upper
+    finally:
+        # No diagnostic may leak a modified target, PW bound, fatigue state,
+        # multipliers or solver capsule into the terminal campaign report.
+        restore()
+    return summary
+
+
 def run_periodic_nlp_recovery(
     recovery_nmpc,
     target_nmpc,
@@ -17313,6 +18057,7 @@ def run_periodic_nlp_recovery(
     seed_source: str = "prepared_target_rho_primal",
     c_compile: bool = False,
     max_wall_time: float | None = None,
+    ipopt_advanced_options: dict | None = None,
     echo: bool = False,
 ) -> tuple[object | None, dict[str, object]]:
     """Solve one frozen RHO with a second NLP backend and inject its primal.
@@ -17357,6 +18102,7 @@ def run_periodic_nlp_recovery(
                 linear_solver=linear_solver or "mumps",
                 tolerance=tolerance,
                 c_compile=c_compile,
+                advanced_options=ipopt_advanced_options,
             )
         else:
             solver = configure_nlp_solver(
@@ -17467,6 +18213,7 @@ def run_periodic_ipopt_recovery(
     target_solver: str,
     mechanical_formulation: str,
     seed_source: str = "prepared_target_rho_primal",
+    ipopt_advanced_options: dict | None = None,
     echo: bool = False,
 ) -> tuple[object | None, dict[str, object]]:
     """Backward-compatible IPOPT specialization of periodic NLP recovery."""
@@ -17482,6 +18229,7 @@ def run_periodic_ipopt_recovery(
         target_solver=target_solver,
         mechanical_formulation=mechanical_formulation,
         seed_source=seed_source,
+        ipopt_advanced_options=ipopt_advanced_options,
         echo=echo,
     )
 
@@ -18574,14 +19322,6 @@ def solve_case(
     )
     if (
         args.pulse_width_slew_formulation == "direct_constraints"
-        and args.pulse_width_slew_weight != 0.0
-    ):
-        raise ValueError(
-            "--pulse-width-slew-weight is not yet available with "
-            "--pulse-width-slew-formulation=direct_constraints."
-        )
-    if (
-        args.pulse_width_slew_formulation == "direct_constraints"
         and str(getattr(args, "solver", "ipopt")).lower() == "acados"
     ):
         raise ValueError(
@@ -18660,6 +19400,24 @@ def solve_case(
     args.formulation = getattr(args, "formulation", "dynamic")
     if args.formulation not in ("dynamic", "isokinetic"):
         raise ValueError("formulation must be 'dynamic' or 'isokinetic'.")
+    args.reduced_dynamic_residual = str(
+        getattr(args, "reduced_dynamic_residual", "direct")
+    )
+    if args.reduced_dynamic_residual not in ("direct", "implicit_inverse"):
+        raise ValueError(
+            "--reduced-dynamic-residual must be direct or implicit_inverse."
+        )
+    if args.reduced_dynamic_residual == "implicit_inverse":
+        if args.formulation != "dynamic" or args.mechanical_formulation != "reduced":
+            raise ValueError(
+                "--reduced-dynamic-residual=implicit_inverse requires "
+                "--formulation dynamic and --mechanical-formulation reduced."
+            )
+        if args.solver == "acados":
+            raise ValueError(
+                "The experimental inverse-balance residual is not yet wired "
+                "through ACADOS's post-reduction f_impl_expr transformation."
+            )
     isokinetic_config = None
     if args.formulation == "isokinetic":
         if args.mechanical_formulation != "reduced":
@@ -18772,6 +19530,22 @@ def solve_case(
         )
     args.terminal_wheel_q_reference_mode = "absolute_initial"
     objectives = parse_objectives(args.objective)
+    if getattr(args, "parametric_fatigue_weights", False):
+        if args.solver not in NLP_SOLVER_NAMES:
+            raise ValueError("--parametric-fatigue-weights is available only with CasADi NLP solvers.")
+        if "fatigue" not in objectives:
+            raise ValueError("--parametric-fatigue-weights requires the fatigue objective.")
+        if args._endurance_rollout_options is not None or args._muscle_horizon_options is not None:
+            raise ValueError(
+                "--parametric-fatigue-weights cannot yet be combined with the endurance rollout "
+                "or muscle-horizon parameter bindings."
+            )
+        if args.fatigue_weight_values is not None:
+            values = np.asarray(args.fatigue_weight_values, dtype=float)
+            if not np.all(np.isfinite(values)) or np.any(values < 0.0) or np.any(values > 1.0):
+                raise ValueError("--fatigue-weight-values must lie in [0, 1].")
+    elif args.fatigue_weight_values is not None:
+        raise ValueError("--fatigue-weight-values requires --parametric-fatigue-weights.")
     validate_terminal_reserve_options(
         args.terminal_reserve_weight,
         args.terminal_reserve_temperature,
@@ -18918,6 +19692,30 @@ def solve_case(
                 "--acados-failed-rho-alternate-pw-predictor requires the RHO "
                 "mode and --retry-failed-rho-without-advance."
             )
+    if getattr(args, "ipopt_failed_rho_pw_micro_retry", False):
+        if args.solver != "ipopt" or args.mechanical_formulation != "reduced":
+            raise ValueError(
+                "--ipopt-failed-rho-pw-micro-retry requires reduced IPOPT."
+            )
+        if args.single_shot or not args.retry_failed_rho_without_advance:
+            raise ValueError(
+                "--ipopt-failed-rho-pw-micro-retry requires the RHO mode and "
+                "--retry-failed-rho-without-advance."
+            )
+        if getattr(args, "pulse_width_control_mode", "direct") == PW_RATE_MODE:
+            raise ValueError(
+                "--ipopt-failed-rho-pw-micro-retry does not support the "
+                "pulse-width-rate control representation."
+            )
+        if (
+            getattr(args, "pulse_width_max_step_us", None) is not None
+            and args.pulse_width_slew_formulation != "direct_constraints"
+        ):
+            raise ValueError(
+                "--ipopt-failed-rho-pw-micro-retry requires direct PW controls; "
+                "the auxiliary slew lifting representation is unsupported."
+            )
+    validate_tuned_ma57_recovery_options(args)
     if getattr(args, "nlp_ipopt_recovery", False):
         if args.solver not in {"ipopt", "madnlp", "fatrop"}:
             raise ValueError(
@@ -18943,14 +19741,22 @@ def solve_case(
         recovery_linear_solver = getattr(
             args, "nlp_ipopt_recovery_linear_solver", None
         )
+        tuned_ma57_recovery = bool(
+            getattr(args, "nlp_ipopt_recovery_ma57_tuned", False)
+        )
+        effective_recovery_linear_solver = (
+            recovery_linear_solver or args.ipopt_linear_solver
+        )
         if (
             args.solver == "ipopt"
-            and (recovery_linear_solver or args.ipopt_linear_solver)
+            and effective_recovery_linear_solver
             == args.ipopt_linear_solver
+            and not tuned_ma57_recovery
         ):
             raise ValueError(
                 "An IPOPT target requires --nlp-ipopt-recovery-linear-solver "
-                "to differ from --ipopt-linear-solver."
+                "to differ from --ipopt-linear-solver, unless the explicit "
+                "--nlp-ipopt-recovery-ma57-tuned profile is selected."
             )
     if getattr(args, "nlp_ipopt_fallback_advance", False):
         if not getattr(args, "nlp_ipopt_recovery", False):
@@ -19799,6 +20605,13 @@ def solve_case(
         periodic_cn_sum_approximation=args.model_formulation == "periodic",
         periodic_node_forcing=args.model_formulation == "periodic_node",
     )
+    from cocofest.optimization.solution_archive import model_parameter_metadata
+
+    args.physical_model_archive_metadata = model_parameter_metadata(model)
+    args.physical_model_archive_metadata["source_model"] = _source_stamp(model_path)
+    if args.mechanical_formulation == "reduced":
+        args.physical_model_archive_metadata["reduced_profile"] = _source_stamp(reduced_profile_path)
+    args.physical_archive_cycle_duration_s = float(cycle_duration)
     args.activate_force_length_relationship = bool(
         model.activate_force_length_relationship
     )
@@ -19835,6 +20648,17 @@ def solve_case(
         )
     args.calcium_tau_s = calcium_time_constants.pop()
     args.calcium_stimulation_interval_s = cycle_duration / args.stimulations_per_cycle
+    fatigue_weight_binding = None
+    if getattr(args, "parametric_fatigue_weights", False):
+        from cocofest.optimization.parametric_fatigue_weights import ParametricFatigueWeightBinding
+
+        requested_fatigue_weights = getattr(args, "fatigue_weight_values", None)
+        if requested_fatigue_weights is not None and len(requested_fatigue_weights) != len(muscle_models):
+            raise ValueError("--fatigue-weight-values does not match the model muscle count.")
+        fatigue_weight_binding = ParametricFatigueWeightBinding(
+            requested_fatigue_weights if requested_fatigue_weights is not None else [1.0] * len(muscle_models),
+            allow_zero=requested_fatigue_weights is not None,
+        )
     if args.model_formulation == "periodic_node":
         args.calcium_initialization_regime = "steady_periodic_after_warmup"
         args.calcium_post_stimulation_amplitude = float(
@@ -19935,6 +20759,8 @@ def solve_case(
         "minimize_control": "control" in objectives,
         "cost_fun_weight": build_cost_fun_weight(objectives),
         "objective_shape": args.objective_shape,
+        **({"fatigue_weight_binding": fatigue_weight_binding}
+           if fatigue_weight_binding is not None else {}),
         "terminal_reserve_weight": args.terminal_reserve_weight,
         "terminal_reserve_temperature": args.terminal_reserve_temperature,
         **({"endurance_rollout_options": args._endurance_rollout_options}
@@ -19959,6 +20785,9 @@ def solve_case(
         # closure infeasible.
         "enforce_reduced_internal_crank_velocity_guard": bool(
             args.reduced_internal_crank_velocity_guard
+        ),
+        "enforce_reduced_terminal_half_step_velocity_guard": bool(
+            args.reduced_terminal_half_step_velocity_guard
         ),
         "reduced_internal_crank_velocity_rk4_fraction": getattr(
             args, "reduced_internal_crank_velocity_rk4_fraction", None
@@ -19992,6 +20821,7 @@ def solve_case(
             else None
         ),
         "mechanical_formulation": args.mechanical_formulation,
+        "dynamic_mechanical_residual": args.reduced_dynamic_residual,
         "bilateral_reduced": args.bilateral_reduced,
         "reduced_cycling_dynamics": reduced_cycling_dynamics,
         "formulation": args.formulation,
@@ -21630,6 +22460,7 @@ def solve_case(
     nlp_failed_rho_phase_one_summaries = []
     acados_failed_rho_phase_one_summaries = []
     acados_alternate_pw_predictor_summaries = []
+    ipopt_micro_pw_retry_summaries = []
     transfer_active_set_guard_summaries = []
     transfer_contact_projection_summaries = []
     transfer_bound_projection_summaries = []
@@ -21662,11 +22493,18 @@ def solve_case(
     rho_prepared_checkpoint_windows = set(prepared_checkpoint_windows)
     rho_replay_checkpoint_summary = None
     rho_prepared_checkpoint_summaries = []
+    # Kept in the machine-readable benchmark result so a hybrid driver can
+    # decide whether a non-certified IPOPT iterate is good enough to hand to
+    # an exact-Hessian restoration.  This is deliberately the independent
+    # feasibility audit, not IPOPT's displayed inf_pr.
+    last_common_initial_solution_output_audit = None
     prepared_rho_primal_checkpoint = snapshot_initial_guess(nmpc)
     phase_one_recovery_attempted_target_rhos: set[int] = set()
     alternate_pw_predictor_attempted_target_rhos: set[int] = set()
+    micro_pw_retry_attempted_target_rhos: set[int] = set()
 
     def save_common_initial_solution(solution) -> bool:
+        nonlocal last_common_initial_solution_output_audit
         if (
             common_initial_solution_output is None
             or common_initial_solution_output.exists()
@@ -21675,20 +22513,70 @@ def solve_case(
         feasibility = _solution_feasibility_summary(
             solution, _window_feasibility_tolerance(args)
         )
-        if not (
-            _status_is_success(solution.status)
-            and feasibility.get("passes_tolerance", False)
-        ):
+        native_success = _status_is_success(solution.status)
+        primal_feasible = bool(feasibility.get("passes_tolerance", False))
+        allow_uncertified = bool(
+            getattr(args, "allow_primal_feasible_common_initial_solution_output", False)
+        )
+        allow_finite_uncertified = bool(
+            getattr(
+                args,
+                "allow_finite_uncertified_common_initial_solution_output",
+                False,
+            )
+        )
+        finite = bool(
+            feasibility.get("trajectories_finite", False)
+            and feasibility.get("constraints_finite", False)
+        )
+        last_common_initial_solution_output_audit = {
+            "finite": finite,
+            "native_success": bool(native_success),
+            "primal_feasible": primal_feasible,
+            "effective_primal_infeasibility": feasibility.get(
+                "effective_primal_infeasibility"
+            ),
+            "tolerance": feasibility.get("tolerance"),
+            "exported": False,
+        }
+        exportable = bool(
+            (native_success and primal_feasible)
+            or (allow_uncertified and primal_feasible)
+            or (allow_finite_uncertified and finite)
+        )
+        if not exportable:
             return False
         common_initial_solution_output.parent.mkdir(parents=True, exist_ok=True)
+        metadata = _common_initial_solution_metadata(args)
+        metadata.update(
+            {
+                "producer_native_status": int(solution.status),
+                "producer_certified": bool(native_success),
+                "producer_primal_feasible": primal_feasible,
+                "producer_role": (
+                    "certified_target_window"
+                    if native_success
+                    else (
+                        "uncertified_primal_feasible_warm_start_only"
+                        if primal_feasible
+                        else "finite_infeasible_warm_start_only"
+                    )
+                ),
+                "producer_effective_primal_infeasibility": feasibility.get(
+                    "effective_primal_infeasibility"
+                ),
+            }
+        )
         _save_warmup_cache(
             common_initial_solution_output,
             solution,
-            metadata=_common_initial_solution_metadata(args),
+            metadata=metadata,
         )
+        last_common_initial_solution_output_audit["exported"] = True
         if echo:
             print(
                 "common_initial_solution_output: saved "
+                f"certified={native_success} "
                 f"({common_initial_solution_output})"
             )
         return True
@@ -21792,6 +22680,7 @@ def solve_case(
             cache_first_successful_window(_nmpc, solution)
 
     retry_same_rho_summaries = []
+    terminal_counterfactual_summaries = []
     completed_physical_rhos = 0
     recovery_attempts_by_target_rho: dict[int, int] = {}
     original_advance_window = nmpc.advance_window
@@ -21820,6 +22709,7 @@ def solve_case(
 
         nonlocal completed_physical_rhos
         nonlocal rho_replay_checkpoint_summary
+        nonlocal prepared_rho_primal_checkpoint
         target_rho = completed_physical_rhos + 1
         solution._cocofest_attempt_index = int(self.total_optimization_run) + 1
         solution._cocofest_target_rho = target_rho
@@ -21902,6 +22792,60 @@ def solve_case(
                             "recovery": "alternate_pw_predictor",
                         }
                     )
+                    return None
+            if (
+                getattr(args, "ipopt_failed_rho_pw_micro_retry", False)
+                and target_rho not in micro_pw_retry_attempted_target_rhos
+            ):
+                micro_pw_retry_attempted_target_rhos.add(target_rho)
+                recovery_start = perf_counter()
+                perturbation = apply_failed_rho_micro_pulse_width_perturbation(
+                    self,
+                    prepared_rho_primal_checkpoint,
+                    retry_index=recovery_attempt,
+                )
+                dual_reset = apply_nlp_dual_warm_start(
+                    self, None, solver_name="ipopt", mode="off"
+                )
+                dual_reset.update(
+                    {
+                        "window": int(self.total_optimization_run) + 1,
+                        "reason": "failed_rho_direct_pw_micro_retry",
+                    }
+                )
+                nlp_dual_warm_start_summaries.append(dual_reset)
+                perturbation.update(
+                    {
+                        "attempt_window": int(self.total_optimization_run) + 1,
+                        "target_rho": target_rho,
+                        "target_failed_status": int(solution.status),
+                        "target_failed_feasibility": dict(feasibility),
+                        "dual_reset": dual_reset,
+                        "wall_time_s": perf_counter() - recovery_start,
+                    }
+                )
+                ipopt_micro_pw_retry_summaries.append(perturbation)
+                if perturbation["applied"]:
+                    self._cocofest_recovery_seed_pending = True
+                    retry_same_rho_summaries.append(
+                        {
+                            "attempt_window": int(self.total_optimization_run) + 1,
+                            "native_status": _native_solver_status(self),
+                            "status": int(solution.status),
+                            "primal_feasible": bool(feasibility.get("passes_tolerance")),
+                            "forced_for_ci": forced_recovery,
+                            "target_rho": target_rho,
+                            "recovery_seed_pending": True,
+                            "advanced": False,
+                            "recovery": "direct_pw_micro_perturbation",
+                        }
+                    )
+                    if echo:
+                        print(
+                            "ipopt_failed_rho_pw_micro_retry: "
+                            f"target_rho={target_rho} "
+                            f"wall_time_s={perturbation['wall_time_s']:.6g}"
+                        )
                     return None
             if (
                 getattr(args, "nlp_failed_rho_phase_one_recovery", False)
@@ -22110,6 +23054,7 @@ def solve_case(
                         target_solver=args.solver,
                         mechanical_formulation=args.mechanical_formulation,
                         seed_source=recovery_seed_source,
+                        ipopt_advanced_options=_ipopt_recovery_advanced_options(args),
                         echo=echo,
                     )
                 recovery_summary.update(
@@ -22123,6 +23068,11 @@ def solve_case(
                         "target_failed_feasibility": dict(feasibility),
                         "forced_for_ci": forced_recovery,
                         "recovery_seed_audit": recovery_seed_audit,
+                        "ipopt_advanced_options": (
+                            _ipopt_recovery_advanced_options(args)
+                            if recovery_backend == "ipopt"
+                            else None
+                        ),
                         "preparation_timing": {
                             "runtime_settings_wall_time_s": (
                                 runtime_settings_wall_time_s
@@ -22311,6 +23261,34 @@ def solve_case(
                         f"target_rho={target_rho}"
                     )
                 return advance_result
+            # The terminal frozen RHO is the only scientifically meaningful
+            # location for an endurance counterfactual.  Do not run these
+            # diagnostics after a transient failure which still has a prepared
+            # retry: all probes must start from the exact last-certified state
+            # and must never advance physical time.
+            if not self._cocofest_recovery_seed_pending:
+                terminal_counterfactual = _run_terminal_rho_counterfactuals(
+                    self,
+                    prepared_rho_primal_checkpoint,
+                    args,
+                    tolerance=args.nlp_tolerance,
+                )
+                terminal_counterfactual.update(
+                    {
+                        "target_rho": target_rho,
+                        "failed_status": int(solution.status),
+                        "failed_feasibility": dict(feasibility),
+                        "physical_rho_advanced": False,
+                    }
+                )
+                solution._cocofest_counterfactual_probes = terminal_counterfactual
+                terminal_counterfactual_summaries.append(terminal_counterfactual)
+                if echo:
+                    print(
+                        "frozen_rho_counterfactuals: "
+                        f"target_rho={target_rho} "
+                        f"available={terminal_counterfactual.get('available')}"
+                    )
             retry_same_rho_summaries.append(
                 {
                     "attempt_window": int(self.total_optimization_run) + 1,
@@ -24014,18 +24992,6 @@ def solve_case(
                     controls=False,
                     limit=args.warmup_state_comparison_limit,
                 )
-            if args.validate_integrator_maps:
-                apply_solution_directly_to_periodic_nmpc_initial_guess(nmpc, sol)
-                for row in high_accuracy_integrator_map_diagnostics(nmpc):
-                    print(
-                        "final_integrator_map_validation: "
-                        f"node={row['node']} "
-                        "trajectory_vs_dop853="
-                        f"{row['trajectory_vs_reference']:.6g} "
-                        f"rk4_vs_dop853={row['rk4_vs_reference']:.6g} "
-                        f"trajectory_vs_rk4={row['trajectory_vs_rk4']:.6g} "
-                        f"dop853_nfev={row['reference_evaluations']}"
-                    )
         if acados_seed_cache_path is not None and _status_is_success(sol.status):
             _save_warmup_cache(acados_seed_cache_path, sol)
             if echo:
@@ -24039,6 +25005,12 @@ def solve_case(
             absolute_cycle_reference=absolute_wheel_q_reference,
             absolute_cycle_tolerance=wheel_absolute_cycle_tolerance,
         )
+        if last_common_initial_solution_output_audit is not None:
+            # An untrusted warm-start checkpoint remains explicitly separate
+            # from the certification fields in ``summary``.
+            summary["uncertified_output_audit"] = (
+                last_common_initial_solution_output_audit
+            )
         if isokinetic_config is not None:
             attach_isokinetic_audits(
                 summary,
@@ -24083,6 +25055,11 @@ def solve_case(
         ] = absolute_wheel_q_start_cycle_index
         summary["native_solver_status"] = _native_solver_status(nmpc)
         summary["compiled_nlp_reuse"] = compiled_nlp_tracker.summary()
+        summary["integrator_map_initial_guess"] = integrator_map_initial_guess
+        attach_single_shot_diagnostics(summary, nmpc, sol, args)
+        if echo:
+            for row in summary.get("integrator_map_final_solution") or []:
+                print(f"final_integrator_map_validation: {row}")
         if initial_acados_irk_rollout_summary is not None:
             summary["initial_acados_irk_rollout"] = initial_acados_irk_rollout_summary
         if initial_fast_velocity_bound_homotopy_summary is not None:
@@ -24217,6 +25194,7 @@ def solve_case(
                 retry_without_advance=args.retry_failed_rho_without_advance,
                 recovery_requires_target_certification=(
                     nlp_recovery_enabled
+                    or getattr(args, "ipopt_failed_rho_pw_micro_retry", False)
                     or getattr(args, "nlp_failed_rho_phase_one_recovery", False)
                     or getattr(args, "acados_failed_rho_phase_one_recovery", False)
                 ),
@@ -24371,6 +25349,16 @@ def solve_case(
             )
         summary["rho_replay_checkpoint"] = rho_replay_checkpoint_summary
         summary["rho_prepared_checkpoints"] = rho_prepared_checkpoint_summaries
+        # A terminal failed RHO follows this exception path rather than the
+        # usual merged-solution path below.  Preserve its frozen probes here:
+        # otherwise the solver log says the counterfactuals ran, while the
+        # machine-readable result silently discards their scientific evidence.
+        if retry_same_rho_summaries:
+            summary["retry_same_rho_summaries"] = retry_same_rho_summaries
+        if terminal_counterfactual_summaries:
+            summary["terminal_counterfactual_summaries"] = (
+                terminal_counterfactual_summaries
+            )
         summary["execution_timing"] = {
             "pre_solve_setup_wall_time_s": pre_solve_setup_wall_time_s,
             "rho_solve_loop_wall_time_s": rho_solve_loop_wall_time_s,
@@ -24588,6 +25576,8 @@ def solve_case(
         summary["acados_alternate_pw_predictor_summaries"] = (
             acados_alternate_pw_predictor_summaries
         )
+    if ipopt_micro_pw_retry_summaries:
+        summary["ipopt_micro_pw_retry_summaries"] = ipopt_micro_pw_retry_summaries
     if transfer_bound_homotopy_summaries:
         summary["transfer_bound_homotopy_summaries"] = transfer_bound_homotopy_summaries
     if transfer_sqp_restart_summaries:
@@ -24654,6 +25644,10 @@ def solve_case(
         summary["transfer_failure_window"] = transfer_failure_window
     if retry_same_rho_summaries:
         summary["retry_same_rho_summaries"] = retry_same_rho_summaries
+    if terminal_counterfactual_summaries:
+        summary["terminal_counterfactual_summaries"] = (
+            terminal_counterfactual_summaries
+        )
     if inter_window_terminal_wheel_bound_summaries:
         summary[
             "inter_window_terminal_wheel_bound_summaries"

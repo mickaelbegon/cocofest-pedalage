@@ -86,6 +86,7 @@ def run_campaign(campaign: BayesianCampaignConfig, prefix: Path) -> int:
             environment = runtime_helpers().base_environment(trial_prefix, plan.suite, config.threads, config.numeric_threads)
             environment.update(plan.environment_updates)
             trial_root.mkdir(parents=True, exist_ok=False)
+            plan.save_effective_configuration()
             with (trial_root / "runner.log").open("x", encoding="utf-8") as log:
                 completed = subprocess.run(plan.argv, cwd=plan.cwd, env=environment, stdout=log,
                                            stderr=subprocess.STDOUT, text=True, check=False)

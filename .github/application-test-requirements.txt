@@ -1,0 +1,8 @@
+# Deliberately excludes Bioptim, Biorbd, HSL, ACADOS and Julia.
+pytest>=8,<10
+numpy>=2,<3
+scipy>=1.15,<1.18
+casadi==3.7.2
+matplotlib>=3.8,<4
+packaging>=24
+optuna>=4,<6

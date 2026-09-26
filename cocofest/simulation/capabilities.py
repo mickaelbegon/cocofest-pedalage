@@ -49,11 +49,14 @@ class CapabilityRegistry:
         "signed_crank_torque": "Signed crank torque (N.m): positive resists negative angular velocity.",
         "bilateral_reduced": "Use the bilateral Wu bioMod to build a reduced profile from two physical arm chains and one shared crank; the online OCP remains theta/omega only.",
         "acados_ipopt_cycle1_seed": "Required ACADOS initialization: certified IPOPT solution of exactly cycle 1, matching the target problem.",
+        "common_initial_solution": "Optional certified common NLP seed (.npz) shared by comparable RHO trials.",
         "reduced_internal_crank_velocity_guard": "Internal reduced-mechanics cadence guard: auto preserves legacy behavior; exact ACADOS seed transfers use on.",
+        "reduced_terminal_half_step_velocity_guard": "Add the reduced midpoint cadence guard at the terminal node to certify the handoff to the next RHO window.",
         "acados_qp_solver": "ACADOS QP backend: auto uses full-condensing HPIPM with a ΔPW bound and partial-condensing HPIPM otherwise.",
         "acados_ding_local_reduction": "Experimental local Ding reconstruction: ACADOS retains F and A as NLP states and reconstructs Cn, Tau1 and Km from the fixed initial state and the current pulse-width profile. It requires SQP IRK Gauss-Legendre 4×5, reduced dynamic mechanics, 50 stimulations/cycle, an active cadence guard and no slew constraint. Fixed initial states are checked by the engine; full NLP duals are not reconstructed.",
         "ipopt_ding_local_reduction": "Experimental IPOPT local Ding reconstruction: F and A remain decision states while Cn, Tau1 and Km are reconstructed with the original discrete Radau-5 operator. It requires the interpreted SX IPOPT path, one-cycle dynamic reduced RHO windows, 30 stimulations/cycle and no pulse-width slew constraint. The complete NLP is audited after each solve.",
         "cycles": "Number of executed cycles; FHO optimizes these cycles in one window.",
+        "ipopt_enforce_start_constraints": "Whether IPOPT imposes historical start constraints. A common seed must use the same setting.",
         "threads": "Solver worker threads; independent from numerical library threads.",
         "numeric_threads": "Threads per numerical library (BLAS/OpenMP).",
     }
@@ -67,9 +70,13 @@ class CapabilityRegistry:
         "--acados-disable-standard-ipopt-warmup", "--pulse-width-max-step-us",
         "--pulse-width-slew-weight", "--pulse-width-slew-reference-us",
         "--ipopt-ode-solver", "--ipopt-collocation-degree", "--ipopt-collocation-method",
-        "--ipopt-c-compile", "--madnlp-c-compile", "--acados-integrator-type",
+        "--ipopt-c-compile", "--ipopt-c-compile-callback", "--madnlp-c-compile", "--acados-integrator-type",
+        "--ipopt-profile", "--ipopt-use-sx", "--ipopt-no-use-sx",
+        "--ipopt-model-formulation", "--ipopt-torque-application",
+        "--ipopt-enforce-start-constraints", "--ipopt-disable-start-constraints",
         "--acados-sim-stages", "--acados-sim-steps", "--energy-equivalent-torque",
         "--reduced-internal-crank-velocity-guard",
+        "--reduced-terminal-half-step-velocity-guard",
         "--acados-qp-solver",
         "--acados-ding-local-reduction", "--bilateral-reduced",
         "--isokinetic-omega", "--load-torque-min", "--load-torque-max",
@@ -102,11 +109,15 @@ class CapabilityRegistry:
             value = getattr(config, field)
             if type(value) is not int or value < 1:
                 issue(field, "must be a positive integer")
-        for field in ("compile_evaluators", "madnlp_recovery", "dry_run", "acados_ding_local_reduction",
-                      "ipopt_ding_local_reduction",
-                      "bilateral_reduced"):
+        for field in ("compile_evaluators", "compile_hessian_only", "compact_rho_output", "madnlp_recovery", "dry_run", "acados_ding_local_reduction",
+                      "ipopt_ding_local_reduction", "bilateral_reduced", "ipopt_enforce_start_constraints", "reduced_terminal_half_step_velocity_guard"):
             if type(getattr(config, field)) is not bool:
                 issue(field, "must be a boolean")
+        if config.compile_hessian_only:
+            if config.solver != "ipopt" or config.compile_evaluators:
+                issue("compile_hessian_only", "requires IPOPT and compile_evaluators=false", "unsupported")
+            if config.ipopt_ding_local_reduction:
+                issue("compile_hessian_only", "local Ding reconstruction requires interpreted evaluators", "unsupported")
         for field in ("signed_crank_torque", "terminal_q_slack", "isokinetic_omega",
                       "energy_equivalent_torque", "load_torque_min", "load_torque_max", "madnlp_hot_max_wall_time"):
             if not finite(field):
@@ -140,7 +151,8 @@ class CapabilityRegistry:
         if all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in bounds):
             if not bounds[0] <= bounds[1] <= bounds[2]:
                 issue("energy_equivalent_torque", "must lie inside the load-torque bounds")
-        for field in ("output_root", "acados_ipopt_cycle1_seed", "weights_config", "model_config"):
+        for field in ("output_root", "acados_ipopt_cycle1_seed", "common_initial_solution",
+                      "weights_config", "model_config"):
             value = getattr(config, field)
             if value is None and field != "output_root":
                 continue
@@ -152,6 +164,9 @@ class CapabilityRegistry:
         elif any(x.startswith("--") and any(option.startswith(x.split("=", 1)[0])
                                              for option in cls.MANAGED_OPTIONS) for x in extras):
             issue("extra_arguments", "set managed options in the configuration")
+        if config.compile_hessian_only and isinstance(extras, (list, tuple)):
+            if any(isinstance(x, str) and x.startswith("--ipopt-c-") for x in extras):
+                issue("extra_arguments", "Hessian-only compilation manages its private cache and compiler flags")
         if config.formulation == "isokinetic" and config.mechanics != "reduced":
             issue("formulation", "isokinetic currently requires reduced mechanics", "unsupported")
         if config.bilateral_reduced:

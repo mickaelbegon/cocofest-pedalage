@@ -4,7 +4,7 @@ These are recovery *inputs*, not a claim of bitwise/full campaign continuation:
 the PACE worker, controller clock and optimizer multipliers are not serialized.
 """
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -85,8 +85,7 @@ def configured_checkpoint_writer(directory, config, *, condition, arguments,
     if directory is None:
         yield
         return
-    if module is None:
-        from examples.fes_multibody.cycling import cycling_pulse_width_mhe_acados_periodic as module
+    from .trajectory_io import checkpoint_publication_hook
     directory = Path(directory).expanduser().resolve()
     directory.mkdir(parents=True, exist_ok=False)
     weights_journal = (None if weights_journal is None
@@ -99,13 +98,15 @@ def configured_checkpoint_writer(directory, config, *, condition, arguments,
                 "checkpoint_kind": "certified_shifted_primal_with_audit",
                 "physical_failure_proven": False}
     atomic_json(directory / "manifest.json", manifest)
-    original = module._save_rho_replay_checkpoint
+    # ``module`` remains supported for callers injecting the historical hook.
+    # Normal execution uses the package policy and never imports examples.
+    original = None if module is None else module._save_rho_replay_checkpoint
 
-    def save(path, nmpc, args, *, completed_windows):
+    def publish(write, path, nmpc, args, *, completed_windows):
         target = Path(path).expanduser().resolve()
         if target.parent != directory:
             # A separate explicit legacy checkpoint keeps its own semantics.
-            return original(path, nmpc, args, completed_windows=completed_windows)
+            return write(path, nmpc, args, completed_windows=completed_windows)
         receipt_path = target.with_suffix(".receipt.json")
         if target.exists() or receipt_path.exists():
             raise FileExistsError(f"Refusing to replace existing checkpoint: {target}")
@@ -113,7 +114,7 @@ def configured_checkpoint_writer(directory, config, *, condition, arguments,
         try:
             with NamedTemporaryFile(dir=directory, prefix=".primal-", suffix=".npz", delete=False) as stream:
                 temporary = Path(stream.name)
-            original(temporary, nmpc, args, completed_windows=completed_windows)
+            write(temporary, nmpc, args, completed_windows=completed_windows)
             annotate_generated_seed(temporary, config, condition=condition)
             with temporary.open("rb") as stream:
                 os.fsync(stream.fileno())
@@ -136,9 +137,13 @@ def configured_checkpoint_writer(directory, config, *, condition, arguments,
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
 
-    module._save_rho_replay_checkpoint = save
+    if module is not None:
+        def save(path, nmpc, args, *, completed_windows):
+            return publish(original, path, nmpc, args, completed_windows=completed_windows)
+        module._save_rho_replay_checkpoint = save
     try:
-        yield
+        with checkpoint_publication_hook(publish) if module is None else nullcontext():
+            yield
     except BaseException as error:
         manifest.update(status="exception", error=f"{type(error).__name__}: {error}")
         raise
@@ -146,6 +151,7 @@ def configured_checkpoint_writer(directory, config, *, condition, arguments,
         manifest["status"] = "launcher_completed"
         manifest["physical_outcome"] = "consult_benchmark_result"
     finally:
-        module._save_rho_replay_checkpoint = original
+        if module is not None:
+            module._save_rho_replay_checkpoint = original
         manifest["finished_at"] = datetime.now(timezone.utc).isoformat()
         atomic_json(directory / "manifest.json", manifest)

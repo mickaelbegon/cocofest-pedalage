@@ -461,6 +461,15 @@ fi
 # Keep the standard bridge enabled: the certified common seed records one
 # consumed warmup cycle and rejects consumers configured with zero.
 seed_options=()
+output_options=()
+if [[ "${BENCHMARK_COMPACT_RHO_OUTPUT:-true}" == "true" ]]; then
+  output_options+=(--compact-rho-output)
+fi
+if [[ "${BENCHMARK_ENFORCE_START_CONSTRAINTS:-true}" == "true" ]]; then
+  output_options+=(--ipopt-enforce-start-constraints)
+else
+  output_options+=(--ipopt-disable-start-constraints)
+fi
 if [[ "$benchmark_formulation" == "dynamic" ]]; then
   seed_options+=(
     --standard-warmup-seed "$workspace/.github/benchmark-seeds/legacy-resistive-0p22-warmup.npz"
@@ -492,7 +501,6 @@ fi
   --solvers "$solver" \
   --objective fatigue \
   --ipopt-profile "$ipopt_profile" \
-  --ipopt-enforce-start-constraints \
   --cycles-per-window "$BENCHMARK_CYCLES_PER_WINDOW" \
   --stimulations-per-cycle "$stimulations_per_cycle" \
   --n-windows "$case_windows" \
@@ -516,7 +524,7 @@ fi
   --isokinetic-omega "$isokinetic_omega" \
   --load-torque-min "$load_torque_min" \
   --load-torque-max "$load_torque_max" \
-  --compact-rho-output \
+  "${output_options[@]}" \
   --rho-pulse-width-transfer-mode "$rho_pulse_width_transfer_mode" \
   --rho-pulse-width-extrapolation-factor "$rho_pulse_width_extrapolation_factor" \
   --print-traces \

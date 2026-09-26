@@ -6016,6 +6016,26 @@ def test_wheel_trace_diagnostic_accepts_configured_cycle_slack():
     )
 
 
+def test_partial_rho_trace_is_audited_on_its_exported_cycle_grid():
+    """An early RHO stop is not itself a wheel-grid diagnostic failure."""
+
+    diagnostic_cycles = periodic_example._wheel_diagnostic_window_count(
+        2000, {"exported_cycles": 133}
+    )
+    trace = np.linspace(0.0, -133.0 * 2.0 * np.pi, 133 * 180 + 1)
+
+    diagnostics = periodic_example.diagnose_wheel_trace(
+        trace,
+        requested_windows=diagnostic_cycles,
+        expected_cycle_shift=-2.0 * np.pi,
+        cycle_progress_tolerance=1e-9,
+    )
+
+    assert diagnostic_cycles == 133
+    assert diagnostics["is_physical"] is True
+    assert "wheel_cycle_grid_mismatch" not in diagnostics["issues"]
+
+
 def test_wheel_trace_diagnostic_rejects_accumulated_same_sign_drift():
     per_cycle_error = 0.002
     cycle_boundaries = np.arange(101, dtype=float) * (-2.0 * np.pi + per_cycle_error)
@@ -7313,7 +7333,7 @@ def test_benchmark_json_summary_contains_comparable_fatigue_metrics(tmp_path):
     )
     payload = comparison_example.json.loads(output_path.read_text())
 
-    assert payload["schema_version"] == 3
+    assert payload["schema_version"] == 4
     assert payload["runtime"]["logical_cpu_count"] >= 1
     assert "OMP_NUM_THREADS" in payload["runtime"]["thread_environment"]
     assert "OMP_THREAD_LIMIT" in payload["runtime"]["thread_environment"]
@@ -9134,6 +9154,7 @@ def test_two_cycle_single_shot_checks_each_complete_turn():
 
     assert summary["physical_success"] is True
     assert summary["requested_cycles"] == 2
+    assert summary["requested_windows"] == 1
     assert summary["exported_cycles"] == 2
     assert summary["covered_cycles"] == 2
     assert summary["validated_cycles"] == 2
@@ -11685,6 +11706,89 @@ def test_failed_rho_alternate_pw_predictor_restores_checkpoint_then_uses_lag2():
     assert summary["maximum_change_s"] == pytest.approx(3.0)
     np.testing.assert_allclose(controls.init, [[1.0, 2.0, 3.0]])
     assert correction_calls == ["controls"]
+
+
+def test_ipopt_micro_pw_retry_restores_checkpoint_and_preserves_direct_slew():
+    def guess(values):
+        return SimpleNamespace(init=np.asarray(values, dtype=float))
+
+    def bounds(lower, upper):
+        return SimpleNamespace(
+            min=np.asarray(lower, dtype=float), max=np.asarray(upper, dtype=float)
+        )
+
+    biceps = guess([[99.0, 99.0, 99.0]])
+    triceps = guess([[99.0, 99.0, 99.0]])
+    force = guess([[7.0, 8.0]])
+    nmpc = SimpleNamespace(
+        nlp=[SimpleNamespace(
+            x_init={"F_Biceps": force},
+            u_init={
+                "last_pulse_width_Biceps": biceps,
+                "last_pulse_width_Triceps": triceps,
+                "other_control": guess([[3.0, 4.0, 5.0]]),
+            },
+            u_bounds={
+                # Three bound columns exercise the active first/interior/end
+                # selection used by a direct RHO seam.
+                "last_pulse_width_Biceps": bounds([[.1, .2, .3]], [[.3, .8, 1.3]]),
+                "last_pulse_width_Triceps": bounds([[.1, .2, .3]], [[.3, .8, 1.3]]),
+            },
+        )]
+    )
+    checkpoint = {
+        "states": {"F_Biceps": np.array([[7.0, 8.0]])},
+        "controls": {
+            "last_pulse_width_Biceps": np.array([[.2, .5, .8]]),
+            "last_pulse_width_Triceps": np.array([[.2, .5, .8]]),
+            "other_control": np.array([[3.0, 4.0, 5.0]]),
+        },
+    }
+
+    summary = periodic_example.apply_failed_rho_micro_pulse_width_perturbation(
+        nmpc, checkpoint, retry_index=0
+    )
+
+    assert summary["applied"] is True
+    assert summary["protected_states_exact"] is True
+    assert summary["protected_non_pw_controls_exact"] is True
+    assert summary["preserves_direct_intra_window_slew"] is True
+    # The smallest active range is .2, hence the common ±1% offset is .002.
+    np.testing.assert_allclose(biceps.init, [[.202, .502, .802]])
+    np.testing.assert_allclose(triceps.init, [[.198, .498, .798]])
+    np.testing.assert_allclose(force.init, checkpoint["states"]["F_Biceps"])
+    np.testing.assert_allclose(
+        nmpc.nlp[0].u_init["other_control"].init, checkpoint["controls"]["other_control"]
+    )
+    np.testing.assert_allclose(np.diff(biceps.init), np.diff(checkpoint["controls"]["last_pulse_width_Biceps"]))
+    np.testing.assert_allclose(np.diff(triceps.init), np.diff(checkpoint["controls"]["last_pulse_width_Triceps"]))
+
+
+def test_ipopt_micro_pw_retry_refuses_auxiliary_pw_representations():
+    nmpc = SimpleNamespace(
+        nlp=[SimpleNamespace(
+            x_init={},
+            u_init={
+                "last_pulse_width_Biceps": SimpleNamespace(init=np.array([[.2]])),
+                "pw_slew_increment_Biceps": SimpleNamespace(init=np.array([[0.0]])),
+            },
+            u_bounds={},
+        )]
+    )
+    checkpoint = {
+        "states": {},
+        "controls": {
+            "last_pulse_width_Biceps": np.array([[.2]]),
+            "pw_slew_increment_Biceps": np.array([[0.0]]),
+        },
+    }
+
+    summary = periodic_example.apply_failed_rho_micro_pulse_width_perturbation(
+        nmpc, checkpoint, retry_index=0
+    )
+
+    assert summary["applied"] is False
+    assert summary["reason"] == "unsupported_pulse_width_representation"
 
 
 def test_alternate_pw_predictor_cli_is_explicit():

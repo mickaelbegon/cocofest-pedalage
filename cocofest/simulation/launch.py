@@ -8,6 +8,7 @@ import shlex
 
 from .config import SimulationConfig
 from .capabilities import CapabilityRegistry
+from .resolved_config import ResolvedSimulationConfig, resolve_config
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -19,6 +20,22 @@ class LaunchPlan:
     environment_updates: dict[str, str]
     suite: str
     result_json: Path | None = None
+    resolved_config: ResolvedSimulationConfig | None = None
+
+    def save_effective_configuration(self) -> Path | None:
+        """Persist launch inputs beside results before starting the solver."""
+        if self.resolved_config is None or self.result_json is None:
+            return None
+        path = self.result_json.parent / "effective-configuration.json"
+        content = self.resolved_config.to_json()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            if path.read_text(encoding="utf-8") != content:
+                raise FileExistsError(f"Different effective configuration already exists: {path}")
+        else:
+            with path.open("x", encoding="utf-8") as output:
+                output.write(content)
+        return path
 
     @property
     def command(self) -> str:
@@ -36,6 +53,7 @@ def build_launch_plan(config: SimulationConfig | dict, prefix: Path, root: Path 
             data["integration"] = "irk"
         config = SimulationConfig.from_dict(data)
     CapabilityRegistry.require_valid(config)
+    resolved = resolve_config(config, root=root)
     typed_config = config
     config = config.to_dict()
     prefix, root = Path(prefix).expanduser().absolute(), Path(root).expanduser().absolute()
@@ -67,6 +85,8 @@ def build_launch_plan(config: SimulationConfig | dict, prefix: Path, root: Path 
     configured_extras.extend(
         ["--reduced-internal-crank-velocity-guard", guard_mode]
     )
+    if config["reduced_terminal_half_step_velocity_guard"]:
+        configured_extras.append("--reduced-terminal-half-step-velocity-guard")
     configured_extras.extend(["--acados-qp-solver", config["acados_qp_solver"]])
     if config["bilateral_reduced"]:
         configured_extras.append("--bilateral-reduced")
@@ -81,12 +101,16 @@ def build_launch_plan(config: SimulationConfig | dict, prefix: Path, root: Path 
     output = Path(config["output_root"]).expanduser()
     if not output.is_absolute():
         output = root / output
+    if config["compile_hessian_only"]:
+        configured_extras.extend(_hessian_compile_arguments(output, resolved.config_hash))
     updates = {
         "BENCHMARK_THREADS": str(config["threads"]), "BENCHMARK_CYCLES_PER_WINDOW": str(config["cycles"] if config["mode"] == "fho" else config["cycles_per_window"]), "NUMERIC_THREADS": str(config["numeric_threads"]),
         "BENCHMARK_ASSISTANCE": "0", "BENCHMARK_Q_SLACK": str(config["terminal_q_slack"]),
         "BENCHMARK_MAX_ITER": "2000", "BENCHMARK_FORMULATION": config["formulation"],
         "BENCHMARK_SIGNED_CRANK_TORQUE": str(config["signed_crank_torque"]),
         "BENCHMARK_STIMULATIONS_PER_CYCLE": str(config["stimulations_per_cycle"]),
+        "BENCHMARK_COMPACT_RHO_OUTPUT": str(config["compact_rho_output"]).lower(),
+        "BENCHMARK_ENFORCE_START_CONSTRAINTS": str(config["ipopt_enforce_start_constraints"]).lower(),
         "IPOPT_LINEAR_SOLVER": backend, "WARMUP_IPOPT_LINEAR_SOLVER": backend,
         "PYTHON_EXECUTABLE": str(prefix / "bin/python"),
         "GITHUB_WORKSPACE": str(root),
@@ -106,6 +130,9 @@ def build_launch_plan(config: SimulationConfig | dict, prefix: Path, root: Path 
         "BENCHMARK_LOAD_TORQUE_MIN": str(config["load_torque_min"]),
         "BENCHMARK_LOAD_TORQUE_MAX": str(config["load_torque_max"]),
     })
+    if config["common_initial_solution"]:
+        seed = Path(config["common_initial_solution"]).expanduser()
+        updates["BENCHMARK_COMMON_INITIAL_SOLUTION"] = str(seed if seed.is_absolute() else root / seed)
     if config["mode"] in ("rho-physio", "rho-pace") or config["model_config"]:
         return _build_adapted_plan(typed_config, prefix, root, output, updates, suite)
     if config["mode"] == "fho":
@@ -147,10 +174,12 @@ def build_launch_plan(config: SimulationConfig | dict, prefix: Path, root: Path 
                    "--acados-dir", str(prefix), "--acados-nlp-solver-type", "SQP",
                    "--acados-integrator-type", "IRK", "--acados-sim-stages", str(config["acados_sim_stages"]),
                    "--acados-sim-steps", str(config["acados_sim_steps"]), "--acados-max-iter", "100",
-                   "--mechanical-formulation", config["mechanics"], "--compact-rho-output",
+                   "--mechanical-formulation", config["mechanics"],
                    "--output-json", str(case / "result.json")]
         if config["mechanics"] == "reduced":
             command.append("--experimental-reduced-acados")
+        if config["compact_rho_output"]:
+            command.append("--compact-rho-output")
         if config["acados_ding_local_reduction"]:
             command.append("--acados-ding-local-reduction")
         command.extend([
@@ -165,7 +194,13 @@ def build_launch_plan(config: SimulationConfig | dict, prefix: Path, root: Path 
                         "--load-torque-max", str(config["load_torque_max"])])
         command.extend(configured_extras)
         result_json = case / "result.json"
-    return LaunchPlan(tuple(command), cwd, updates, suite, result_json)
+    return LaunchPlan(tuple(command), cwd, updates, suite, result_json, resolved)
+
+
+def _hessian_compile_arguments(output, config_hash):
+    return ["--ipopt-c-compile-callback", "nlp_hess_l",
+            "--ipopt-c-cache-dir", str(output / "native-cache" / config_hash[:16]),
+            "--ipopt-c-cache-name", "rho", "--ipopt-c-compiler-flag=-O1"]
 
 
 def _build_adapted_plan(config, prefix, root, output, updates, suite):
@@ -181,7 +216,7 @@ def _build_adapted_plan(config, prefix, root, output, updates, suite):
         "--warmup-ipopt-linear-solver", config.ipopt_linear_solver,
         "--ipopt-ode-solver", "collocation" if config.integration == "radau" else "irk",
         "--ipopt-collocation-degree", str(config.collocation_degree),
-        "--ipopt-collocation-method", "radau", "--ipopt-enforce-start-constraints",
+        "--ipopt-collocation-method", "radau",
         "--ipopt-disable-historical-initial-guess",
         "--cycles-per-window", str(config.cycles if config.mode == "fho" else config.cycles_per_window),
         "--n-windows", str(config.cycles), "--n-threads", str(config.threads),
@@ -191,13 +226,19 @@ def _build_adapted_plan(config, prefix, root, output, updates, suite):
         "--mechanical-formulation", config.mechanics, "--formulation", config.formulation,
         "--acados-qp-solver", config.acados_qp_solver,
         "--madnlp-linear-solver", config.madnlp_linear_solver,
-        "--state-scaling", "full", "--compact-rho-output",
+        "--state-scaling", "full",
         "--output-json", str(case / "result.json"),
     ]
+    benchmark.append("--ipopt-enforce-start-constraints" if config.ipopt_enforce_start_constraints
+                     else "--ipopt-disable-start-constraints")
     if config.mode == "fho":
         benchmark.append("--single-shot")
     if config.compile_evaluators:
         benchmark.append("--ipopt-c-compile")
+    if config.compile_hessian_only:
+        benchmark += _hessian_compile_arguments(output, resolve_config(config, root=root).config_hash)
+    if config.compact_rho_output:
+        benchmark.append("--compact-rho-output")
     if config.pulse_width_max_step_us is not None:
         benchmark += ["--pulse-width-max-step-us", str(float(config.pulse_width_max_step_us))]
     if config.bilateral_reduced:
@@ -223,6 +264,16 @@ def _build_adapted_plan(config, prefix, root, output, updates, suite):
             "--adopt-common-initial-solution-warmup-cycles",
             "--acados-disable-standard-ipopt-warmup",
         ]
+    elif config.common_initial_solution:
+        # Use the same validated start state and chronology for each candidate
+        # in a weighted controller study.  This belongs to the configuration
+        # rather than ``extra_arguments`` so trial provenance records it and
+        # managed-option validation cannot be bypassed.
+        benchmark += [
+            "--common-initial-solution", path(config.common_initial_solution),
+            "--common-initial-solution-recenter-first-node-bounds",
+            "--adopt-common-initial-solution-warmup-cycles",
+        ]
     benchmark.extend(config.extra_arguments)
     weighted = config.mode in ("rho-physio", "rho-pace")
     if config.model_config:
@@ -236,4 +287,4 @@ def _build_adapted_plan(config, prefix, root, output, updates, suite):
                    "--mode", config.mode, "--pace-config", path(config.weights_config),
                    "--pace-journal", str(case / "weights.jsonl")]
     command += ["--", *benchmark]
-    return LaunchPlan(tuple(command), case / "codegen", updates, suite, case / "result.json")
+    return LaunchPlan(tuple(command), case / "codegen", updates, suite, case / "result.json", resolve_config(config, root=root))

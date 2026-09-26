@@ -1,0 +1,82 @@
+name: Application tests (Linux)
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  OMP_NUM_THREADS: "1"
+  OPENBLAS_NUM_THREADS: "1"
+  MKL_NUM_THREADS: "1"
+  NUMEXPR_NUM_THREADS: "1"
+  JULIA_NUM_THREADS: "1"
+  MPLBACKEND: Agg
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  application-pr:
+    name: Configuration, GUI, launch and numerical replay
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: .github/application-test-requirements.txt
+      - name: Install the lightweight test dependencies
+        run: python -m pip install -r .github/application-test-requirements.txt
+      - name: Verify every test module has an explicit CI destination
+        run: python .github/scripts/run_application_tests.py --inventory-only
+      - name: Verify the inventory and required-test gates
+        run: python -m unittest discover -s .github/tests -v
+      - name: Verify this job has no production solver stack
+        run: |
+          python -c "import importlib.util; assert all(importlib.util.find_spec(name) is None for name in ('bioptim', 'biorbd', 'biorbd_casadi', 'acados_template'))"
+      - name: Run the required application tests
+        run: python .github/scripts/run_application_tests.py --suite pr --report-dir local-results/ci-application -q
+      - name: Publish executed tests and dependency skip reasons
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: application-pr-test-results
+          path: local-results/ci-application/
+          if-no-files-found: warn
+
+  scientific-application-tests:
+    name: Scientific application regressions (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Checkout the production Bioptim integration
+        uses: actions/checkout@v6
+        with:
+          repository: mickaelbegon/BiorbdOptim
+          ref: f7a0d722526967d9a81a8ad596ddb911d32a0bfe
+          path: .ci-deps/bioptim
+      - uses: conda-incubator/setup-miniconda@v4
+        with:
+          miniforge-version: latest
+          activate-environment: cocofest
+          environment-file: environment.yml
+          conda-remove-defaults: true
+      - name: Use the production Python integration
+        run: python -m pip install --no-deps -e .ci-deps/bioptim
+      - name: Run inventoried scientific application tests
+        run: python .github/scripts/run_application_tests.py --suite scientific --report-dir local-results/ci-scientific -q
+      - name: Publish scientific execution and skip reasons
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scientific-application-test-results
+          path: local-results/ci-scientific/
+          if-no-files-found: warn

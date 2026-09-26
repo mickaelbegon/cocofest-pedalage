@@ -152,3 +152,63 @@ JSON array of individual strings and cannot override options managed by the
 form. The historical PyCharm CONFIG dictionary remains supported and delegates
 to this layer. Its legacy implicit ACADOS IRK selection remains compatible;
 typed configurations state the integration choice explicitly.
+
+## Resolved configurations and incremental profiles
+
+`resolve_config` is the common boundary for GUI forms, saved JSON and new
+campaign plans. It validates with `CapabilityRegistry`, groups the settings
+into `physical`, `transcription`, `solver` and `execution`, and computes a
+SHA-256 hash of the canonical JSON. Equivalent integer/float values and managed
+relative/absolute paths normalize identically. The profile label and preview
+flag do not affect the hash; execution settings such as threads and output
+directory do. This is a **launch-input fingerprint**, not proof of physical
+equivalence: seed/model/weight contents, library versions, advanced argument
+values and engine-resolved defaults still require the runtime scientific audit.
+
+```bash
+python -m cocofest.simulation.cli --help
+python -m cocofest.simulation.cli --profile K7 --set cycles=100 --set stimulations_per_cycle=30
+python -m cocofest.simulation.cli --config simulation.json --prefix /path/to/cocofest-rho32
+```
+
+These commands resolve and preview; they do not run a solver. `--output` writes
+a new JSON audit document and refuses to replace an existing one. Its
+`simulation_config` member is the editable configuration accepted by the GUI;
+`effective` is the grouped audit record. Campaign code uses the same API:
+
+```python
+from cocofest.simulation import resolve_config, build_launch_plan
+
+resolved = resolve_config({"cycles": 100, "stimulations_per_cycle": 30}, profile="K7")
+plan = build_launch_plan(resolved.config, Path("/path/to/cocofest-rho32"))
+plan.save_effective_configuration()  # before executing plan.argv, shell=False
+```
+
+The GUI process runner and Bayesian campaign runner save
+`effective-configuration.json` beside `result.json` before launching. Existing
+plan consumers should call the same method. Pure planning never writes files.
+The document records the actual managed feature values, not just a profile name.
+
+| Profile | Mechanics / muscle graph / transcription | Compilation | Output | ΔPW |
+| --- | --- | --- | --- | --- |
+| K5 | Reduced, periodic-node, SX, Radau five stages | Interpreted | Complete | None |
+| K7 | Same | Exact `nlp_hess_l` callback only | Compact | None |
+| K9 | Same | Exact `nlp_hess_l` callback only | Compact | 100 µs bound, quadratic weight 0.01, 100 µs reference |
+
+These profiles currently target IPOPT. They reproduce the named cumulative
+**feature increments**, not an entire historical experiment: frequency,
+resistance, seeds, warm starts, compiler flags and cycle count must still be
+matched for a timing comparison. `compile_evaluators` retains its previous
+meaning (compile all selected evaluators); `compile_hessian_only` explicitly
+requests the K6/K7 Hessian step and cannot be combined with it. The GUI exposes
+both compilation choices and the compact-output choice.
+
+Profile conflicts fail before constructing a launch plan, e.g.
+`--profile K7 --set collocation_degree=3`. A sparse mapping means only supplied
+fields are explicit; a `SimulationConfig` is fully explicit and never silently
+overwritten by a profile. JSON fields, new CLI flags and advanced option names
+are checked strictly (no abbreviations). Advanced option names are collected
+from the existing parser declarations without importing scientific modules;
+their values and any engine-specific interactions remain validated by the
+scientific parser. Large historical driver CLIs are retained for compatibility
+and have not all been migrated to this managed schema.
