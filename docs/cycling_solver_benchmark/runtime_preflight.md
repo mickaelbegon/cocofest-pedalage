@@ -22,8 +22,19 @@ file exclusively; it refuses to replace existing evidence.
 
 ## Integration seam
 
-The useful production call is **inside the scientific worker**, after its
-imports and required patch installation, immediately before solver construction:
+The report must be collected **inside the scientific worker**. The benchmark
+comparison driver now automatically writes one sidecar per requested backend
+when `output_json` is set. GUI and campaign runs using this driver inherit it.
+Files are named `<result-stem>.runtime-preflight.<solver>.<attempt-id>.json`,
+beside the result JSON, and are created exclusively. Every invocation gets a
+new attempt identifier, preserving earlier runtime evidence.
+
+The observation runs after the worker imports and before `solve_case`, including
+its native warmup and code generation. The report identifies this stage as
+`before_solve_case`. The optional ACADOS Ding patch can be installed later by
+`solve_case`, after a warmup; its absence at this early stage is recorded without
+requiring it or declaring an incompatibility. A caller needing post-patch
+evidence can additionally collect a report at that later point:
 
 ```python
 from cocofest.runtime_preflight import collect_runtime_preflight
@@ -35,12 +46,22 @@ report = collect_runtime_preflight(
 )
 ```
 
-Attach that JSON object to the result's runtime provenance or save it beside the
-resolved configuration. Collect a second report after solver construction if
-loaded-library evidence is needed. A launcher-side report describes only the
-launcher process: its packages, environment and loaded patches do not establish
-anything about a worker running under another interpreter or prefix. This first
-tranche exposes the API/CLI; legacy drivers are not automatically instrumented.
+Each serialized solver result contains `runtime_preflight`, giving the stage,
+sidecar path, collection/persistence status, report status and observation time.
+Setup failures handled by the benchmark retain this metadata. If a native
+process crashes before result serialization, the already-written sidecar remains.
+Collection or write failures are reported as `unavailable`, with their error,
+and do not block the solve. Incompatibility is likewise observational here;
+this integration does not introduce a new solver rejection policy. Preflight
+time is included in case end-to-end time and reported separately; it is outside
+the solver's timings and hot-cycle populations.
+
+Calls without `output_json` and legacy direct invocations of `solve_case` are
+not automatically instrumented. The launcher remains free of scientific imports.
+A launcher-side report would describe only the launcher's interpreter, not a
+worker running under another prefix. Reports only describe native libraries
+already mapped at the observation point; a second report after solver
+construction is needed for newly loaded-library evidence.
 
 ## Interpretation and limits
 
@@ -64,5 +85,5 @@ banner are captured. Existing `solve_ipopt_ma57_probe` remains the separate
 opt-in native diagnostic. No native probe runs as part of this report. The
 version check is caller-supplied exact pinning, not a curated supported-version
 matrix. Patch evidence currently covers the opt-in ACADOS local Ding adapter,
-not every historical Bioptim patch. Full worker wiring, backend smoke probes and
-the supported-version matrix remain further work for issue #10.
+not every historical Bioptim patch. Additional worker entry points, backend
+smoke probes and the supported-version matrix remain further work for issue #10.

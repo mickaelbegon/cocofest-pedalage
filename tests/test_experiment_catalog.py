@@ -164,3 +164,139 @@ def test_nonfinite_legacy_metrics_become_explicit_null_and_errors_set_exit_code(
 def test_unknown_catalog_version_is_rejected():
     with pytest.raises(ValueError, match="schema version"):
         query_catalog({"schema_version": 999, "records": []})
+
+
+def test_sidecar_provenance_identity_and_hash_queries():
+    catalog = index_campaigns([FIXTURES])
+    (record,) = catalog["records"]
+    evidence = record["configuration_provenance"]
+    assert evidence["status"] == "hash_verified"
+    assert evidence["config_hash"] == evidence["computed_config_hash"]
+    assert evidence["effective"]["physical"]["model_config"] == "/recorded/model.json"
+    assert record["identity"]["case"] == "K7/ipopt-ma57"
+    assert query_catalog(
+        catalog,
+        campaign=FIXTURES.name,
+        case="K7/ipopt-ma57",
+        config_hash=evidence["config_hash"],
+    ) == [record]
+    assert query_catalog(catalog, config_hash="unknown") == []
+
+
+def _write_sidecar(directory, *, corrupt=False):
+    source = FIXTURES / "K7/ipopt-ma57/effective-configuration.json"
+    payload = json.loads(source.read_text())
+    payload["profile"] = "K7"
+    if corrupt:
+        payload["effective"]["physical"]["mechanics"] = "full"
+    sidecar = directory / "effective-configuration.json"
+    sidecar.write_text(json.dumps(payload))
+    return sidecar
+
+
+def test_sidecar_fallback_obeys_result_configuration_and_solver_scope(tmp_path):
+    source = tmp_path / "result.json"
+    source.write_text(
+        json.dumps(
+            {
+                "campaign_id": "declared",
+                "results": {
+                    "ipopt": {
+                        "case_id": "case-a",
+                        "configuration": {"ipopt_linear_solver": "mumps"},
+                    },
+                    "acados": {},
+                },
+            }
+        )
+    )
+    _write_sidecar(tmp_path)
+    catalog = index_campaigns([tmp_path])
+    ipopt, acados = catalog["records"]
+    assert ipopt["dimensions"]["linear_solver"] == "mumps"
+    assert ipopt["dimensions"]["mechanical_formulation"] == "reduced"
+    assert ipopt["dimensions"]["stage"] == "K7"
+    assert ipopt["identity"]["campaign"] == "declared"
+    assert ipopt["identity"]["case"] == "case-a"
+    assert ipopt["configuration_provenance"]["conflicts"]["ipopt_linear_solver"] == {
+        "result": "mumps",
+        "effective_configuration": "ma57",
+    }
+    assert (
+        query_catalog(
+            catalog, config_hash=ipopt["configuration_provenance"]["config_hash"]
+        )
+        == []
+    )
+    assert acados["dimensions"]["stage"] is None
+    assert acados["configuration_provenance"]["solver_matches_result"] is False
+    assert (
+        query_catalog(
+            catalog,
+            solver="acados",
+            config_hash=ipopt["configuration_provenance"]["config_hash"],
+        )
+        == []
+    )
+
+
+@pytest.mark.parametrize("damage", ["hash", "json", "schema", "sections"])
+def test_invalid_sidecars_retain_result_and_report_error_without_modification(
+    tmp_path, damage
+):
+    source = tmp_path / "result.json"
+    source.write_text('{"solver": "ipopt", "success": true}')
+    sidecar = _write_sidecar(tmp_path, corrupt=damage == "hash")
+    if damage == "json":
+        sidecar.write_text("{")
+    elif damage in ("schema", "sections"):
+        payload = json.loads(sidecar.read_text())
+        if damage == "schema":
+            payload["schema_version"] = 999
+        else:
+            payload["effective"]["physical"] = []
+        sidecar.write_text(json.dumps(payload))
+    before = (source.read_bytes(), sidecar.read_bytes())
+    catalog = index_campaigns([tmp_path])
+    assert len(catalog["records"]) == 1
+    assert len(catalog["errors"]) == 1
+    assert catalog["errors"][0]["uri"] == sidecar.as_uri()
+    assert catalog["records"][0]["configuration_provenance"]["status"] == "invalid"
+    assert query_catalog(catalog, config_hash="unknown") == []
+    assert (source.read_bytes(), sidecar.read_bytes()) == before
+
+
+def test_sidecar_in_ancestor_is_not_associated_and_output_is_protected(tmp_path):
+    sidecar = _write_sidecar(tmp_path)
+    case = tmp_path / "case"
+    case.mkdir()
+    (case / "result.json").write_text('{"solver": "ipopt"}')
+    catalog = index_campaigns([tmp_path])
+    assert catalog["records"][0]["configuration_provenance"]["status"] == "not_recorded"
+    before = sidecar.read_bytes()
+    with pytest.raises(SystemExit, match="2"):
+        main(["index", str(tmp_path), "--output", str(sidecar)])
+    assert sidecar.read_bytes() == before
+
+
+def test_sidecar_symlink_target_cannot_be_replaced_by_catalog(tmp_path):
+    (tmp_path / "result.json").write_text('{"solver": "ipopt"}')
+    sidecar = _write_sidecar(tmp_path)
+    original = tmp_path / "inputs.json"
+    sidecar.rename(original)
+    sidecar.symlink_to(original)
+    before = original.read_bytes()
+    with pytest.raises(SystemExit, match="2"):
+        main(["index", str(tmp_path), "--output", str(original)])
+    assert original.read_bytes() == before
+
+
+def test_sidecar_hash_matches_real_resolver(tmp_path):
+    from cocofest.simulation.resolved_config import resolve_config
+
+    resolved = resolve_config({}, profile="K7", root=tmp_path)
+    (tmp_path / "result.json").write_text('{"solver": "ipopt"}')
+    (tmp_path / "effective-configuration.json").write_text(resolved.to_json())
+    catalog = index_campaigns([tmp_path])
+    assert catalog["errors"] == []
+    assert len(query_catalog(catalog, config_hash=resolved.config_hash, stage="K7")) == 1

@@ -40,6 +40,7 @@ from cocofest.evaluation.result_schema import (
     audit_registry,
     timing_populations,
 )
+from cocofest.runtime_preflight import record_worker_preflight
 from cocofest.optimization.muscle_reserve import DEFAULT_SMOOTH_MIN_TEMPERATURE
 from cocofest.optimization.endurance_rollout_ocp import add_endurance_rollout_cli
 from cocofest.optimization.muscle_horizon_ocp import add_muscle_horizon_cli
@@ -2450,10 +2451,23 @@ def _run_benchmark_case(
     *,
     echo: bool = True,
     print_traceback: bool = False,
+    runtime_preflight_result_path: str | Path | None = None,
 ) -> dict:
     label = solver_name.upper()
     print(f"Running {label} configuration...")
     start = perf_counter()
+    runtime_evidence = None
+    if runtime_preflight_result_path is not None:
+        runtime_evidence = record_worker_preflight(
+            result_path=runtime_preflight_result_path,
+            solver=solver_name,
+            linear_solver=(
+                getattr(args, f"{solver_name}_linear_solver", None)
+                if solver_name in ("ipopt", "madnlp") else None
+            ),
+        )
+        if runtime_evidence["status"] != "recorded":
+            print(f"{label} runtime preflight unavailable: {runtime_evidence.get('error')}")
     try:
         uses_c_codegen = (
             (solver_name == "ipopt" and getattr(args, "ipopt_c_compile", False))
@@ -2501,9 +2515,11 @@ def _run_benchmark_case(
         if print_traceback:
             traceback.print_exc()
         result = _failed_solver_result(args, error, perf_counter() - start)
+        result["runtime_preflight"] = runtime_evidence
         print(f"{label} unavailable or failed during setup: {result['error']}")
         return result
     result["end_to_end_wall_time_s"] = perf_counter() - start
+    result["runtime_preflight"] = runtime_evidence
     return result
 
 
@@ -3789,6 +3805,7 @@ def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
                     "terminal_capacity_reserve"
                 ),
                 "error": result.get("error"),
+                "runtime_preflight": result.get("runtime_preflight"),
             }
         )
     return rows
@@ -5307,6 +5324,7 @@ def main(
             solver_args[solver_name],
             echo=True,
             print_traceback=print_traces,
+            runtime_preflight_result_path=output_json,
         )
         print()
 

@@ -26,6 +26,7 @@
         "tests/test_result_schema.py",
         "tests/test_experiment_catalog.py",
         "tests/test_benchmark_readme.py",
+        "tests/test_campaign_manifest.py",
         "tests/test_certify_configured_seed_preparation.py",
         "tests/test_cross_rollout_gui.py",
         "tests/test_cycling_problem.py",

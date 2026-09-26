@@ -1,7 +1,8 @@
 """Read-only runtime evidence before a solve; no native plugin is loaded.
 
-Call in the scientific worker after its imports and patch installation. Calling
-from a launcher describes the launcher's interpreter, not the child runtime.
+Call in the scientific worker after its imports, documenting whether optional
+patches are installed yet. Calling from a launcher describes the launcher's
+interpreter, not the child runtime.
 The report deliberately does not certify a native ABI or successful solve.
 """
 
@@ -15,7 +16,9 @@ from pathlib import Path
 import platform
 import struct
 import sys
+from time import perf_counter
 from typing import Mapping
+from uuid import uuid4
 
 from cocofest.optimization.solver_backends import MADNLP_LINEAR_SOLVER_RUNTIME_NAMES
 
@@ -264,6 +267,38 @@ def collect_runtime_preflight(
             key: os.environ[key] for key in _ENVIRONMENT_KEYS if key in os.environ
         },
     }
+
+
+def record_worker_preflight(
+    *, result_path: str | Path, solver: str, linear_solver: str | None = None
+) -> dict:
+    """Observe a benchmark worker before ``solve_case`` and save a sidecar.
+
+    The caller must run this in the scientific worker, after its imports. Some
+    workers install patches only after a native warmup, so this early snapshot
+    intentionally does not require those patches. Each attempt gets a unique
+    filename; existing evidence is never overwritten. Collection/persistence
+    failures are returned as evidence and do not prevent the requested solve.
+    """
+    started = perf_counter()
+    evidence = {"stage": "before_solve_case", "status": "unavailable", "path": None}
+    try:
+        report = collect_runtime_preflight(solver=solver, linear_solver=linear_solver)
+        report["observation_stage"] = evidence["stage"]
+        evidence["report_status"] = report["status"]
+        result_path = Path(result_path).expanduser().absolute()
+        output = result_path.with_name(
+            f"{result_path.stem}.runtime-preflight.{solver}.{uuid4().hex}.json"
+        )
+        document = json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with output.open("x", encoding="utf-8") as handle:
+            handle.write(document)
+        evidence.update(status="recorded", path=str(output))
+    except Exception as error:
+        evidence["error"] = f"{type(error).__name__}: {error}"
+    evidence["wall_time_s"] = perf_counter() - started
+    return evidence
 
 
 def main(argv=None) -> int:

@@ -100,6 +100,9 @@ def test_serialized_fho_retains_diagnostic_failure_and_empty_hot_population(tmp_
     result = example._failed_solver_result(args, RuntimeError("missing plugin"), 2.)
     result["integrator_map_final_solution"] = [{"available": False, "error": "diagnostic failed"}]
     result["parametric_kkt_audits"] = [{"available": False, "reason": "solution_not_certified"}]
+    result["runtime_preflight"] = {"status": "recorded", "report_status": "incomplete",
+                                    "path": str(tmp_path / "runtime-preflight.json"),
+                                    "stage": "before_solve_case", "wall_time_s": 0.02}
     output = example.write_benchmark_summary(tmp_path / "result.json", {"ipopt": result})
     payload = json.loads(output.read_text())
     assert payload["schema_version"] == 4
@@ -110,3 +113,4 @@ def test_serialized_fho_retains_diagnostic_failure_and_empty_hot_population(tmp_
     assert row["timing_populations"]["hot"]["window_indices"] == []
     assert row["integrator_map_final_solution"][0]["error"] == "diagnostic failed"
     assert row["audit_registry"]["parametric_kkt_audits"]["status"] == "unavailable"
+    assert row["runtime_preflight"] == result["runtime_preflight"]

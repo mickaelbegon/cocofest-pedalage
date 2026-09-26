@@ -1,10 +1,15 @@
 """Runtime evidence must remain usable before optional scientific imports."""
 
 from importlib import metadata
+import argparse
+import ast
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
+from tempfile import TemporaryDirectory
+from time import perf_counter
 from types import SimpleNamespace
 
 import pytest
@@ -158,3 +163,111 @@ def test_cli_preserves_existing_evidence(empty_runtime, tmp_path):
 def test_invalid_requests_rejected(settings):
     with pytest.raises(ValueError):
         preflight.collect_runtime_preflight(**settings)
+
+
+def test_worker_sidecars_are_unique_and_record_actual_worker(empty_runtime, tmp_path):
+    path = tmp_path / "case" / "result.json"
+    first = preflight.record_worker_preflight(
+        result_path=path, solver="madnlp", linear_solver="ma57"
+    )
+    original = Path(first["path"]).read_bytes()
+    second = preflight.record_worker_preflight(
+        result_path=path, solver="madnlp", linear_solver="mumps"
+    )
+    assert first["status"] == second["status"] == "recorded"
+    assert first["path"] != second["path"]
+    assert Path(first["path"]).read_bytes() == original
+    report = json.loads(original)
+    assert report["runtime"]["pid"] == os.getpid()
+    assert report["observation_stage"] == "before_solve_case"
+    assert report["requested_backend"]["interface_linear_solver"] == "Ma57Solver"
+    assert report["observed_backend"]["linear_solver"] is None
+    assert first["report_status"] == "incomplete"
+    assert first["wall_time_s"] >= 0
+    assert not path.exists()
+
+
+def test_worker_records_collection_failure_without_stopping_solve(
+    monkeypatch, tmp_path
+):
+    def fail(**kwargs):
+        raise RuntimeError("metadata unavailable")
+
+    monkeypatch.setattr(preflight, "collect_runtime_preflight", fail)
+    result = preflight.record_worker_preflight(
+        result_path=tmp_path / "result.json", solver="ipopt"
+    )
+    assert result["status"] == "unavailable"
+    assert result["path"] is None
+    assert result["error"] == "RuntimeError: metadata unavailable"
+
+
+def test_worker_records_write_failure_without_stopping_solve(empty_runtime, tmp_path):
+    parent = tmp_path / "file-not-directory"
+    parent.write_text("preserve me")
+    result = preflight.record_worker_preflight(
+        result_path=parent / "result.json", solver="ipopt"
+    )
+    assert result["status"] == "unavailable"
+    assert "FileExistsError" in result["error"]
+    assert result["report_status"] == "incomplete"
+    assert parent.read_text() == "preserve me"
+
+
+@pytest.mark.parametrize(
+    "fails,codegen", [(False, False), (True, False), (False, True)]
+)
+def test_benchmark_worker_records_before_native_entry_and_retains_evidence(
+    empty_runtime, tmp_path, fails, codegen
+):
+    # Execute the real worker seam without importing the scientific example.
+    # The fake solve asserts evidence exists before any native work can begin.
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "examples/fes_multibody/cycling/cycling_fes_solver_comparison.py"
+    )
+    node = next(
+        item
+        for item in ast.parse(source.read_text()).body
+        if isinstance(item, ast.FunctionDef) and item.name == "_run_benchmark_case"
+    )
+    destination = tmp_path / "result.json"
+    arguments = argparse.Namespace(ipopt_linear_solver="ma57", ipopt_c_compile=codegen)
+    seen = []
+
+    def solve(args, *, echo):
+        reports = list(tmp_path.glob("result.runtime-preflight.ipopt.*.json"))
+        assert len(reports) == 1
+        report = json.loads(reports[0].read_text())
+        assert report["requested_backend"]["linear_solver"] == "ma57"
+        assert args is arguments
+        seen.append("solve")
+        if fails:
+            raise RuntimeError("native setup failure")
+        return {"success": True}
+
+    namespace = {
+        "argparse": argparse,
+        "Path": Path,
+        "perf_counter": perf_counter,
+        "record_worker_preflight": preflight.record_worker_preflight,
+        "solve_case": solve,
+        "_failed_solver_result": lambda args, error, elapsed: {"error": str(error)},
+        "os": os,
+        "TemporaryDirectory": TemporaryDirectory,
+    }
+    exec(
+        compile(ast.Module(body=[node], type_ignores=[]), str(source), "exec"),
+        namespace,
+    )
+    cwd = Path.cwd()
+    result = namespace["_run_benchmark_case"](
+        "ipopt", arguments, echo=False, runtime_preflight_result_path=destination
+    )
+    assert seen == ["solve"]
+    assert Path.cwd() == cwd
+    assert result["runtime_preflight"]["status"] == "recorded"
+    if fails:
+        assert result["error"] == "native setup failure"
+    else:
+        assert result["success"] is True

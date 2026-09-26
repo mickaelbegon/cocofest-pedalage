@@ -118,6 +118,86 @@ def _reported_status(row: dict) -> str:
     return "unknown"
 
 
+def _configuration_evidence(source: Path) -> tuple[dict, dict, dict | None]:
+    """Read only the sidecar published alongside this result, never ancestors.
+
+    A campaign-wide sidecar could describe a different solver or case. A valid
+    canonical hash verifies bytes/inputs, not scientific or ABI equivalence.
+    """
+    sidecar = source.with_name("effective-configuration.json")
+    evidence = {"status": "not_recorded", "uri": None, "sha256": None}
+    if not sidecar.exists():
+        return evidence, {}, None
+    evidence["uri"] = sidecar.resolve().as_uri()
+    try:
+        raw = sidecar.read_bytes()
+        evidence["sha256"] = hashlib.sha256(raw).hexdigest()
+        payload = json.loads(raw)
+        if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+            raise ValueError("Unsupported effective configuration schema")
+        effective = payload.get("effective")
+        if not isinstance(effective, dict) or any(
+            not isinstance(effective.get(group), dict)
+            for group in ("physical", "transcription", "solver", "execution")
+        ):
+            raise ValueError("Effective configuration requires four object sections")
+        canonical = json.dumps(
+            effective, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+        computed_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        evidence.update(
+            config_hash=payload.get("config_hash"),
+            computed_config_hash=computed_hash,
+            profile=payload.get("profile"),
+            schema_version=payload["schema_version"],
+        )
+        if payload.get("config_hash") != computed_hash:
+            raise ValueError("Effective configuration config_hash mismatch")
+        evidence["status"] = "hash_verified"
+        # Keep the source sections for provenance, including model and seed
+        # references. Referenced files are never opened or claimed as verified.
+        evidence["effective"] = effective
+        flattened = {
+            key: value
+            for name in ("physical", "transcription", "solver", "execution")
+            for key, value in effective[name].items()
+        }
+        return evidence, flattened, None
+    except (OSError, ValueError, TypeError) as exc:
+        evidence["status"] = "invalid"
+        evidence["error"] = str(exc)
+        return (
+            evidence,
+            {},
+            {"uri": evidence["uri"], "sha256": evidence["sha256"], "error": str(exc)},
+        )
+
+
+def _identity(source: Path, roots: list[Path], document: dict, row: dict) -> dict:
+    candidates = [
+        root for root in roots if root.is_dir() and source.is_relative_to(root)
+    ]
+    root = (
+        max(candidates, key=lambda path: len(path.parts))
+        if candidates
+        else source.parent
+    )
+    identity = {
+        "campaign": root.name,
+        "case": source.parent.relative_to(root).as_posix(),
+        "campaign_root_uri": root.as_uri(),
+        "sources": {"campaign": "index_root", "case": "relative_result_directory"},
+    }
+    for field in ("campaign", "case"):
+        for label, payload in (("result_entry", row), ("result_document", document)):
+            value = payload.get(f"{field}_id")
+            if isinstance(value, str) and value:
+                identity[field] = value
+                identity["sources"][field] = f"{label}.{field}_id"
+                break
+    return identity
+
+
 def index_campaigns(roots: list[str | Path]) -> dict:
     """Build a deterministic catalog from result.json files under each root.
 
@@ -155,6 +235,11 @@ def index_campaigns(roots: list[str | Path]) -> dict:
                 raise ValueError("results must be a list or object")
             if not entries:
                 raise ValueError("results contains no entries")
+            config_evidence, effective_config, config_error = _configuration_evidence(
+                source
+            )
+            if config_error:
+                errors.append(config_error)
             configurations = document.get("configurations", {})
             for key, row in entries:
                 if not isinstance(row, dict):
@@ -177,8 +262,27 @@ def index_campaigns(roots: list[str | Path]) -> dict:
                     config = {}
                 if not config and isinstance(row.get("configuration"), dict):
                     config = row["configuration"]
+                # The launcher's sidecar is only usable for its recorded solver.
+                # Comparison documents may contain several unrelated solvers.
+                compatible = bool(effective_config) and solver in (
+                    None,
+                    effective_config.get("solver"),
+                )
+                fallback = effective_config if compatible else {}
+                conflicts = {
+                    field: {"result": value, "effective_configuration": fallback[field]}
+                    for field, value in config.items()
+                    if field in fallback and value != fallback[field]
+                }
+                if solver is None:
+                    solver = fallback.get("solver")
+                config = {**fallback, **config}
                 frequency, frequency_source = _frequency(config)
                 stage, stage_source = _stage(config, source)
+                if stage_source == "path_component" or stage is None:
+                    profile = config_evidence.get("profile") if compatible else None
+                    if isinstance(profile, str) and profile:
+                        stage, stage_source = profile, "effective_configuration.profile"
                 records.append(
                     _json_safe(
                         {
@@ -190,12 +294,23 @@ def index_campaigns(roots: list[str | Path]) -> dict:
                                 "result_entry": key,
                                 "result_schema_version": document.get("schema_version"),
                             },
+                            "identity": _identity(
+                                source, resolved_roots, document, row
+                            ),
+                            "configuration_provenance": {
+                                **config_evidence,
+                                "solver_matches_result": (
+                                    compatible if effective_config else None
+                                ),
+                                "conflicts": conflicts,
+                                "dimension_precedence": "result_configuration_then_verified_sidecar",
+                            },
                             "dimensions": {
                                 "solver": solver,
                                 "linear_solver": config.get(f"{solver}_linear_solver"),
                                 "formulation": config.get("formulation"),
                                 "mechanical_formulation": config.get(
-                                    "mechanical_formulation"
+                                    "mechanical_formulation", fallback.get("mechanics")
                                 ),
                                 "ding_formulation": config.get(
                                     "calcium_forcing_formulation"
@@ -248,12 +363,29 @@ def query_catalog(
     formulation: str | None = None,
     frequency_hz: float | None = None,
     stage: str | None = None,
+    campaign: str | None = None,
+    case: str | None = None,
+    config_hash: str | None = None,
 ) -> list[dict]:
     """Filter observed dimensions, never interpreting missing values as matches."""
     if catalog.get("schema_version") != CATALOG_SCHEMA_VERSION:
         raise ValueError("Unsupported experiment catalog schema version")
 
     def matches(record: dict) -> bool:
+        for key, requested in (("campaign", campaign), ("case", case)):
+            if (
+                requested is not None
+                and record.get("identity", {}).get(key) != requested
+            ):
+                return False
+        provenance = record.get("configuration_provenance", {})
+        if config_hash is not None and (
+            provenance.get("status") != "hash_verified"
+            or provenance.get("solver_matches_result") is not True
+            or bool(provenance.get("conflicts"))
+            or provenance.get("config_hash") != config_hash
+        ):
+            return False
         dimensions = record["dimensions"]
         for key, requested in (
             ("solver", solver),
@@ -289,6 +421,9 @@ def main(argv: list[str] | None = None) -> int:
     query.add_argument("--formulation")
     query.add_argument("--frequency-hz", type=float)
     query.add_argument("--stage")
+    query.add_argument("--campaign")
+    query.add_argument("--case")
+    query.add_argument("--config-hash")
     args = parser.parse_args(argv)
     if args.command == "query":
         catalog = json.loads(args.catalog.read_text())
@@ -298,6 +433,9 @@ def main(argv: list[str] | None = None) -> int:
             formulation=args.formulation,
             frequency_hz=args.frequency_hz,
             stage=args.stage,
+            campaign=args.campaign,
+            case=args.case,
+            config_hash=args.config_hash,
         )
         print(json.dumps(output, indent=2, allow_nan=False))
         return 0
@@ -307,11 +445,21 @@ def main(argv: list[str] | None = None) -> int:
         print(serialized, end="")
     else:
         destination = args.output.resolve()
-        if destination.name == "result.json" or any(
-            destination.as_uri() == record["artifact"]["uri"]
-            for record in catalog["records"]
+        if (
+            destination.name in ("result.json", "effective-configuration.json")
+            or any(
+                destination.as_uri()
+                in (
+                    record["artifact"]["uri"],
+                    record["configuration_provenance"].get("uri"),
+                )
+                for record in catalog["records"]
+            )
+            or any(destination.as_uri() == error["uri"] for error in catalog["errors"])
         ):
-            parser.error("Catalog output must not overwrite a result.json artifact")
+            parser.error(
+                "Catalog output must not overwrite a result or configuration artifact"
+            )
         # Atomic publication protects readers when a campaign is being indexed.
         with tempfile.NamedTemporaryFile(
             mode="w", dir=destination.parent, prefix=".catalog-", delete=False

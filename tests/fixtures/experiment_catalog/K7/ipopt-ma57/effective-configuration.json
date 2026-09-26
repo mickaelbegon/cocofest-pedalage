@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "config_hash": "51802d2df227bdc5b971a5c3c7afca0bb9d8101fc5a0717a38833a03e08ba531",
+  "profile": null,
+  "effective": {
+    "physical": {"mechanics": "reduced", "model_config": "/recorded/model.json"},
+    "transcription": {"symbolic_type": "SX"},
+    "solver": {"solver": "ipopt", "ipopt_linear_solver": "ma57"},
+    "execution": {"common_initial_solution": "/recorded/seed.npz"}
+  }
+}
