@@ -38,7 +38,8 @@ _GROUPS = {
     "transcription": "mode cycles_per_window integration collocation_degree ipopt_enforce_start_constraints "
                      "acados_sim_stages acados_sim_steps acados_ding_local_reduction ipopt_ding_local_reduction "
                      "pulse_width_max_step_us pulse_width_slew_weight pulse_width_slew_reference_us "
-                     "reduced_internal_crank_velocity_guard terminal_q_slack",
+                     "reduced_internal_crank_velocity_guard reduced_terminal_half_step_velocity_guard "
+                     "terminal_q_slack",
     "solver": "solver ipopt_linear_solver madnlp_linear_solver acados_qp_solver compile_evaluators "
               "compile_hessian_only madnlp_hot_max_iterations madnlp_hot_max_wall_time madnlp_recovery",
     "execution": "cycles threads numeric_threads output_root compact_rho_output acados_ipopt_cycle1_seed "

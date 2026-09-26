@@ -27,9 +27,18 @@ its removal belongs to a later solver-construction boundary.
 
 This step does not migrate `solve_case`, change solver options, or change the
 mathematical problem. The example still owns the mapping from solver arguments
-to physical metadata. The next extraction should introduce an explicit problem
-factory and run context before moving solver orchestration. Issue #8 remains a
-parent tracking that progressive migration.
+to physical metadata.
+
+The second extraction boundary introduces
+`cocofest.optimization.cycling_problem.CyclingProblemFactory` and
+`CyclingRunContext`. The periodic driver now passes its already validated model,
+MHE data, cycle data and simulation conditions through this package boundary
+before it configures the resulting live NMPC. The builder is injected: this
+retains the historical Bioptim construction while permitting package-only tests
+and future model/solver factories without importing `examples`.
+
+The next step is moving the remaining solver orchestration into explicit
+backends. Issue #8 remains a parent tracking that progressive migration.
 
 Validation covers package-only checkpoint publication, old/new archive reads,
 legacy driver imports, scoped hook restoration, fingerprint receipts and replay.

@@ -67,6 +67,7 @@ from cocofest.optimization.trajectory_io import (
     save_trajectory,
     save_rho_replay_checkpoint,
 )
+from cocofest.optimization.cycling_problem import CyclingProblemFactory
 from cocofest.optimization.solver_backends import (
     add_ipopt_performance_arguments,
     NLP_SOLVER_NAMES,
@@ -20895,7 +20896,19 @@ def solve_case(
             "pulse_width_active_reference"
         ] = prefetched_standard_warmup.decision_controls(to_merge=SolutionMerge.NODES)
 
-    nmpc = prepare_nmpc(model, mhe_info, cycling_info, nmpc_simulation_conditions)
+    problem_context = CyclingProblemFactory(prepare_nmpc).build(
+        model=model,
+        mhe_info=mhe_info,
+        cycling_info=cycling_info,
+        simulation_conditions=nmpc_simulation_conditions,
+        metadata={
+            "solver": args.solver,
+            "model_formulation": args.model_formulation,
+            "mechanical_formulation": args.mechanical_formulation,
+            "formulation": args.formulation,
+        },
+    )
+    nmpc = problem_context.nmpc
     nmpc.preserve_warmup_pulse_width_seed = bool(
         getattr(args, "preserve_warmup_pulse_width_seed", False)
     )
