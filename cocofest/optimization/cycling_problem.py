@@ -11,7 +11,7 @@ from typing import Any, Callable, Mapping
 
 @dataclass
 class CyclingRunContext:
-    """Live periodic problem plus immutable construction provenance."""
+    """Live periodic problem plus a snapshot of construction provenance."""
 
     nmpc: Any
     model: Any

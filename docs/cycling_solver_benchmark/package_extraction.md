@@ -37,8 +37,26 @@ before it configures the resulting live NMPC. The builder is injected: this
 retains the historical Bioptim construction while permitting package-only tests
 and future model/solver factories without importing `examples`.
 
-The next step is moving the remaining solver orchestration into explicit
+The remaining solver orchestration is being moved incrementally into explicit
 backends. Issue #8 remains a parent tracking that progressive migration.
+
+The frozen-window recovery sequence now lives in
+`cocofest.optimization.solver_recovery.run_frozen_nlp_recovery`.
+Its `RecoveryOperations` boundary receives backend configuration, one frozen
+solve, feasibility/compatibility audits and primal injection as explicit
+callbacks. The historical `run_periodic_nlp_recovery` wrapper still owns IPOPT
+and MadNLP options and Bioptim dispatch. In particular, recovery calls the base
+NLP solve with `warm_start=None`; it cannot enter the advancing RHO solve.
+
+The sequence preserves separate configuration, solve, audit and injection
+timings. Configuration or solver exceptions become diagnostic results, whereas
+audit or injection exceptions remain fatal. The existing acceptance callback
+continues to distinguish converged, feasible provisional and rejected seeds.
+Injecting a provisional seed does not certify or advance a physical cycle;
+the caller retains that decision. The package module imports neither Bioptim
+nor the example driver. Its tests cover ordering and side effects for each
+acceptance case, both error boundaries, timing accounting, and compatibility
+wrapper dispatch for IPOPT and MadNLP.
 
 Validation covers package-only checkpoint publication, old/new archive reads,
 legacy driver imports, scoped hook restoration, fingerprint receipts and replay.

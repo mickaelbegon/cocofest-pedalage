@@ -68,6 +68,10 @@ from cocofest.optimization.trajectory_io import (
     save_rho_replay_checkpoint,
 )
 from cocofest.optimization.cycling_problem import CyclingProblemFactory
+from cocofest.optimization.solver_recovery import (
+    RecoveryOperations,
+    run_frozen_nlp_recovery,
+)
 from cocofest.optimization.solver_backends import (
     add_ipopt_performance_arguments,
     NLP_SOLVER_NAMES,
@@ -18073,134 +18077,52 @@ def run_periodic_nlp_recovery(
     failure with this independently converged recovery solution.
     """
 
-    if recovery_solver not in {"ipopt", "madnlp"}:
-        raise ValueError(
-            "Periodic NLP recovery currently supports IPOPT and MadNLP only."
-        )
-
-    summary: dict[str, object] = {
-        "available": True,
-        "solver": recovery_solver,
-        "target_solver": target_solver,
-        "mechanical_formulation": mechanical_formulation,
-        "transcription": "collocation_radau",
-        "max_iterations": int(max_iterations),
-        "seed_source": seed_source,
-        "accepted": False,
-        "seed_injected": False,
-        "structure": deepcopy(
-            getattr(recovery_nmpc, "_cocofest_recovery_structure", None)
-        ),
-    }
-    recovery_start = perf_counter()
-    configure_start = perf_counter()
-    configure_wall_time_s = None
-    solve_start = None
-    try:
+    def configure_recovery_solver():
         if recovery_solver == "ipopt":
-            solver = configure_ipopt_solver(
+            return configure_ipopt_solver(
                 max_iterations=max_iterations,
                 linear_solver=linear_solver or "mumps",
                 tolerance=tolerance,
                 c_compile=c_compile,
                 advanced_options=ipopt_advanced_options,
             )
-        else:
-            solver = configure_nlp_solver(
-                "madnlp",
-                max_iterations=max_iterations,
-                tolerance=tolerance,
-                madnlp_linear_solver=linear_solver,
-                madnlp_c_compile=c_compile,
-                madnlp_max_wall_time=max_wall_time,
-            )
-        configure_wall_time_s = perf_counter() - configure_start
-        solve_start = perf_counter()
-        solution = super(RecedingHorizonOptimization, recovery_nmpc).solve(
+        return configure_nlp_solver(
+            "madnlp",
+            max_iterations=max_iterations,
+            tolerance=tolerance,
+            madnlp_linear_solver=linear_solver,
+            madnlp_c_compile=c_compile,
+            madnlp_max_wall_time=max_wall_time,
+        )
+
+    def solve_recovery_window(nmpc, solver):
+        return super(RecedingHorizonOptimization, nmpc).solve(
             solver=solver,
             warm_start=None,
         )
-        solve_call_wall_time_s = perf_counter() - solve_start
-    except Exception as exc:
-        summary["timing"] = {
-            "configure_solver_wall_time_s": (
-                perf_counter() - configure_start
-                if configure_wall_time_s is None
-                else configure_wall_time_s
-            ),
-            "solve_call_wall_time_s": (
-                None if solve_start is None else perf_counter() - solve_start
-            ),
-            "total_wall_time_s": perf_counter() - recovery_start,
-        }
-        summary["error"] = f"{type(exc).__name__}: {exc}"
-        summary["traceback"] = traceback.format_exc()
-        if echo:
-            print(
-                f"{target_solver}_{recovery_solver}_recovery_error: "
-                f"{summary['error']}"
-            )
-            print(summary["traceback"], end="")
-        return None, summary
 
-    feasibility_start = perf_counter()
-    populate_solution_inf_pr_from_solver_stats(solution, recovery_nmpc)
-    feasibility = _solution_feasibility_summary(solution, tolerance)
-    acceptance = periodic_refinement_acceptance(solution.status, feasibility)
-    feasibility_wall_time_s = perf_counter() - feasibility_start
-    accepted = acceptance["accepted"]
-    solver_time = getattr(solution, "solver_time_to_optimize", None)
-    wall_time = getattr(solution, "real_time_to_optimize", None)
-    compatibility_start = perf_counter()
-    compatibility = solution_trace_compatibility_summary(
-        failed_target_solution, solution
+    return run_frozen_nlp_recovery(
+        recovery_nmpc,
+        target_nmpc,
+        operations=RecoveryOperations(
+            configure_solver=configure_recovery_solver,
+            solve=solve_recovery_window,
+            populate_inf_pr=populate_solution_inf_pr_from_solver_stats,
+            feasibility_summary=_solution_feasibility_summary,
+            acceptance=periodic_refinement_acceptance,
+            compatibility_summary=solution_trace_compatibility_summary,
+            inject_seed=apply_solution_directly_to_periodic_nmpc_initial_guess,
+        ),
+        recovery_solver=recovery_solver,
+        max_iterations=max_iterations,
+        tolerance=tolerance,
+        failed_target_solution=failed_target_solution,
+        target_solver=target_solver,
+        mechanical_formulation=mechanical_formulation,
+        seed_source=seed_source,
+        echo=echo,
+        clock=perf_counter,
     )
-    compatibility_wall_time_s = perf_counter() - compatibility_start
-    summary.update(
-        {
-            "status": int(solution.status),
-            "solver_time_s": None if solver_time is None else float(solver_time),
-            "wall_time_s": None if wall_time is None else float(wall_time),
-            "feasibility": feasibility,
-            "accepted": accepted,
-            "certified_feasibility": acceptance["certified"],
-            "provisional": acceptance["provisional"],
-            "quality": (
-                "converged"
-                if acceptance["success"]
-                else "feasible_nonconverged"
-                if accepted
-                else "rejected"
-            ),
-            "compatibility_with_failed_target": compatibility,
-        }
-    )
-    if target_solver == "acados":
-        summary["compatibility_with_failed_acados"] = summary[
-            "compatibility_with_failed_target"
-        ]
-    injection_start = perf_counter()
-    if accepted:
-        apply_solution_directly_to_periodic_nmpc_initial_guess(target_nmpc, solution)
-        summary["seed_injected"] = True
-    injection_wall_time_s = perf_counter() - injection_start
-    summary["timing"] = {
-        "configure_solver_wall_time_s": configure_wall_time_s,
-        "solve_call_wall_time_s": solve_call_wall_time_s,
-        "feasibility_audit_wall_time_s": feasibility_wall_time_s,
-        "compatibility_audit_wall_time_s": compatibility_wall_time_s,
-        "seed_injection_wall_time_s": injection_wall_time_s,
-        "total_wall_time_s": perf_counter() - recovery_start,
-    }
-    if echo:
-        print(
-            f"{target_solver}_{recovery_solver}_recovery: "
-            f"status={solution.status} accepted={accepted} "
-            f"inf_pr={feasibility['final_inf_pr']} "
-            f"quality={summary['quality']} "
-            f"solver_time_s={summary['solver_time_s']}"
-        )
-    return solution, summary
 
 
 def run_periodic_ipopt_recovery(

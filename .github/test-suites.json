@@ -27,6 +27,7 @@
         "tests/test_benchmark_readme.py",
         "tests/test_certify_configured_seed_preparation.py",
         "tests/test_cross_rollout_gui.py",
+        "tests/test_cycling_problem.py",
         "tests/test_cycling_benchmark_summary.py",
         "tests/test_extract_rho_checkpoint.py",
         "tests/test_frequency_slew_matrix_summary.py",
@@ -43,6 +44,7 @@
         "tests/test_simulation_core.py",
         "tests/test_simulation_resolved_config.py",
         "tests/test_simulation_gui.py",
+        "tests/test_solver_recovery.py",
         "tests/test_trajectory_io.py",
         "tests/test_solver_option_screen_summary.py"
       ]
