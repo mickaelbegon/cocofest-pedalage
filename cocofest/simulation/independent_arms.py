@@ -197,6 +197,65 @@ class IndependentArmCoordinator:
             summary["completed_rho_cycles"] = cycles
             return summary
 
+    def run_with_resistance_pace(self, pace: Any, *, cycles: int = 1) -> dict[str, Any]:
+        """Run cycle-synchronous RHO with a fixed bilateral work budget.
+
+        ``pace`` must expose ``equivalent_mean_torques`` and
+        ``observe(cycle_index, right_metrics, left_metrics)`` as provided by
+        :class:`~cocofest.optimization.independent_arm_rho_pace.IndependentArmResistancePace`.
+        Both terminal-work targets are installed before either solve starts;
+        results are collected before the next allocation is calculated.  This
+        is a synchronization barrier between every pair of unilateral RHO
+        windows, not a coupled mechanical problem.
+        """
+        if isinstance(cycles, bool) or not isinstance(cycles, int) or cycles < 1:
+            raise ValueError("cycles must be a strictly positive integer.")
+        if any(getattr(solver, "requires_process_rho_pace", False) for solver in self._solvers.values()):
+            raise RuntimeError(
+                "Native Bioptim RHO-PACE requires IndependentArmProcessCoordinator: "
+                "one persistent RHO session per process, with a cycle barrier."
+            )
+        if not hasattr(pace, "equivalent_mean_torques") or not callable(getattr(pace, "observe", None)):
+            raise TypeError("pace must provide equivalent_mean_torques and observe().")
+        with self._lock:
+            results = None
+            events = []
+            for cycle_index in range(cycles):
+                torques = pace.equivalent_mean_torques
+                if not isinstance(torques, Mapping) or set(torques) != set(ARM_NAMES):
+                    raise ValueError("pace must provide right and left equivalent mean torques.")
+                self.set_equivalent_mean_torques(right_nm=torques["right"], left_nm=torques["left"])
+                if self.config.parallel:
+                    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="independent-arm") as pool:
+                        futures = {arm: pool.submit(self._solve_one, arm, 1) for arm in ARM_NAMES}
+                        results = {arm: futures[arm].result() for arm in ARM_NAMES}
+                else:
+                    results = {arm: self._solve_one(arm, 1) for arm in ARM_NAMES}
+                for arm, result in results.items():
+                    self._rho[arm] = result.rho_state
+                event = pace.observe(cycle_index, results["right"].metrics, results["left"].metrics)
+                events.append(event)
+                if event.get("status") == "refused":
+                    raise RuntimeError(f"Bilateral RHO-PACE stopped: {event.get('reason')}")
+            summary = self._summary(results)
+            # ``pace.observe`` has already installed the allocation for the
+            # next cycle in the live handles.  The persisted arm result must
+            # nevertheless describe the target that produced its final
+            # solution, and expose the live successor separately.
+            used = events[-1]["allocation_used_equivalent_mean_torque_nm"]
+            for arm in ARM_NAMES:
+                next_torque = summary["arms"][arm]["equivalent_mean_torque_nm"]
+                summary["arms"][arm].update({
+                    "equivalent_mean_torque_nm": used[arm],
+                    "target_work_j_per_cycle": used[arm] * 2.0 * math.pi,
+                    "next_equivalent_mean_torque_nm": next_torque,
+                    "next_target_work_j_per_cycle": next_torque * 2.0 * math.pi,
+                })
+            summary.update({"completed_rho_cycles": cycles, "cycle_synchronous": True,
+                            "resistance_pace": pace.audit() if callable(getattr(pace, "audit", None)) else {
+                                "events": events}})
+            return summary
+
     def _summary(self, results: Mapping[str, ArmRunResult]) -> dict[str, Any]:
         arms = {}
         for arm in ARM_NAMES:
@@ -222,7 +281,14 @@ class IndependentArmCoordinator:
         ``right/result.json`` and ``left/result.json`` expose arm-local RHO
         state/metrics; ``summary.json`` is their synchronised comparison.
         """
-        summary = self.run(cycles=cycles)
+        return self._write_summary(output_root, self.run(cycles=cycles))
+
+    def run_with_resistance_pace_to_directory(self, output_root: str | Path, pace: Any, *, cycles: int = 1) -> dict[str, Any]:
+        """Persist a cycle-synchronous paced run in the standard layout."""
+        return self._write_summary(output_root, self.run_with_resistance_pace(pace, cycles=cycles))
+
+    @staticmethod
+    def _write_summary(output_root: str | Path, summary: dict[str, Any]) -> dict[str, Any]:
         root = Path(output_root)
         for arm in ARM_NAMES:
             path = root / arm / "result.json"

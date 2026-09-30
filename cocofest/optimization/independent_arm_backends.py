@@ -9,7 +9,7 @@ the terminal ``E_prod`` bound and its numerical initial guess.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, ClassVar
 
 import numpy as np
 
@@ -47,20 +47,52 @@ def set_terminal_eprod_target(nmpc: Any, target_work_j: float) -> None:
         guess[0, 0] = target_work_j
 
 
-def _solution_metrics(solution: Any) -> dict[str, Any]:
+def _capacity_metrics(nmpc: Any, solution: Any) -> dict[str, Any]:
+    """Expose the terminal Ding reserve needed by the paced supervisor.
+
+    This reads the already-solved primal trajectory only.  A missing or
+    non-standard solution deliberately yields no reserve rather than causing
+    the supervisor to invent one; it will hold the last allocation.
+    """
+    try:
+        states = solution.decision_states()
+        nlp = nmpc.nlp[0]
+        models = getattr(getattr(nlp, "model", None), "muscles_dynamics_model", ())
+        scales = {f"A_{model.muscle_name}": float(model.a_scale) for model in models}
+        ratios = {}
+        for key, scale in scales.items():
+            values = np.asarray(states[key], dtype=float).reshape(-1)
+            if values.size and np.isfinite(scale) and scale > 0 and np.isfinite(values[-1]):
+                ratios[key] = float(values[-1] / scale)
+        if not ratios:
+            return {}
+        return {"capacity_ratios": ratios, "minimum_capacity_ratio": min(ratios.values())}
+    except (AttributeError, KeyError, TypeError, ValueError, IndexError):
+        return {}
+
+
+def _solution_metrics(solution: Any, nmpc: Any = None) -> dict[str, Any]:
     status = getattr(solution, "status", None)
     cost = float(getattr(solution, "cost", float("nan")))
-    return {
+    metrics = {
         "status": str(status),
         "success": status in (0, "0", "SUCCESS", "success"),
         "solver_time_s": float(getattr(solution, "real_time_to_optimize", 0.0) or 0.0),
         "cost": cost if np.isfinite(cost) else None,
     }
+    if nmpc is not None:
+        metrics.update(_capacity_metrics(nmpc, solution))
+    return metrics
 
 
 @dataclass
 class BioptimIndependentArmSolver:
     """One real unilateral Bioptim NLP solver, reused across RHO windows."""
+
+    # A full historical session is supported below, but calling solve_rho()
+    # independently does not implement the cyclic state/model transfer needed
+    # by a paced coordinator. Native solver state also must not cross threads.
+    requires_process_rho_pace: ClassVar[bool] = True
 
     nmpc: Any
     solver: Any
@@ -82,7 +114,7 @@ class BioptimIndependentArmSolver:
         solution = self.nmpc.solve(solver=self.solver, warm_start=warm_start)
         self._solution = solution
         next_state = self.advance_rho(self.nmpc, solution) if self.advance_rho else solution
-        return ArmRunResult(rho_state=next_state, metrics=_solution_metrics(solution))
+        return ArmRunResult(rho_state=next_state, metrics=_solution_metrics(solution, self.nmpc))
 
     def run_rho_cycles(self, cycles: int, rho_state: Any = None) -> ArmRunResult:
         """Use the historical NMPC update/advance loop for several RHO windows.
@@ -133,10 +165,21 @@ class BioptimIndependentArmSolver:
         )
         # The periodic driver returns a list of per-window solutions.  Keep it
         # as the RHO state so a caller can retain audit/provenance information.
-        final = solution[-1] if isinstance(solution, (list, tuple)) else solution
+        # The compact aggregate returned by Bioptim deliberately has no NLP
+        # status. The callback receives each actual window solution, including
+        # its IPOPT/ACADOS status, so use that for certification metadata.
+        final = completed[-1] if completed else (solution[-1] if isinstance(solution, (list, tuple)) else solution)
         self._solution = final
-        metrics = _solution_metrics(final)
-        metrics.update({"requested_rho_cycles": cycles, "returned_windows": len(completed)})
+        metrics = _solution_metrics(final, self.nmpc)
+        window_statuses = [str(getattr(item, "status", None)) for item in completed]
+        metrics.update({
+            "requested_rho_cycles": cycles,
+            "callback_windows": len(completed),
+            "returned_windows": len(completed),
+            "all_callback_statuses_success": all(
+                status in ("0", "SUCCESS", "success") for status in window_statuses
+            ),
+        })
         return ArmRunResult(rho_state=solution, metrics=metrics)
 
 

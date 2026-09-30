@@ -13,8 +13,17 @@ import argparse
 import importlib
 import json
 from pathlib import Path
+import sys
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from cocofest.simulation.independent_arms import IndependentArmCoordinator
+from cocofest.optimization.independent_arm_rho_pace import (
+    IndependentArmResistancePace,
+    IndependentArmRhoPaceConfig,
+)
 
 
 def _factory(specification: str):
@@ -52,9 +61,24 @@ def main(argv=None):
     if args.prefix is not None:
         payload.setdefault("runtime_prefix", str(args.prefix))
     coordinator = _factory(specification)(payload)
-    if not isinstance(coordinator, IndependentArmCoordinator):
-        raise TypeError("The factory must return an IndependentArmCoordinator.")
-    summary = coordinator.run_to_directory(args.output)
+    required = ("run_to_directory", "run_with_resistance_pace_to_directory")
+    if not isinstance(coordinator, IndependentArmCoordinator) and not all(
+        callable(getattr(coordinator, name, None)) for name in required
+    ):
+        raise TypeError("The factory must return an independent-arm coordinator with the public run methods.")
+    cycles = payload.get("cycles", 1)
+    if isinstance(cycles, bool) or not isinstance(cycles, int) or cycles < 1:
+        raise ValueError("'cycles' must be a strictly positive integer.")
+    pace_payload = payload.get("resistance_pace")
+    if pace_payload is None:
+        summary = coordinator.run_to_directory(args.output, cycles=cycles)
+    else:
+        if not isinstance(pace_payload, dict):
+            raise ValueError("'resistance_pace' must be an object.")
+        # The total is deliberately explicit: it must not silently drift when
+        # an operator changes one side in the GUI.
+        pace = IndependentArmResistancePace(IndependentArmRhoPaceConfig(**pace_payload))
+        summary = coordinator.run_with_resistance_pace_to_directory(args.output, pace, cycles=cycles)
     # A GUI may pre-plan a small load-balancing sequence.  It is deliberately
     # handled in this one process: the coordinator retains both compiled
     # handles, so each target update is an E_prod bound update rather than a
@@ -63,6 +87,8 @@ def main(argv=None):
     if not isinstance(adjustments, list):
         raise ValueError("'adjustments' must be a list of torque-update objects.")
     adjustment_summaries = []
+    if adjustments and not callable(getattr(coordinator, "set_equivalent_mean_torques", None)):
+        raise ValueError("Preplanned adjustments are unsupported by the process-synchronised coordinator.")
     for index, adjustment in enumerate(adjustments, start=1):
         if not isinstance(adjustment, dict):
             raise ValueError("Every adjustment must be an object.")

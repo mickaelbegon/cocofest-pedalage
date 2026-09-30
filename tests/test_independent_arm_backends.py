@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from cocofest.optimization.independent_arm_backends import (
     AcadosIndependentArmSolver,
     BioptimIndependentArmSolver,
+    _solution_metrics,
     build_driver_ipopt_independent_arms,
     set_terminal_eprod_target,
 )
@@ -39,6 +40,21 @@ class Nmpc:
     def solve(self, *, solver, warm_start):
         self.last_warm_start = warm_start
         return Solution()
+
+
+def test_solution_metrics_exposes_minimum_terminal_capacity_ratio_when_available():
+    nmpc = Nmpc()
+    capacity = type("Model", (), {"muscle_name": "biceps", "a_scale": 100.})()
+    nmpc.nlp[0].model = SimpleNamespace(muscles_dynamics_model=[capacity])
+    nmpc.nlp[0].states["A_biceps"] = type("State", (), {"index": np.array([1])})()
+
+    class CapacitySolution(Solution):
+        def decision_states(self):
+            return {"A_biceps": np.array([[100., 72.]])}
+
+    metrics = _solution_metrics(CapacitySolution(), nmpc)
+    assert metrics["minimum_capacity_ratio"] == pytest.approx(.72)
+    assert metrics["capacity_ratios"] == {"A_biceps": pytest.approx(.72)}
 
 
 def test_real_bioptim_adapter_updates_existing_terminal_bound_and_warmstarts():
@@ -119,3 +135,14 @@ def test_rho_session_uses_historical_multi_window_callback_not_repeated_single_s
     assert nmpc.calls == 3
     assert result.metrics["requested_rho_cycles"] == 3
     assert result.metrics["returned_windows"] == 3
+
+
+def test_native_adapter_refuses_legacy_single_solve_thread_pacing():
+    from cocofest.simulation.independent_arms import IndependentArmCoordinator
+    from cocofest.optimization.independent_arm_rho_pace import IndependentArmResistancePace, IndependentArmRhoPaceConfig
+
+    coordinator = IndependentArmCoordinator(
+        BioptimIndependentArmSolver(Nmpc(), object()), BioptimIndependentArmSolver(Nmpc(), object()))
+    pace = IndependentArmResistancePace(IndependentArmRhoPaceConfig(total_equivalent_mean_torque_nm=.3))
+    with pytest.raises(RuntimeError, match="IndependentArmProcessCoordinator"):
+        coordinator.run_with_resistance_pace(pace, cycles=2)
