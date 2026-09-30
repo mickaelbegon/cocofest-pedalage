@@ -13,7 +13,9 @@ from cocofest.dynamics.reduced_cycling import (
 from cocofest.models.ding2007.ding2007_with_fatigue import (
     DingModelPulseWidthFrequencyWithFatigue,
 )
-from cocofest.models.reduced_cycling_model import ReducedFesCyclingModel
+from cocofest.models.reduced_cycling_model import (
+    ReducedFesCyclingModel, duplicate_bilateral_muscles, make_bilateral_reduced_dynamics,
+)
 
 
 MUSCLE_NAMES = ("Delt_ant", "Delt_post", "Biceps", "Triceps")
@@ -190,6 +192,82 @@ def test_isokinetic_mode_rejects_ambiguous_constant_external_torque():
 def test_isokinetic_mode_rejects_nonnegative_speed(omega):
     with pytest.raises(ValueError, match="strictly negative"):
         _model(isokinetic=True, isokinetic_omega=omega)
+
+
+def test_prescribed_kinematics_removes_only_mechanical_states_and_roundtrips(monkeypatch):
+    configured = []
+    monkeypatch.setattr(
+        ConfigureVariables, "configure_new_variable",
+        staticmethod(lambda name, *args, **kwargs: configured.append(name)),
+    )
+    model = _model(
+        isokinetic=True, isokinetic_kinematics="prescribed",
+        isokinetic_theta0=0.7, isokinetic_time_origin=12.0, isokinetic_omega=-6.0,
+    )
+    for configure in model.state_configuration_functions:
+        configure(None, None)
+    assert len(configured) == model.nb_state == 21
+    assert configured[-1] == "E_prod"
+    assert "theta" not in configured and "omega" not in configured
+    constructor, kwargs = model.serialize()
+    restored = constructor(**kwargs)
+    assert restored.uses_prescribed_kinematics
+    assert restored.nb_state == 21
+    assert restored.prescribed_kinematics(12.125) == pytest.approx((-0.05, -6.0))
+
+
+@pytest.mark.parametrize("kwargs,match", [
+    ({"isokinetic_kinematics": "unknown"}, "must be 'states' or 'prescribed'"),
+    ({"isokinetic_kinematics": "prescribed"}, "requires isokinetic=True"),
+    ({"isokinetic_theta0": np.nan}, "must be finite"),
+    ({"isokinetic_time_origin": np.inf}, "must be finite"),
+])
+def test_prescribed_kinematics_rejects_invalid_configuration(kwargs, match):
+    with pytest.raises(ValueError, match=match):
+        _model(**kwargs)
+
+
+def test_prescribed_bilateral_and_slew_state_dimensions():
+    model = ReducedFesCyclingModel(
+        reduced_dynamics=make_bilateral_reduced_dynamics(_reduced_dynamics()),
+        muscles_model=duplicate_bilateral_muscles(_ding_models()),
+        isokinetic=True, isokinetic_kinematics="prescribed",
+        activate_force_length_relationship=False,
+        activate_force_velocity_relationship=False,
+        activate_passive_force_relationship=False,
+    )
+    assert model.nb_state == 41
+    unilateral_lift = _model(
+        isokinetic=True, isokinetic_kinematics="prescribed",
+        pulse_width_max_step_s=100e-6, pulse_width_interval_s=1 / 30,
+    )
+    assert unilateral_lift.nb_state == 25
+
+
+def test_prescribed_collocation_retains_only_physiology_and_work_defects(monkeypatch):
+    monkeypatch.setattr(
+        DynamicsFunctions, "get", staticmethod(lambda variable, vector: vector[variable]),
+    )
+    model = _fake_dynamics_model(isokinetic=True, isokinetic_kinematics="prescribed")
+    state_names = [
+        f"{state}_{muscle}" for muscle in MUSCLE_NAMES for state in _FakeMuscle.name_dof
+    ] + ["E_prod"]
+    control_names = [f"last_pulse_width_{muscle}" for muscle in MUSCLE_NAMES]
+    state_dot = DM(np.arange(21))
+    nlp = SimpleNamespace(
+        states={name: index for index, name in enumerate(state_names)},
+        controls={name: index for index, name in enumerate(control_names)},
+        dynamics_type=SimpleNamespace(ode_solver=OdeSolver.COLLOCATION(polynomial_degree=5, method="radau")),
+        states_dot=SimpleNamespace(scaled=SimpleNamespace(cx=state_dot)),
+        dt=1.0 / 30.0,
+    )
+    result = model.dynamics(
+        time=0.1, states=DM.zeros(21), controls=DM.zeros(4), parameters=DM(),
+        algebraic_states=DM(), numerical_data_timeseries=DM(), nlp=nlp,
+    )
+    assert result.dxdt.shape == (21, 1)
+    assert result.defects.shape == (21, 1)
+    np.testing.assert_allclose(result.defects, (state_dot - result.dxdt) / 30.0)
 
 
 class _FakeMuscle:

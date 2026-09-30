@@ -130,6 +130,11 @@ class ReducedFesCyclingModel(StateDynamics):
     against that load. The default remains the original 22-state
     forward-dynamics model.
 
+    ``isokinetic_kinematics="prescribed"`` removes both mechanical states
+    from an isokinetic problem. Their exact values are reconstructed from
+    ``theta0 + omega * (time - time_origin)`` at each integrator stage;
+    no interpolation of the Hill or inverse-dynamics expressions is used.
+
     Optional PW slew carriers and bounded delta_pw controls only constrain
     successive physical PW controls. Ding dynamics keep using the physical
     zero-order-held controls, never the carrier or its increment.
@@ -143,6 +148,9 @@ class ReducedFesCyclingModel(StateDynamics):
         external_crank_torque: float = 0.0,
         isokinetic: bool = False,
         isokinetic_omega: float = -2.0 * math.pi,
+        isokinetic_kinematics: str = "states",
+        isokinetic_theta0: float | None = None,
+        isokinetic_time_origin: float = 0.0,
         activate_force_length_relationship: bool = True,
         activate_force_velocity_relationship: bool = True,
         activate_passive_force_relationship: bool = True,
@@ -160,6 +168,11 @@ class ReducedFesCyclingModel(StateDynamics):
         self.external_crank_torque = float(external_crank_torque)
         self.isokinetic = bool(isokinetic)
         self.isokinetic_omega = float(isokinetic_omega)
+        self.isokinetic_kinematics = str(isokinetic_kinematics)
+        if self.isokinetic_kinematics not in ("states", "prescribed"):
+            raise ValueError("isokinetic_kinematics must be 'states' or 'prescribed'.")
+        if self.isokinetic_kinematics == "prescribed" and not self.isokinetic:
+            raise ValueError("Prescribed kinematics requires isokinetic=True.")
         self.activate_force_length_relationship = bool(
             activate_force_length_relationship
         )
@@ -256,6 +269,13 @@ class ReducedFesCyclingModel(StateDynamics):
                 "The reduced profile must include muscle geometry when Hill "
                 "relationships are enabled."
             )
+        self.isokinetic_theta0 = float(
+            reduced_dynamics.kinematics.theta_origin
+            if isokinetic_theta0 is None else isokinetic_theta0
+        )
+        self.isokinetic_time_origin = float(isokinetic_time_origin)
+        if not math.isfinite(self.isokinetic_theta0) or not math.isfinite(self.isokinetic_time_origin):
+            raise ValueError("isokinetic_theta0 and isokinetic_time_origin must be finite.")
         self.dynamic_inverse_reference_inertia = 1.0
         if self.dynamic_mechanical_residual == "implicit_inverse":
             # A positive, fixed reference makes the experimental implicit
@@ -285,10 +305,39 @@ class ReducedFesCyclingModel(StateDynamics):
 
     @property
     def nb_state(self) -> int:
-        return 5 * len(self.muscles_dynamics_model) + 2 + int(self.isokinetic) + (
+        return 5 * len(self.muscles_dynamics_model) + 2 * int(not self.uses_prescribed_kinematics) + int(self.isokinetic) + (
             len(self.muscles_dynamics_model)
             if self.uses_pulse_width_slew_lifting or self.pulse_width_control_mode == PW_RATE_MODE else 0
         )
+
+    @property
+    def uses_prescribed_kinematics(self) -> bool:
+        return self.isokinetic_kinematics == "prescribed"
+
+    def prescribed_kinematics(self, time):
+        """Return the exact crank angle/speed at physical time (including stages).
+
+        ``time_origin`` and ``theta0`` define the same physical reference point.
+        A caller that resets local time between RHO windows must retain the
+        matching initial phase when constructing its OCP.
+        """
+        if not self.uses_prescribed_kinematics:
+            raise ValueError("Prescribed kinematics is not enabled on this model.")
+        return (
+            self.isokinetic_theta0 + self.isokinetic_omega * (time - self.isokinetic_time_origin),
+            self.isokinetic_omega,
+        )
+
+    def mechanical_state(self, time, states, nlp):
+        """Mechanical values shared by dynamics and stage-wise constraints."""
+        if self.uses_prescribed_kinematics:
+            return self.prescribed_kinematics(time)
+        theta = DynamicsFunctions.get(nlp.states["theta"], states)
+        omega = (
+            self.isokinetic_omega if self.isokinetic
+            else DynamicsFunctions.get(nlp.states["omega"], states)
+        )
+        return theta, omega
 
     @property
     def uses_pulse_width_slew_lifting(self) -> bool:
@@ -322,16 +371,17 @@ class ReducedFesCyclingModel(StateDynamics):
                         muscle_name=muscle_model.muscle_name,
                     )
                 )
-        functions.extend(
-            (
-                lambda ocp, nlp: ConfigureVariables.configure_new_variable(
-                    "theta", ["physical_crank_angle"], ocp, nlp, as_states=True
-                ),
-                lambda ocp, nlp: ConfigureVariables.configure_new_variable(
-                    "omega", ["physical_crank_angular_velocity"], ocp, nlp, as_states=True
-                ),
+        if not self.uses_prescribed_kinematics:
+            functions.extend(
+                (
+                    lambda ocp, nlp: ConfigureVariables.configure_new_variable(
+                        "theta", ["physical_crank_angle"], ocp, nlp, as_states=True
+                    ),
+                    lambda ocp, nlp: ConfigureVariables.configure_new_variable(
+                        "omega", ["physical_crank_angular_velocity"], ocp, nlp, as_states=True
+                    ),
+                )
             )
-        )
         if self.isokinetic:
             functions.append(
                 lambda ocp, nlp: ConfigureVariables.configure_new_variable(
@@ -383,6 +433,9 @@ class ReducedFesCyclingModel(StateDynamics):
                 "external_crank_torque": self.external_crank_torque,
                 "isokinetic": self.isokinetic,
                 "isokinetic_omega": self.isokinetic_omega,
+                "isokinetic_kinematics": self.isokinetic_kinematics,
+                "isokinetic_theta0": self.isokinetic_theta0,
+                "isokinetic_time_origin": self.isokinetic_time_origin,
                 "activate_force_length_relationship": self.activate_force_length_relationship,
                 "activate_force_velocity_relationship": self.activate_force_velocity_relationship,
                 "activate_passive_force_relationship": self.activate_passive_force_relationship,
@@ -455,9 +508,7 @@ class ReducedFesCyclingModel(StateDynamics):
         numerical_data_timeseries: MX | SX,
         nlp: NonLinearProgram,
     ) -> DynamicsEvaluation:
-        theta = DynamicsFunctions.get(nlp.states["theta"], states)
-        omega = DynamicsFunctions.get(nlp.states["omega"], states)
-        mechanical_omega = self.isokinetic_omega if self.isokinetic else omega
+        theta, mechanical_omega = self.mechanical_state(time, states, nlp)
         if (
             self.activate_force_length_relationship
             or self.activate_force_velocity_relationship
@@ -543,20 +594,19 @@ class ReducedFesCyclingModel(StateDynamics):
                 )
                 * mechanical_omega
             )
-            dxdt = vertcat(
-                *muscle_derivatives,
-                self.isokinetic_omega,
-                0.0,
-                energy_dot,
+            mechanical_derivatives = (
+                [energy_dot] if self.uses_prescribed_kinematics
+                else [self.isokinetic_omega, 0.0, energy_dot]
             )
+            dxdt = vertcat(*muscle_derivatives, *mechanical_derivatives)
         else:
             omega_dot = self.reduced_dynamics.casadi_acceleration(
                 theta,
-                omega,
+                mechanical_omega,
                 vertcat(*muscle_forces),
                 self.external_crank_torque,
             )
-            dxdt = vertcat(*muscle_derivatives, omega, omega_dot)
+            dxdt = vertcat(*muscle_derivatives, mechanical_omega, omega_dot)
         if self.uses_pulse_width_slew_lifting:
             dxdt = vertcat(dxdt, auxiliary_rhs(self, states, controls, nlp))
         if self.pulse_width_control_mode == PW_RATE_MODE:

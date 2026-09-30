@@ -135,6 +135,7 @@ BENCHMARK_CONFIGURATION_FIELDS = (
     "model_formulation",
     "mechanical_formulation",
     "formulation",
+    "isokinetic_kinematics",
     "isokinetic_omega",
     "energy_equivalent_torque",
     "energy_target_j",
@@ -4021,6 +4022,7 @@ def main(
     mechanical_formulation: str = "reduced",
     bilateral_reduced: bool = False,
     formulation: str = "dynamic",
+    isokinetic_kinematics: str = "states",
     reduced_dynamic_residual: str = "direct",
     energy_equivalent_torque: float = 0.2,
     isokinetic_omega: float = -float(2 * np.pi),
@@ -5317,6 +5319,14 @@ def main(
         raise ValueError(
             "The isokinetic formulation currently requires reduced mechanics."
         )
+    if isokinetic_kinematics not in ("states", "prescribed"):
+        raise ValueError("isokinetic_kinematics must be 'states' or 'prescribed'.")
+    if isokinetic_kinematics == "prescribed" and (
+        formulation != "isokinetic" or mechanical_formulation != "reduced"
+    ):
+        raise ValueError(
+            "Prescribed isokinetic kinematics require reduced isokinetic mechanics."
+        )
     if not np.isfinite(energy_equivalent_torque) or energy_equivalent_torque < 0:
         raise ValueError("energy_equivalent_torque must be finite and non-negative.")
     if not np.isfinite(isokinetic_omega) or isokinetic_omega >= 0:
@@ -5332,6 +5342,7 @@ def main(
     for solver_configuration in solver_args.values():
         solver_configuration.bilateral_reduced = bilateral_reduced
         solver_configuration.formulation = formulation
+        solver_configuration.isokinetic_kinematics = isokinetic_kinematics
         solver_configuration.reduced_dynamic_residual = reduced_dynamic_residual
         solver_configuration.energy_equivalent_torque = float(
             energy_equivalent_torque
@@ -5499,6 +5510,12 @@ def build_cli() -> argparse.ArgumentParser:
         choices=("dynamic", "isokinetic"),
         default="dynamic",
         help="Use forward crank dynamics or the reduced isokinetic inverse dynamics.",
+    )
+    parser.add_argument(
+        "--isokinetic-kinematics",
+        choices=("states", "prescribed"),
+        default="states",
+        help="Keep theta/omega as NLP states or prescribe their exact isokinetic trajectory.",
     )
     parser.add_argument(
         "--reduced-dynamic-residual",
@@ -7171,6 +7188,7 @@ if __name__ == "__main__":
         mechanical_formulation=args.mechanical_formulation,
         bilateral_reduced=args.bilateral_reduced,
         formulation=args.formulation,
+        isokinetic_kinematics=args.isokinetic_kinematics,
         reduced_dynamic_residual=args.reduced_dynamic_residual,
         energy_equivalent_torque=args.energy_equivalent_torque,
         isokinetic_omega=args.isokinetic_omega,

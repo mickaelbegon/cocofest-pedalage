@@ -62,6 +62,10 @@ from cocofest.optimization.endurance_rollout_ocp import (
 )
 from cocofest.optimization.muscle_horizon_ocp import MuscleHorizonBinding
 from cocofest.optimization.parametric_fatigue_weights import ParametricFatigueWeightBinding
+from cocofest.optimization.task_reserve_ocp import (
+    TaskReserveObjectiveBinding,
+    task_reserve_parameter_options,
+)
 from cocofest.optimization.pulse_width_slew import (
     PREFIX as PW_SLEW_PREFIX,
     add_auxiliary_bounds_and_guesses,
@@ -209,18 +213,25 @@ class MyCyclicNMPC(FesNmpcMsk):
         self.advance_wheel_q_bounds = False
         self.anchor_terminal_wheel_to_first_node = False
         self.anchor_wheel_q_to_absolute_reference = False
-        self.position_state_key = (
-            "theta" if "theta" in self.nlp[0].states else "q"
-        )
-        self.velocity_state_key = (
-            "omega" if "omega" in self.nlp[0].states else "qdot"
-        )
-        self.wheel_state_index = 0 if self.position_state_key == "theta" else 2
-        self.absolute_wheel_q_reference = float(
-            np.asarray(
-                self.nlp[0].x_init[self.position_state_key].init, dtype=float
-            )[self.wheel_state_index, 0]
-        )
+        reduced_model = getattr(self.nlp[0].model, "bio_model", self.nlp[0].model)
+        if getattr(reduced_model, "uses_prescribed_kinematics", False):
+            self.position_state_key = None
+            self.velocity_state_key = None
+            self.wheel_state_index = 0
+            self.absolute_wheel_q_reference = float(reduced_model.isokinetic_theta0)
+        else:
+            self.position_state_key = (
+                "theta" if "theta" in self.nlp[0].states else "q"
+            )
+            self.velocity_state_key = (
+                "omega" if "omega" in self.nlp[0].states else "qdot"
+            )
+            self.wheel_state_index = 0 if self.position_state_key == "theta" else 2
+            self.absolute_wheel_q_reference = float(
+                np.asarray(
+                    self.nlp[0].x_init[self.position_state_key].init, dtype=float
+                )[self.wheel_state_index, 0]
+            )
         self.absolute_wheel_q_cycle_shift = None
         self.absolute_wheel_q_cycle_index = 0
         self.wheel_q_path_margin = 2.0
@@ -555,7 +566,7 @@ class MyCyclicNMPC(FesNmpcMsk):
                     self.nlp[0].x_bounds[key].min[i, 0] = center - slack
                     self.nlp[0].x_bounds[key].max[i, 0] = center + slack
 
-        if self.transfer_debug:
+        if self.transfer_debug and position_state_key is not None:
             q_cycle = states[position_state_key][wheel_state_index][
                 self.nodes_per_cycle
             ]
@@ -1283,6 +1294,7 @@ def prepare_nmpc(
     muscle_horizon_options = simulation_conditions.get("muscle_horizon_options")
     muscle_horizon_binding = None
     fatigue_weight_binding = simulation_conditions.get("fatigue_weight_binding")
+    task_reserve_binding = simulation_conditions.get("task_reserve_binding")
     mechanical_reserve_binding = simulation_conditions.get("mechanical_reserve_binding")
     control_regularization_weight = simulation_conditions.get(
         "control_regularization_weight", 0.0
@@ -1401,6 +1413,23 @@ def prepare_nmpc(
     formulation = simulation_conditions.get("formulation", "dynamic")
     if formulation not in ("dynamic", "isokinetic"):
         raise ValueError("formulation must be 'dynamic' or 'isokinetic'.")
+    isokinetic_kinematics = simulation_conditions.get("isokinetic_kinematics", "states")
+    if isokinetic_kinematics not in ("states", "prescribed"):
+        raise ValueError("isokinetic_kinematics must be 'states' or 'prescribed'.")
+    if isokinetic_kinematics == "prescribed" and (
+        formulation != "isokinetic" or mechanical_formulation != "reduced"
+    ):
+        raise ValueError(
+            "Prescribed isokinetic kinematics require reduced isokinetic mechanics."
+        )
+    if isokinetic_kinematics == "prescribed" and (
+        enforce_reduced_internal_crank_velocity_guard
+        or enforce_reduced_terminal_half_step_velocity_guard
+    ):
+        raise ValueError(
+            "Prescribed isokinetic kinematics already fix omega exactly; "
+            "disable reduced crank-velocity guards."
+        )
     isokinetic_config = None
     if formulation == "isokinetic":
         if mechanical_formulation != "reduced":
@@ -1489,12 +1518,13 @@ def prepare_nmpc(
             if ode_solver.is_direct_collocation
             else InterpolationType.EACH_FRAME
         )
-        x_init.add(
-            "theta", theta_init, interpolation=mechanical_interpolation
-        )
-        x_init.add(
-            "omega", omega_init, interpolation=mechanical_interpolation
-        )
+        if isokinetic_kinematics == "states":
+            x_init.add(
+                "theta", theta_init, interpolation=mechanical_interpolation
+            )
+            x_init.add(
+                "omega", omega_init, interpolation=mechanical_interpolation
+            )
         bilateral_reduced = bool(
             simulation_conditions.get("bilateral_reduced", False)
         )
@@ -1522,6 +1552,7 @@ def prepare_nmpc(
                 else float(constant_crank_torque or 0.0)
             ),
             isokinetic=isokinetic_config is not None,
+            isokinetic_kinematics=isokinetic_kinematics,
             isokinetic_omega=(
                 isokinetic_config.omega_target_rad_s
                 if isokinetic_config is not None
@@ -1655,6 +1686,18 @@ def prepare_nmpc(
             raise ValueError("Experimental projected reserve requires SX isokinetic one-cycle RHO.")
         if not np.isclose(sum(mechanical_reserve_binding.durations), cycle_duration, rtol=1e-9):
             raise ValueError("Projected reserve durations must span one physical cycle.")
+    if task_reserve_binding is not None:
+        if not isinstance(task_reserve_binding, TaskReserveObjectiveBinding):
+            raise TypeError("task_reserve_binding must be a TaskReserveObjectiveBinding.")
+        if not use_sx or isokinetic_config is None or n_cycles_simultaneous != 1:
+            raise ValueError("Experimental task reserve requires SX reduced isokinetic one-cycle RHO.")
+        task_reserve_binding.validate_build_context(
+            model_path=simulation_conditions.get("task_reserve_model_path"),
+            cycle_period_s=float(cycle_duration), cycle_len=int(cycle_len),
+            formulation=formulation, mechanical_formulation=mechanical_formulation,
+            nominal_work_j=float(isokinetic_config.energy_target_j),
+            terminal_half_step_guard=enforce_reduced_terminal_half_step_velocity_guard,
+        )
     if muscle_horizon_options is not None and muscle_horizon_options.weight > 0.0:
         muscle_horizon_options.profile.validate_model(model, control_bounds=u_bounds)
         muscle_horizon_binding = MuscleHorizonBinding(
@@ -1754,6 +1797,19 @@ def prepare_nmpc(
             model.muscles_dynamics_model, scale=pulse_width_scaling, n_shooting=window_n_shooting,
             constraints=constraints,
         )
+    if isinstance(model, ReducedFesCyclingModel) and model.uses_prescribed_kinematics:
+        if any((wheel_qdot_regularization_weight,
+                terminal_qdot_regularization_weight,
+                terminal_wheel_regularization_weight)):
+            raise ValueError(
+                "Mechanical state regularization is unavailable with prescribed "
+                "isokinetic kinematics; theta and omega are fixed exactly."
+            )
+        if not any((minimize_force, minimize_fatigue, minimize_control)):
+            raise ValueError(
+                "Prescribed isokinetic kinematics require a force, fatigue, or "
+                "control objective; the terminal angle is already fixed."
+            )
     objective_functions = set_objective_functions(
         model,
         minimize_force,
@@ -1761,7 +1817,12 @@ def prepare_nmpc(
         minimize_control,
         cost_fun_weight,
         target=(
-            x_init["theta"].init[0][-1]
+            (
+                model.isokinetic_theta0
+                + model.isokinetic_omega * window_cycle_duration
+                if model.uses_prescribed_kinematics
+                else x_init["theta"].init[0][-1]
+            )
             if mechanical_formulation == "reduced"
             else x_init["q"].init[2][-1]
         ),
@@ -1771,6 +1832,7 @@ def prepare_nmpc(
         endurance_rollout_binding=rollout_binding,
         muscle_horizon_binding=muscle_horizon_binding,
         fatigue_weight_binding=fatigue_weight_binding,
+        task_reserve_binding=task_reserve_binding,
         mechanical_reserve_binding=mechanical_reserve_binding,
         control_regularization_weight=control_regularization_weight,
         control_regularization_target=control_regularization_target,
@@ -1778,7 +1840,11 @@ def prepare_nmpc(
         wheel_qdot_regularization_target=wheel_qdot_regularization_target,
         terminal_qdot_regularization_weight=terminal_qdot_regularization_weight,
         terminal_qdot_regularization_target=(
-            x_init["omega"].init[:, -1]
+            (
+                np.array([model.isokinetic_omega])
+                if model.uses_prescribed_kinematics
+                else x_init["omega"].init[:, -1]
+            )
             if mechanical_formulation == "reduced"
             else x_init["qdot"].init[:, -1]
         ),
@@ -1833,15 +1899,24 @@ def prepare_nmpc(
     if "ordering_strategy" in mhe_info:
         nmpc_options["ordering_strategy"] = mhe_info["ordering_strategy"]
     parameter_bindings = tuple(
-        binding for binding in (rollout_binding, muscle_horizon_binding, fatigue_weight_binding, mechanical_reserve_binding)
+        binding for binding in (rollout_binding, muscle_horizon_binding, fatigue_weight_binding,
+                                mechanical_reserve_binding, task_reserve_binding)
         if binding is not None
     )
-    if len(parameter_bindings) > 1:
+    task_reserve_with_fatigue = (
+        task_reserve_binding is not None and fatigue_weight_binding is not None
+        and len(parameter_bindings) == 2
+    )
+    if len(parameter_bindings) > 1 and not task_reserve_with_fatigue:
         raise ValueError(
-            "Only one fixed-parameter binding is currently supported per NMPC; "
-            "combine fatigue PACE with rollout/horizon only after parameter-list merging is validated."
+            "Only one fixed-parameter binding is supported per NMPC, except for the explicit "
+            "experimental task-reserve + fatigue-weight pair; other parameter-list merges are unvalidated."
         )
-    if fatigue_weight_binding is not None:
+    if task_reserve_binding is not None:
+        nmpc_options.update(task_reserve_parameter_options(
+            task_reserve_binding, fatigue_weight_binding=fatigue_weight_binding, use_sx=use_sx,
+        ))
+    elif fatigue_weight_binding is not None:
         nmpc_options.update(fatigue_weight_binding.parameter_options(use_sx=use_sx))
     elif rollout_binding is not None:
         nmpc_options.update(rollout_binding.parameter_options(use_sx=use_sx))
@@ -1862,6 +1937,9 @@ def prepare_nmpc(
     if mechanical_reserve_binding is not None:
         mechanical_reserve_binding.attach(nmpc)
         nmpc.mechanical_reserve_binding = mechanical_reserve_binding
+    if task_reserve_binding is not None:
+        task_reserve_binding.attach(nmpc)
+        nmpc.task_reserve_binding = task_reserve_binding
     nmpc.isokinetic_config = isokinetic_config
     if isokinetic_config is not None:
         nmpc._isokinetic_energy_seed_fraction = (
@@ -2249,8 +2327,12 @@ def set_reduced_x_bounds(
             interpolation=interpolation_type,
         )
 
-    theta_values = np.asarray(x_init["theta"].init, dtype=float)
-    theta_start = float(theta_values[0, 0])
+    prescribed = bool(getattr(model, "uses_prescribed_kinematics", False))
+    theta_start = (
+        model.isokinetic_theta0
+        if prescribed
+        else float(np.asarray(x_init["theta"].init, dtype=float)[0, 0])
+    )
     if isokinetic_config is not None:
         time_grid = state_initial_guess_time_grid(
             n_shooting=n_shooting,
@@ -2262,8 +2344,11 @@ def set_reduced_x_bounds(
             theta_start
             + isokinetic_config.omega_target_rad_s * time_grid[np.newaxis, :]
         )
-        x_init["theta"].init[:, :] = theta_values
-        x_init["omega"].init[:, :] = isokinetic_config.omega_target_rad_s
+        if not prescribed:
+            x_init["theta"].init[:, :] = theta_values
+            x_init["omega"].init[:, :] = isokinetic_config.omega_target_rad_s
+    else:
+        theta_values = np.asarray(x_init["theta"].init, dtype=float)
     theta_end = float(theta_values[0, -1])
     theta_slack = 0.0 if isokinetic_config is not None else 0.05
     theta_min = np.array(
@@ -2286,12 +2371,13 @@ def set_reduced_x_bounds(
         # equality to the NLP.
         theta_min[0, 1:] = -ISOKINETIC_FREE_BOUND
         theta_max[0, 1:] = ISOKINETIC_FREE_BOUND
-    x_bounds.add(
-        "theta",
-        min_bound=theta_min,
-        max_bound=theta_max,
-        interpolation=InterpolationType.CONSTANT_WITH_FIRST_AND_LAST_DIFFERENT,
-    )
+    if not prescribed:
+        x_bounds.add(
+            "theta",
+            min_bound=theta_min,
+            max_bound=theta_max,
+            interpolation=InterpolationType.CONSTANT_WITH_FIRST_AND_LAST_DIFFERENT,
+        )
     # Match the full formulation exactly. The warm-start omega remains
     # variable, but it must not silently recenter the physical OCP bounds.
     expected_omega = (
@@ -2316,12 +2402,13 @@ def set_reduced_x_bounds(
         omega_max[0, 0] = expected_omega
         omega_min[0, 1:] = -ISOKINETIC_FREE_BOUND
         omega_max[0, 1:] = ISOKINETIC_FREE_BOUND
-    x_bounds.add(
-        "omega",
-        min_bound=omega_min,
-        max_bound=omega_max,
-        interpolation=InterpolationType.CONSTANT_WITH_FIRST_AND_LAST_DIFFERENT,
-    )
+    if not prescribed:
+        x_bounds.add(
+            "omega",
+            min_bound=omega_min,
+            max_bound=omega_max,
+            interpolation=InterpolationType.CONSTANT_WITH_FIRST_AND_LAST_DIFFERENT,
+        )
     if isokinetic_config is not None:
         validate_external_torque_effectiveness(
             model.reduced_dynamics, theta_values[0]
@@ -2359,8 +2446,9 @@ def set_x_scaling(bio_model, mode: str = "none") -> VariableScalingList | None:
 
     if mode == "full":
         if isinstance(bio_model, ReducedFesCyclingModel):
-            x_scaling.add(key="theta", scaling=[2 * np.pi])
-            x_scaling.add(key="omega", scaling=[2 * np.pi])
+            if not bio_model.uses_prescribed_kinematics:
+                x_scaling.add(key="theta", scaling=[2 * np.pi])
+                x_scaling.add(key="omega", scaling=[2 * np.pi])
             if bio_model.isokinetic:
                 x_scaling.add(key="E_prod", scaling=[1.0])
         else:
@@ -2844,11 +2932,10 @@ def reduced_isokinetic_load_torque_constraint(controller):
             for muscle_model in reduced_model.muscles_dynamics_model
         ]
     )
-    return reduced_model.required_load_torque(
-        controller.states["theta"].cx,
-        reduced_model.isokinetic_omega,
-        muscle_forces,
+    theta, omega = reduced_model.mechanical_state(
+        controller.time.cx, controller.states.cx, controller.get_nlp
     )
+    return reduced_model.required_load_torque(theta, omega, muscle_forces)
 
 
 def physical_crank_velocity_all_collocation_points_constraint(
@@ -3189,6 +3276,8 @@ def set_constraints(
 
     if wheel_cycle_boundary_slack is None or n_cycles_simultaneous <= 1:
         return constraints
+    if is_reduced and bio_model.uses_prescribed_kinematics:
+        return constraints
     if wheel_cycle_boundary_slack < 0:
         raise ValueError("Wheel cycle-boundary slack must be non-negative.")
     if x_init is None or cycle_len is None:
@@ -3242,6 +3331,7 @@ def set_objective_functions(
     muscle_horizon_binding=None,
     fatigue_weight_binding=None,
     mechanical_reserve_binding=None,
+    task_reserve_binding=None,
 ):
     try:
         terminal_reserve_weight = float(terminal_reserve_weight)
@@ -3260,6 +3350,15 @@ def set_objective_functions(
         raise ValueError("terminal_reserve_temperature must be finite and positive.")
 
     objective_functions = ObjectiveList()
+    if task_reserve_binding is not None:
+        objective_functions.add(
+            CustomObjective.minimize_terminal_task_reserve,
+            custom_type=ObjectiveFcn.Mayer,
+            node=Node.END,
+            weight=1.0,
+            quadratic=False,
+            binding=task_reserve_binding,
+        )
     if mechanical_reserve_binding is not None:
         objective_functions.add(
             CustomObjective.minimize_terminal_projected_mechanical_reserve,

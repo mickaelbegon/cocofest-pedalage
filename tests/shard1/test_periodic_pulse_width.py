@@ -63,6 +63,63 @@ def _muscle_model():
     )
 
 
+def test_prescribed_isokinetic_trace_uses_exact_stage_times_and_cycle_phase():
+    model = SimpleNamespace(
+        uses_prescribed_kinematics=True,
+        isokinetic_time_origin=0.0,
+        isokinetic_omega=-2.0 * np.pi,
+        prescribed_kinematics=lambda time: (1.2 - 2.0 * np.pi * time, -2.0 * np.pi),
+    )
+    stages = np.array([0.0, 0.0173, 0.0821, 0.1])
+    original = {"F_Biceps": np.ones((1, stages.size))}
+    traces = periodic_example._states_with_prescribed_kinematics(
+        original, stages, model, cycle_index=2
+    )
+    np.testing.assert_allclose(traces["theta"][0], 1.2 - 2.0 * np.pi * (stages + 2.0))
+    np.testing.assert_allclose(traces["omega"], -2.0 * np.pi)
+    assert "theta" not in original
+
+
+def test_compact_prescribed_rho_reconstructs_crank_without_an_ocp():
+    from cocofest.optimization.fes_nmpc_multibody import CompactNmpcSolution
+
+    model = SimpleNamespace(
+        uses_prescribed_kinematics=True,
+        isokinetic_time_origin=0.0,
+        isokinetic_omega=-2.0 * np.pi,
+        pulse_width_interval_s=0.5,
+        prescribed_kinematics=lambda time: (0.3 - 2.0 * np.pi * time, -2.0 * np.pi),
+    )
+    merged = CompactNmpcSolution(
+        states={"F_Biceps": np.ones((1, 3))},
+        controls={"pulse_width_Biceps": np.ones((1, 2))},
+    )
+    trace = periodic_example._wheel_trace_from_exported_cycles(merged, [], model)
+    np.testing.assert_allclose(trace, [0.3, 0.3 - np.pi, 0.3 - 2.0 * np.pi])
+    states = periodic_example._state_traces_from_exported_cycles(merged, [], model)
+    np.testing.assert_allclose(states["omega"], -2.0 * np.pi)
+    two_cycles = periodic_example._wheel_trace_from_exported_cycles(
+        merged, [merged, merged], model
+    )
+    np.testing.assert_allclose(
+        two_cycles,
+        [0.3, 0.3 - np.pi, 0.3 - 2.0 * np.pi, 0.3 - 3.0 * np.pi, 0.3 - 4.0 * np.pi],
+    )
+    exported_states = periodic_example._state_traces_from_exported_cycles(
+        merged, [merged, merged], model
+    )
+    np.testing.assert_allclose(exported_states["theta"][0], two_cycles)
+
+
+def test_prescribed_isokinetic_acados_auto_uses_feasible_full_condensing_qp():
+    args = SimpleNamespace(
+        acados_qp_solver="auto",
+        pulse_width_max_step_us=None,
+        isokinetic_kinematics="prescribed",
+    )
+    assert periodic_example.resolve_acados_qp_solver(args) == "FULL_CONDENSING_HPIPM"
+
+
 def test_full_contact_stabilization_constrains_every_shooting_node(
     monkeypatch,
 ):

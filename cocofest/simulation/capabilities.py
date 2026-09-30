@@ -32,6 +32,7 @@ class CapabilityRegistry:
         "solver": ("ipopt", "madnlp", "fatrop", "acados"),
         "mechanics": ("reduced", "full"),
         "formulation": ("dynamic", "isokinetic"),
+        "isokinetic_kinematics": ("states", "prescribed"),
         "integration": ("radau", "irk"),
         "pulse_width_slew_formulation": ("lifting", "direct_constraints"),
         "reduced_internal_crank_velocity_guard": ("auto", "on", "off"),
@@ -44,6 +45,7 @@ class CapabilityRegistry:
     }
     FIELD_HELP = {
         "formulation": "Dynamic: free crank dynamics; isokinetic: prescribed angular velocity.",
+        "isokinetic_kinematics": "states conserve theta/omega comme états du NLP ; prescribed les élimine par la trajectoire isocinétique exacte.",
         "pulse_width_max_step_us": "Hard ΔPW bound between successive controls, including executed RHO boundaries (µs).",
         "pulse_width_slew_formulation": "lifting adds previous-PW states; direct_constraints bounds successive controls without extra states (IPOPT/MadNLP only). Both enforce the executed RHO seam.",
         "pulse_width_slew_weight": "Weight of mean squared normalized intra-window ΔPW; requires a hard bound. Executed RHO seams are only bounded.",
@@ -54,7 +56,7 @@ class CapabilityRegistry:
         "common_initial_solution": "Seed NLP commun certifié (.npz) pour les comparaisons IPOPT/MadNLP. Il doit correspondre au modèle, à la transcription, aux contrôles et aux contraintes ; le moteur vérifie sa provenance et sa compatibilité. ACADOS utilise le champ dédié au seed IPOPT du cycle 1.",
         "reduced_internal_crank_velocity_guard": "Reduced free-cadence guard. auto enables it for ACADOS and exact cycle-1 seed producers; standalone IPOPT/MadNLP require on to enable it.",
         "reduced_terminal_half_step_velocity_guard": "Bounds an Euler half-step cadence prediction from the terminal state before the next RHO window. Requires reduced dynamic mechanics and an active internal guard. This local predictor does not certify all next-cycle constraints.",
-        "acados_qp_solver": "ACADOS QP backend: auto uses full-condensing HPIPM with a ΔPW bound and partial-condensing HPIPM otherwise.",
+        "acados_qp_solver": "ACADOS QP backend: auto uses full-condensing HPIPM with a ΔPW bound or prescribed isokinetic kinematics, and partial-condensing HPIPM otherwise.",
         "acados_ding_local_reduction": "Experimental local Ding reconstruction: ACADOS retains F and A as NLP states and reconstructs Cn, Tau1 and Km from the fixed initial state and the current pulse-width profile. It requires SQP IRK Gauss-Legendre 4×5, reduced dynamic mechanics, 50 stimulations/cycle, an active cadence guard and no slew constraint. Fixed initial states are checked by the engine; full NLP duals are not reconstructed.",
         "ipopt_ding_local_reduction": "Experimental IPOPT local Ding reconstruction: F and A remain decision states while Cn, Tau1 and Km are reconstructed with the original discrete Radau-5 operator. It requires the interpreted SX IPOPT path, one-cycle dynamic reduced RHO windows, 30 stimulations/cycle and no pulse-width slew constraint. The complete NLP is audited after each solve.",
         "cycles": "Number of executed cycles; FHO optimizes these cycles in one window.",
@@ -82,7 +84,7 @@ class CapabilityRegistry:
         "--reduced-terminal-half-step-velocity-guard",
         "--acados-qp-solver",
         "--acados-ding-local-reduction", "--bilateral-reduced",
-        "--isokinetic-omega", "--load-torque-min", "--load-torque-max",
+        "--isokinetic-omega", "--isokinetic-kinematics", "--load-torque-min", "--load-torque-max",
         "--objective", "--objective-shape", "--compact-rho-output",
         "--pace-config", "--pace-journal", "--model-config", "--condition",
     })
@@ -196,6 +198,13 @@ class CapabilityRegistry:
                 issue("extra_arguments", "Hessian-only compilation manages its private cache and compiler flags")
         if config.formulation == "isokinetic" and config.mechanics != "reduced":
             issue("formulation", "isokinetic currently requires reduced mechanics", "unsupported")
+        if config.isokinetic_kinematics == "prescribed" and (
+            config.formulation != "isokinetic" or config.mechanics != "reduced"
+        ):
+            issue("isokinetic_kinematics", "prescribed requires reduced isokinetic mechanics", "unsupported")
+        if (config.isokinetic_kinematics == "prescribed"
+                and cls.effective_reduced_velocity_guard(config)):
+            issue("reduced_internal_crank_velocity_guard", "omega is already fixed exactly by prescribed kinematics", "unsupported")
         if config.bilateral_reduced:
             if config.mechanics != "reduced":
                 issue("bilateral_reduced", "requires reduced mechanics", "unsupported")

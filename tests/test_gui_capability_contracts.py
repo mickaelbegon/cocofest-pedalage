@@ -89,6 +89,39 @@ def test_default_independent_factory_does_not_advertise_acados():
     IndependentArmsGuiConfig(factory="example:build", solver="acados").validate()
 
 
+@pytest.mark.parametrize("solver", ["ipopt", "acados"])
+def test_prescribed_isokinetic_kinematics_reaches_solver_and_provenance(tmp_path, solver):
+    config = SimulationConfig(
+        solver=solver,
+        formulation="isokinetic",
+        isokinetic_kinematics="prescribed",
+        integration="irk" if solver == "acados" else "radau",
+        acados_ipopt_cycle1_seed="cycle1.npz" if solver == "acados" else None,
+    )
+    assert SimulationConfig.from_json(config.to_json()) == config
+    plan = build_launch_plan(config, tmp_path / "env", tmp_path)
+    if solver == "ipopt":
+        assert plan.environment_updates["BENCHMARK_ISOKINETIC_KINEMATICS"] == "prescribed"
+        assert "prescribed-kinematics" in str(plan.result_json)
+    else:
+        assert plan.argv[plan.argv.index("--isokinetic-kinematics") + 1] == "prescribed"
+    effective = plan.resolved_config.to_dict()["effective"]
+    assert effective["transcription"]["isokinetic_kinematics"] == "prescribed"
+    assert "cinématique prescribed" in scientific_summary(config)
+
+
+@pytest.mark.parametrize("change", [
+    {"formulation": "dynamic"},
+    {"mechanics": "full"},
+    {"formulation": "dynamic", "mechanics": "full"},
+])
+def test_prescribed_kinematics_rejects_incompatible_mechanics(change):
+    config = SimulationConfig(isokinetic_kinematics="prescribed", **change)
+    assert any(issue.field == "isokinetic_kinematics" for issue in CapabilityRegistry.validate(config))
+    with pytest.raises(ConfigurationError):
+        CapabilityRegistry.require_valid(config)
+
+
 @pytest.mark.parametrize("change,match", [
     ({"cycles_per_window": 2}, "fenêtres d'un cycle"),
     ({"parallel": False}, "exécution parallèle"),

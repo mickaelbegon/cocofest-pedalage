@@ -35,7 +35,7 @@ PROFILES = {
 _GROUPS = {
     "physical": "mechanics bilateral_reduced formulation stimulations_per_cycle signed_crank_torque "
                 "isokinetic_omega energy_equivalent_torque load_torque_min load_torque_max weights_config model_config",
-    "transcription": "mode cycles_per_window integration collocation_degree ipopt_enforce_start_constraints "
+    "transcription": "mode cycles_per_window isokinetic_kinematics integration collocation_degree ipopt_enforce_start_constraints "
                      "acados_sim_stages acados_sim_steps acados_ding_local_reduction ipopt_ding_local_reduction "
                      "pulse_width_max_step_us pulse_width_slew_formulation pulse_width_slew_weight pulse_width_slew_reference_us "
                      "reduced_internal_crank_velocity_guard reduced_terminal_half_step_velocity_guard "

@@ -117,6 +117,7 @@ def build_launch_plan(config: SimulationConfig | dict, prefix: Path, root: Path 
         "NUMEXPR_NUM_THREADS": str(config["numeric_threads"]),
         "JULIA_NUM_THREADS": str(config["numeric_threads"]),
         "BENCHMARK_ISOKINETIC_OMEGA": str(config["isokinetic_omega"]),
+        "BENCHMARK_ISOKINETIC_KINEMATICS": config["isokinetic_kinematics"],
         "BENCHMARK_ENERGY_EQUIVALENT_TORQUE": str(config["energy_equivalent_torque"]),
         "BENCHMARK_LOAD_TORQUE_MIN": str(config["load_torque_min"]),
         "BENCHMARK_LOAD_TORQUE_MAX": str(config["load_torque_max"]),
@@ -149,6 +150,8 @@ def build_launch_plan(config: SimulationConfig | dict, prefix: Path, root: Path 
             torque, omega, low, high = (format(float(config[name]), ".12g") for name in (
                 "energy_equivalent_torque", "isokinetic_omega", "load_torque_min", "load_torque_max"))
             directory += f"-isokinetic-torque-{torque}-omega-{omega}-load-{low}-to-{high}"
+            if config["isokinetic_kinematics"] == "prescribed":
+                directory += "-prescribed-kinematics"
         result_json = output / directory / "result.json"
     else:
         case = output / ("acados-pycharm" if config["mode"] == "rho" else f"acados-{config['mode']}")
@@ -179,6 +182,7 @@ def build_launch_plan(config: SimulationConfig | dict, prefix: Path, root: Path 
             "--acados-disable-standard-ipopt-warmup",
         ])
         command.extend(["--formulation", config["formulation"],
+                        "--isokinetic-kinematics", config["isokinetic_kinematics"],
                         "--isokinetic-omega", str(config["isokinetic_omega"]),
                         "--energy-equivalent-torque", str(config["energy_equivalent_torque"]),
                         "--load-torque-min", str(config["load_torque_min"]),
@@ -215,6 +219,7 @@ def _build_adapted_plan(config, prefix, root, output, updates, suite):
         "--signed-crank-torque", str(config.signed_crank_torque),
         "--terminal-wheel-q-slack", str(config.terminal_q_slack),
         "--mechanical-formulation", config.mechanics, "--formulation", config.formulation,
+        "--isokinetic-kinematics", config.isokinetic_kinematics,
         "--acados-qp-solver", config.acados_qp_solver,
         "--madnlp-linear-solver", config.madnlp_linear_solver,
         "--state-scaling", "full",

@@ -20,6 +20,7 @@ class SimulationConfig:
     mechanics: str = "reduced"
     bilateral_reduced: bool = False
     formulation: str = "dynamic"
+    isokinetic_kinematics: str = "states"
     cycles: int = 100
     cycles_per_window: int = 1
     stimulations_per_cycle: int = 30

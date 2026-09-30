@@ -23,6 +23,7 @@ dual_warm_start="${DUAL_WARM_START:-${13:-auto}}"
 target_refinement="${14:-auto}"
 workspace="${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is required}"
 benchmark_formulation="${BENCHMARK_FORMULATION:-dynamic}"
+isokinetic_kinematics="${BENCHMARK_ISOKINETIC_KINEMATICS:-states}"
 energy_equivalent_torque="${BENCHMARK_ENERGY_EQUIVALENT_TORQUE:-0.2}"
 isokinetic_omega="${BENCHMARK_ISOKINETIC_OMEGA:--6.283185307179586}"
 load_torque_min="${BENCHMARK_LOAD_TORQUE_MIN:--3.0}"
@@ -71,6 +72,14 @@ case "$benchmark_formulation" in
   dynamic|isokinetic) ;;
   *) echo "BENCHMARK_FORMULATION must be dynamic or isokinetic, got '$benchmark_formulation'." >&2; exit 2 ;;
 esac
+case "$isokinetic_kinematics" in
+  states|prescribed) ;;
+  *) echo "BENCHMARK_ISOKINETIC_KINEMATICS must be states or prescribed, got '$isokinetic_kinematics'." >&2; exit 2 ;;
+esac
+if [[ "$isokinetic_kinematics" == "prescribed" && ( "$benchmark_formulation" != "isokinetic" || "$mechanics" != "reduced" ) ]]; then
+  echo "Prescribed isokinetic kinematics require reduced isokinetic mechanics." >&2
+  exit 2
+fi
 for numeric_setting in "$energy_equivalent_torque" "$isokinetic_omega" "$load_torque_min" "$load_torque_max"; do
   if ! is_finite_number "$numeric_setting"; then
     echo "Isokinetic numerical settings must be finite; got '$numeric_setting'." >&2
@@ -133,6 +142,9 @@ print(isokinetic_configuration_name_from_values("isokinetic", *sys.argv[2:]))
 ' "$workspace/.github/scripts" "$energy_equivalent_torque" "$isokinetic_omega" "$load_torque_min" "$load_torque_max")"
   fi
   formulation_directory_suffix="-${benchmark_configuration_slug}"
+  if [[ "$isokinetic_kinematics" == "prescribed" ]]; then
+    formulation_directory_suffix+="-prescribed-kinematics"
+  fi
 fi
 if [[ "$case_root" == /* ]]; then
   case_dir="${case_root}/${case_slug}-${mechanics}${formulation_directory_suffix}"
@@ -528,6 +540,7 @@ fi
   --first-node-wheel-q-slack 0 \
   --terminal-wheel-q-slack "$benchmark_q_slack" \
   --formulation "$benchmark_formulation" \
+  --isokinetic-kinematics "$isokinetic_kinematics" \
   --energy-equivalent-torque "$energy_equivalent_torque" \
   --isokinetic-omega "$isokinetic_omega" \
   --load-torque-min "$load_torque_min" \

@@ -127,6 +127,7 @@ try:
         prepare_nmpc,
         project_full_first_node_initial_guess_to_contact,
         set_fes_model,
+        state_initial_guess_time_grid,
         validate_and_clip_pulse_width_seed,
     )
 except ImportError:
@@ -135,6 +136,7 @@ except ImportError:
         prepare_nmpc,
         project_full_first_node_initial_guess_to_contact,
         set_fes_model,
+        state_initial_guess_time_grid,
         validate_and_clip_pulse_width_seed,
     )
 
@@ -285,6 +287,8 @@ def apply_acados_wheel_cycle_boundary_bounds(
         raise ValueError("ACADOS wheel cycle-boundary slack must be non-negative.")
 
     position_key = getattr(interface.ocp, "position_state_key", "q")
+    if position_key is None:
+        return []
     wheel_index = int(getattr(interface.ocp, "wheel_state_index", 2))
     try:
         position_bounds = interface.ocp.nlp[0].x_bounds[position_key]
@@ -486,6 +490,22 @@ def patch_bioptim_acados_interface() -> None:
 
     def patched_set_constraints(self, ocp):
         original_set_constraints(self, ocp)
+        reduced_model = getattr(ocp.nlp[0].model, "bio_model", ocp.nlp[0].model)
+        if getattr(reduced_model, "uses_prescribed_kinematics", False):
+            # ACADOS path constraints do not accept a free CasADi time input.
+            # The periodic-node runtime parameter already carries the exact
+            # shooting-node time, including the terminal stage.
+            from casadi import substitute
+
+            node_time = ocp.nlp[0].numerical_timeseries.cx_start[-1]
+            time_symbol = ocp.nlp[0].time_cx
+            for name in ("con_h_expr_0", "con_h_expr", "con_h_expr_e"):
+                expression = getattr(self.acados_model, name)
+                if getattr(expression, "numel", lambda: 0)():
+                    setattr(
+                        self.acados_model, name,
+                        substitute(expression, time_symbol, node_time),
+                    )
         lower, upper = scaled_control_bounds(self)
         self.acados_ocp.constraints.lbu = lower.reshape((-1, 1))
         self.acados_ocp.constraints.ubu = upper.reshape((-1, 1))
@@ -1183,6 +1203,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
         choices=("dynamic", "isokinetic"),
         default="dynamic",
         help="Use forward dynamics or reduced isokinetic inverse dynamics.",
+    )
+    parser.add_argument(
+        "--isokinetic-kinematics",
+        choices=("states", "prescribed"),
+        default="states",
+        help="Keep theta/omega as NLP states or prescribe their exact isokinetic trajectory.",
     )
     parser.add_argument(
         "--reduced-dynamic-residual",
@@ -4358,6 +4384,7 @@ def _periodic_ipopt_refinement_cache_path(
         "mechanical_formulation": args.mechanical_formulation,
         "reduced_dynamic_residual": getattr(args, "reduced_dynamic_residual", "direct"),
         "formulation": getattr(args, "formulation", "dynamic"),
+        "isokinetic_kinematics": getattr(args, "isokinetic_kinematics", "states"),
         "isokinetic_omega": getattr(args, "isokinetic_omega", None),
         "energy_equivalent_torque": getattr(
             args, "energy_equivalent_torque", None
@@ -4478,6 +4505,7 @@ def _acados_seed_cache_path(args: argparse.Namespace, model_path: Path) -> Path 
         "mechanical_formulation": args.mechanical_formulation,
         "reduced_dynamic_residual": getattr(args, "reduced_dynamic_residual", "direct"),
         "formulation": getattr(args, "formulation", "dynamic"),
+        "isokinetic_kinematics": getattr(args, "isokinetic_kinematics", "states"),
         "isokinetic_omega": getattr(args, "isokinetic_omega", None),
         "energy_equivalent_torque": getattr(
             args, "energy_equivalent_torque", None
@@ -4591,6 +4619,7 @@ def _common_initial_solution_metadata(args: argparse.Namespace) -> dict:
         "mechanical_formulation": args.mechanical_formulation,
         "bilateral_reduced": bool(getattr(args, "bilateral_reduced", False)),
         "formulation": getattr(args, "formulation", "dynamic"),
+        "isokinetic_kinematics": getattr(args, "isokinetic_kinematics", "states"),
         "isokinetic_omega": getattr(args, "isokinetic_omega", None),
         "energy_equivalent_torque": getattr(
             args, "energy_equivalent_torque", None
@@ -5016,6 +5045,7 @@ def _validate_common_initial_solution_metadata(
         "mechanical_formulation",
         "bilateral_reduced",
         "formulation",
+        "isokinetic_kinematics",
         "isokinetic_omega",
         "energy_equivalent_torque",
         "load_torque_min",
@@ -5047,6 +5077,7 @@ def _validate_common_initial_solution_metadata(
     ):
         legacy_defaults = {
             "bilateral_reduced": False,
+            "isokinetic_kinematics": "states",
             "pulse_width_control_mode": "direct",
             "pulse_width_control_representation": "direct_zoh_v1",
             "pulse_width_max_rate_us_per_s": None,
@@ -5377,7 +5408,8 @@ def resolve_acados_qp_solver(args: argparse.Namespace) -> str:
     if requested == "auto":
         return (
             "FULL_CONDENSING_HPIPM"
-            if getattr(args, "pulse_width_max_step_us", None) is not None
+            if (getattr(args, "pulse_width_max_step_us", None) is not None
+                or getattr(args, "isokinetic_kinematics", "states") == "prescribed")
             else "PARTIAL_CONDENSING_HPIPM"
         )
     if requested not in supported:
@@ -5403,6 +5435,7 @@ def _continuation_cache_signature(args: argparse.Namespace) -> str:
         "mechanical_formulation": args.mechanical_formulation,
         "reduced_dynamic_residual": getattr(args, "reduced_dynamic_residual", "direct"),
         "formulation": getattr(args, "formulation", "dynamic"),
+        "isokinetic_kinematics": getattr(args, "isokinetic_kinematics", "states"),
         "isokinetic_omega": getattr(args, "isokinetic_omega", None),
         "energy_equivalent_torque": getattr(args, "energy_equivalent_torque", None),
         "load_torque_min": getattr(args, "load_torque_min", None),
@@ -5512,6 +5545,7 @@ def _horizon_seed_cache_signature(args: argparse.Namespace) -> str:
         "model_formulation": args.model_formulation,
         "mechanical_formulation": args.mechanical_formulation,
         "formulation": getattr(args, "formulation", "dynamic"),
+        "isokinetic_kinematics": getattr(args, "isokinetic_kinematics", "states"),
         "isokinetic_omega": getattr(args, "isokinetic_omega", None),
         "energy_equivalent_torque": getattr(args, "energy_equivalent_torque", None),
         "load_torque_min": getattr(args, "load_torque_min", None),
@@ -5615,6 +5649,7 @@ def _codegen_signature(args: argparse.Namespace) -> str:
         "model_formulation": args.model_formulation,
         "mechanical_formulation": args.mechanical_formulation,
         "formulation": getattr(args, "formulation", "dynamic"),
+        "isokinetic_kinematics": getattr(args, "isokinetic_kinematics", "states"),
         "isokinetic_omega": getattr(args, "isokinetic_omega", None),
         "energy_equivalent_torque": getattr(args, "energy_equivalent_torque", None),
         "load_torque_min": getattr(args, "load_torque_min", None),
@@ -6320,21 +6355,82 @@ def receding_horizon_solver_failure_budget(
     )
 
 
+def _states_with_prescribed_kinematics(states, time_s, model, *, cycle_index=0):
+    """Expose exact θ/ω traces for physical audits without adding NLP states."""
+
+    traces = {key: np.asarray(value) for key, value in states.items()}
+    if not getattr(model, "uses_prescribed_kinematics", False):
+        return traces
+    time = np.asarray(time_s, dtype=float).reshape(-1)
+    if not traces or any(values.shape[-1] != time.size for values in traces.values()):
+        raise ValueError("Prescribed kinematics need one physical time per state node.")
+    local_time = time - time[0] + model.isokinetic_time_origin
+    theta, omega = model.prescribed_kinematics(local_time)
+    cycle_duration = 2.0 * np.pi / abs(float(model.isokinetic_omega))
+    theta = np.asarray(theta, dtype=float) + cycle_index * cycle_duration * model.isokinetic_omega
+    traces["theta"] = theta.reshape((1, -1))
+    traces["omega"] = np.full((1, time.size), float(omega))
+    return traces
+
+
+def _solution_states_with_prescribed_kinematics(solution, *, cycle_index=0):
+    states = solution.decision_states(to_merge=SolutionMerge.NODES)
+    if "theta" in states or "q" in states:
+        return states
+    model = getattr(solution.ocp.nlp[0].model, "bio_model", solution.ocp.nlp[0].model)
+    if not getattr(model, "uses_prescribed_kinematics", False):
+        return states
+    time = solution.decision_time(to_merge=SolutionMerge.NODES)
+    return _states_with_prescribed_kinematics(
+        states, time, model, cycle_index=cycle_index
+    )
+
+
+def _merged_compact_states_with_prescribed_kinematics(solution, model, *, cycle_index=0):
+    states = solution.decision_states(to_merge=SolutionMerge.NODES)
+    if "theta" in states or "q" in states or not getattr(model, "uses_prescribed_kinematics", False):
+        return states
+    controls = solution.decision_controls(to_merge=SolutionMerge.NODES)
+    if not controls:
+        raise ValueError("Prescribed compact RHO export needs control intervals for its time grid.")
+    intervals = int(np.asarray(next(iter(controls.values()))).shape[-1])
+    columns = int(np.asarray(next(iter(states.values()))).shape[-1])
+    local_time = _collocation_state_time_grid(columns, intervals)
+    if local_time is None:
+        if columns != intervals + 1:
+            raise ValueError("Prescribed compact RHO state layout has no known time grid.")
+        local_time = np.linspace(0.0, 1.0, columns)
+    duration = intervals * float(model.pulse_width_interval_s)
+    return _states_with_prescribed_kinematics(
+        states, local_time * duration, model, cycle_index=cycle_index
+    )
+
+
 def _wheel_trace_from_exported_cycles(
-    merged_solution, exported_cycle_solutions: list
+    merged_solution, exported_cycle_solutions: list, prescribed_model=None
 ) -> np.ndarray:
-    def wheel_trace(solution):
-        states = solution.decision_states(to_merge=SolutionMerge.NODES)
+    def wheel_trace(solution, cycle_index=0):
+        states = (
+            _merged_compact_states_with_prescribed_kinematics(
+                solution, prescribed_model, cycle_index=cycle_index
+            )
+            if prescribed_model is not None and not hasattr(solution, "ocp")
+            else _solution_states_with_prescribed_kinematics(
+                solution, cycle_index=cycle_index
+            )
+        )
         if "theta" in states:
             return np.asarray(states["theta"])[0, :]
         return np.asarray(states["q"])[2, :]
 
     if not exported_cycle_solutions:
+        if prescribed_model is not None and not hasattr(merged_solution, "ocp"):
+            states = _merged_compact_states_with_prescribed_kinematics(merged_solution, prescribed_model)
+            return np.asarray(states["theta"])[0]
         return wheel_trace(merged_solution)
 
-    cycle_traces = [
-        wheel_trace(cycle_solution) for cycle_solution in exported_cycle_solutions
-    ]
+    cycle_traces = [wheel_trace(cycle_solution, cycle_index)
+                    for cycle_index, cycle_solution in enumerate(exported_cycle_solutions)]
     return np.concatenate(
         [trace[:-1] for trace in cycle_traces[:-1]] + [cycle_traces[-1]]
     )
@@ -6365,20 +6461,35 @@ def _control_traces_from_exported_cycles(
 
 
 def _state_traces_from_exported_cycles(
-    merged_solution, exported_cycle_solutions: list
+    merged_solution, exported_cycle_solutions: list, prescribed_model=None
 ) -> dict[str, np.ndarray]:
     if not exported_cycle_solutions:
-        states = merged_solution.decision_states(to_merge=SolutionMerge.NODES)
+        states = (
+            _merged_compact_states_with_prescribed_kinematics(merged_solution, prescribed_model)
+            if prescribed_model is not None and not hasattr(merged_solution, "ocp")
+            else _solution_states_with_prescribed_kinematics(merged_solution)
+        )
         return {key: np.asarray(values) for key, values in states.items()}
 
     state_traces = {}
-    reference_states = exported_cycle_solutions[0].decision_states(
-        to_merge=SolutionMerge.NODES
+    reference_solution = exported_cycle_solutions[0]
+    reference_states = (
+        _merged_compact_states_with_prescribed_kinematics(reference_solution, prescribed_model)
+        if prescribed_model is not None and not hasattr(reference_solution, "ocp")
+        else _solution_states_with_prescribed_kinematics(reference_solution)
     )
     for key in reference_states.keys():
         cycle_values = []
-        for cycle_solution in exported_cycle_solutions:
-            states = cycle_solution.decision_states(to_merge=SolutionMerge.NODES)
+        for cycle_index, cycle_solution in enumerate(exported_cycle_solutions):
+            states = (
+                _merged_compact_states_with_prescribed_kinematics(
+                    cycle_solution, prescribed_model, cycle_index=cycle_index
+                )
+                if prescribed_model is not None and not hasattr(cycle_solution, "ocp")
+                else _solution_states_with_prescribed_kinematics(
+                    cycle_solution, cycle_index=cycle_index
+                )
+            )
             values = np.asarray(states[key])
             if values.ndim == 1:
                 values = values[np.newaxis, :]
@@ -9676,6 +9787,8 @@ def _wheel_cycle_diagnostic_tolerances(
 def _wheel_q_state_scaling(nmpc) -> float:
     """Return the wheel-angle decision scaling used by the NLP."""
 
+    if getattr(nmpc, "position_state_key", "q") is None:
+        return 1.0
     try:
         position_key = getattr(nmpc, "position_state_key", "q")
         position_index = getattr(nmpc, "wheel_state_index", 2)
@@ -10421,6 +10534,7 @@ def summarize_windows(
     cycle_progress_tolerance: float = 0.5,
     absolute_cycle_reference: float | None = None,
     absolute_cycle_tolerance: float | None = None,
+    prescribed_model=None,
 ) -> None:
     def _fmt(value) -> str:
         return "None" if value is None else f"{value:.6f}"
@@ -10434,7 +10548,7 @@ def summarize_windows(
         source_window_solutions, exported_cycle_solutions, cycles_per_window
     )
     wheel_trace = _wheel_trace_from_exported_cycles(
-        merged_solution, exported_cycle_solutions
+        merged_solution, exported_cycle_solutions, prescribed_model
     )
     diagnostics = diagnose_wheel_trace(
         wheel_trace,
@@ -10512,6 +10626,7 @@ def build_window_summary(
     cycle_progress_tolerance: float = 0.5,
     absolute_cycle_reference: float | None = None,
     absolute_cycle_tolerance: float | None = None,
+    prescribed_model=None,
 ) -> dict:
     (
         merged_solution,
@@ -10522,13 +10637,13 @@ def build_window_summary(
         source_window_solutions, exported_cycle_solutions, cycles_per_window
     )
     wheel_trace = _wheel_trace_from_exported_cycles(
-        merged_solution, exported_cycle_solutions
+        merged_solution, exported_cycle_solutions, prescribed_model
     )
     control_traces = _control_traces_from_exported_cycles(
         merged_solution, exported_cycle_solutions
     )
     state_traces = _state_traces_from_exported_cycles(
-        merged_solution, exported_cycle_solutions
+        merged_solution, exported_cycle_solutions, prescribed_model
     )
     state_boundary_jumps = _state_boundary_jump_summary(exported_cycle_solutions)
     window_objectives = _window_objective_values(source_window_solutions)
@@ -10619,7 +10734,7 @@ def build_single_shot_summary(
     absolute_cycle_reference: float | None = None,
     absolute_cycle_tolerance: float | None = None,
 ) -> dict:
-    states = sol.decision_states(to_merge=SolutionMerge.NODES)
+    states = _solution_states_with_prescribed_kinematics(sol)
     wheel_trace = (
         np.asarray(states["theta"])[0, :]
         if "theta" in states
@@ -10836,6 +10951,9 @@ def audit_isokinetic_solution(sol, config, reduced_dynamics):
             states = sol.decision_states(to_merge=SolutionMerge.NODES)
             time = sol.decision_time(to_merge=SolutionMerge.NODES).T[0]
             sample_source = "shooting_nodes_fallback"
+
+    reduced_model = getattr(nlp.model, "bio_model", nlp.model)
+    states = _states_with_prescribed_kinematics(states, time, reduced_model)
 
     required_keys = ["theta", "omega", "E_prod"] + [
         f"F_{name}" for name in reduced_dynamics.muscle_names
@@ -12238,7 +12356,7 @@ def high_accuracy_trace_rollout_diagnostics(
     audit_dense_load = bool(
         getattr(isokinetic_model, "isokinetic", False)
         and hasattr(isokinetic_model, "reduced_dynamics")
-        and "theta" in nlp.states
+        and ("theta" in nlp.states or getattr(isokinetic_model, "uses_prescribed_kinematics", False))
     )
     # The reduced dynamic cadence guard is enforced at shooting nodes (and,
     # optionally, an Euler midpoint).  DOP853 samples expose any continuous
@@ -12247,7 +12365,8 @@ def high_accuracy_trace_rollout_diagnostics(
         (key for key in ("qdot", "omega") if key in nlp.states), None
     )
     audit_dense_velocity = bool(
-        "theta" in nlp.states and crank_velocity_state_key is not None
+        ("theta" in nlp.states and crank_velocity_state_key is not None)
+        or getattr(isokinetic_model, "uses_prescribed_kinematics", False)
     )
     state_scales = np.maximum(
         np.maximum(np.ptp(states, axis=1), np.max(np.abs(states), axis=1)), 1.0
@@ -12318,20 +12437,28 @@ def high_accuracy_trace_rollout_diagnostics(
             )
             dense_states = reference.sol(dense_times)[:n_states]
         if audit_dense_velocity:
-            qdot_index = int(
-                np.asarray(nlp.states[crank_velocity_state_key].index).reshape(-1)[0]
-            )
+            if getattr(isokinetic_model, "uses_prescribed_kinematics", False):
+                dense_velocity = np.full(dense_times.shape, isokinetic_model.isokinetic_omega)
+            else:
+                qdot_index = int(
+                    np.asarray(nlp.states[crank_velocity_state_key].index).reshape(-1)[0]
+                )
+                dense_velocity = dense_states[qdot_index]
             dense_velocity_minimum = min(
-                dense_velocity_minimum, float(np.min(dense_states[qdot_index]))
+                dense_velocity_minimum, float(np.min(dense_velocity))
             )
             dense_velocity_maximum = max(
-                dense_velocity_maximum, float(np.max(dense_states[qdot_index]))
+                dense_velocity_maximum, float(np.max(dense_velocity))
             )
-            dense_velocity_sample_count += int(dense_states.shape[1])
+            dense_velocity_sample_count += int(dense_velocity.size)
         if audit_dense_load:
-            theta_index = int(
-                np.asarray(nlp.states["theta"].index).reshape(-1)[0]
-            )
+            if getattr(isokinetic_model, "uses_prescribed_kinematics", False):
+                dense_theta, _ = isokinetic_model.prescribed_kinematics(dense_times)
+            else:
+                theta_index = int(
+                    np.asarray(nlp.states["theta"].index).reshape(-1)[0]
+                )
+                dense_theta = dense_states[theta_index]
             force_indexes = [
                 int(
                     np.asarray(nlp.states[f"F_{name}"].index).reshape(-1)[0]
@@ -12341,7 +12468,7 @@ def high_accuracy_trace_rollout_diagnostics(
             for sample in range(dense_states.shape[1]):
                 dense_load = inverse_load_torque(
                     isokinetic_model.reduced_dynamics,
-                    dense_states[theta_index, sample],
+                    dense_theta[sample],
                     isokinetic_model.isokinetic_omega,
                     dense_states[force_indexes, sample],
                 )
@@ -17209,7 +17336,7 @@ def apply_solution_directly_to_periodic_nmpc_initial_guess(
     states = adapted_solution.decision_states(to_merge=SolutionMerge.NODES)
     controls = adapted_solution.decision_controls(to_merge=SolutionMerge.NODES)
 
-    if translate_absolute_position_bounds:
+    if translate_absolute_position_bounds and periodic_nmpc.position_state_key is not None:
         # An exact common seed can start one consumed warmup cycle later than
         # this freshly constructed OCP. Translate its absolute coordinate
         # bounds BEFORE copying/clipping the seed; finalizing the reference
@@ -18604,6 +18731,8 @@ def set_terminal_wheel_q_bound_slack(periodic_nmpc, slack: float) -> None:
     if slack < 0:
         raise ValueError("Terminal wheel q slack must be non-negative.")
     position_key = getattr(periodic_nmpc, "position_state_key", "q")
+    if position_key is None:
+        return
     position_index = getattr(periodic_nmpc, "wheel_state_index", 2)
     bounds = periodic_nmpc.nlp[0].x_bounds[position_key]
     center = getattr(periodic_nmpc, "_cocofest_terminal_wheel_q_center", None)
@@ -18622,7 +18751,8 @@ def recenter_absolute_wheel_q_reference_from_initial_guess(
 ) -> bool:
     """Anchor the absolute cycle targets to the initial state actually loaded."""
 
-    if not getattr(periodic_nmpc, "anchor_wheel_q_to_absolute_reference", False):
+    if (periodic_nmpc.position_state_key is None
+            or not getattr(periodic_nmpc, "anchor_wheel_q_to_absolute_reference", False)):
         return False
     position_key = periodic_nmpc.position_state_key
     wheel_index = periodic_nmpc.wheel_state_index
@@ -18666,6 +18796,17 @@ def finalize_absolute_wheel_q_initial_guess(
     project_terminal_contact: bool = False,
 ) -> dict:
     """Install the final absolute target, clip the seed, then restore contact."""
+
+    if periodic_nmpc.position_state_key is None:
+        periodic_nmpc._correct_init_guess_to_fit_bounds(corrected_input="states")
+        return {
+            "recentered": False,
+            "terminal_wheel_before": None,
+            "terminal_wheel_after_clip": None,
+            "terminal_wheel_clipped": False,
+            "terminal_contact_projection": None,
+            "maximum_state_bound_violation": _maximum_state_initial_guess_bound_violation(periodic_nmpc),
+        }
 
     recentered = recenter_absolute_wheel_q_reference_from_initial_guess(periodic_nmpc)
     position_key = periodic_nmpc.position_state_key
@@ -18721,6 +18862,8 @@ def recenter_terminal_wheel_q_bound_slack(periodic_nmpc, slack: float) -> dict:
     """Recenter a terminal-angle continuation after the MHE bounds shift."""
 
     position_key = getattr(periodic_nmpc, "position_state_key", "q")
+    if position_key is None:
+        return {"center": None, "slack": slack, "lower": None, "upper": None}
     position_index = getattr(periodic_nmpc, "wheel_state_index", 2)
     bounds = periodic_nmpc.nlp[0].x_bounds[position_key]
     center = 0.5 * float(bounds.min[position_index, 2] + bounds.max[position_index, 2])
@@ -19443,6 +19586,15 @@ def solve_case(
     args.formulation = getattr(args, "formulation", "dynamic")
     if args.formulation not in ("dynamic", "isokinetic"):
         raise ValueError("formulation must be 'dynamic' or 'isokinetic'.")
+    args.isokinetic_kinematics = getattr(args, "isokinetic_kinematics", "states")
+    if args.isokinetic_kinematics not in ("states", "prescribed"):
+        raise ValueError("--isokinetic-kinematics must be states or prescribed.")
+    if args.isokinetic_kinematics == "prescribed" and (
+        args.formulation != "isokinetic" or args.mechanical_formulation != "reduced"
+    ):
+        raise ValueError(
+            "--isokinetic-kinematics prescribed requires reduced isokinetic mechanics."
+        )
     args.reduced_dynamic_residual = str(
         getattr(args, "reduced_dynamic_residual", "direct")
     )
@@ -20913,6 +21065,7 @@ def solve_case(
         "bilateral_reduced": args.bilateral_reduced,
         "reduced_cycling_dynamics": reduced_cycling_dynamics,
         "formulation": args.formulation,
+        "isokinetic_kinematics": args.isokinetic_kinematics,
         "isokinetic_omega": (
             isokinetic_config.omega_target_rad_s
             if isokinetic_config is not None
@@ -21032,16 +21185,16 @@ def solve_case(
         position_slack = (
             [0.0 if isokinetic_config is not None else args.acados_wheel_q_slack]
             if position_key == "theta"
-            else [0.0, 0.0, args.acados_wheel_q_slack]
+            else [0.0, 0.0, args.acados_wheel_q_slack] if position_key is not None else None
         )
         velocity_slack = (
             [0.0 if isokinetic_config is not None else args.acados_wheel_qdot_slack]
             if velocity_key == "omega"
-            else [0.0, 0.0, args.acados_wheel_qdot_slack]
+            else [0.0, 0.0, args.acados_wheel_qdot_slack] if velocity_key is not None else None
         )
         nmpc.first_node_state_slack = {
-            position_key: position_slack,
-            velocity_key: velocity_slack,
+            **({position_key: position_slack} if position_key is not None else {}),
+            **({velocity_key: velocity_slack} if velocity_key is not None else {}),
             "Cn_": 0.0,
             "Cn_sum_": 0.0,
             "F_": 0.0,
@@ -21080,7 +21233,7 @@ def solve_case(
                 if position_key == "theta"
                 else [0.0, 0.0, terminal_position_slack]
             ),
-        }
+        } if position_key is not None else {}
         set_terminal_wheel_q_bound_slack(nmpc, terminal_position_slack)
         # The periodic-node states have the same physical meaning as the
         # historical Ding states. Keep their initial value near the IPOPT
@@ -21092,18 +21245,19 @@ def solve_case(
         )
         nmpc.bound_first_node_wheel_qdot = True
         args.rho_state_continuity_mode = "strict"
-        nmpc.advance_wheel_q_bounds = True
+        nmpc.advance_wheel_q_bounds = position_key is not None
         nmpc.anchor_terminal_wheel_to_first_node = False
-        nmpc.anchor_wheel_q_to_absolute_reference = True
-        nmpc.absolute_wheel_q_reference = float(
-            np.asarray(nmpc.nlp[0].x_init[position_key].init, dtype=float)[
-                wheel_index, 0
-            ]
-        )
+        nmpc.anchor_wheel_q_to_absolute_reference = position_key is not None
+        if position_key is not None:
+            nmpc.absolute_wheel_q_reference = float(
+                np.asarray(nmpc.nlp[0].x_init[position_key].init, dtype=float)[
+                    wheel_index, 0
+                ]
+            )
         nmpc.absolute_wheel_q_cycle_shift = -2.0 * np.pi
         nmpc.absolute_wheel_q_cycle_index = 0
         nmpc.wheel_q_path_margin = args.acados_wheel_q_path_margin
-        nmpc.use_signed_wheel_shift = True
+        nmpc.use_signed_wheel_shift = position_key is not None
         nmpc.transfer_initial_guess_mode = "anchored"
         nmpc.repeat_cyclical_state_initial_guess = (
             args.acados_cyclical_transfer_mode == "repeat"
@@ -21112,7 +21266,7 @@ def solve_case(
         nmpc.pulse_width_extrapolation_factor = (
             args.rho_pulse_width_extrapolation_factor
         )
-        nmpc.transfer_debug = echo
+        nmpc.transfer_debug = echo and position_key is not None
         # There is no certified predecessor for the first RHO. Even when the
         # experiment requests dual preservation, start from zero multipliers
         # and enable preservation only after a primal/dynamics-certified solve.
@@ -22436,6 +22590,17 @@ def solve_case(
     initial_guess_audit = audit_initial_guess(nmpc)
     initial_guess_snapshot = initial_guess_audit.pop("snapshot")
     initial_guess_state_traces = initial_guess_snapshot["states"]
+    reduced_model = getattr(nmpc.nlp[0].model, "bio_model", nmpc.nlp[0].model)
+    if getattr(reduced_model, "uses_prescribed_kinematics", False):
+        initial_time = state_initial_guess_time_grid(
+            n_shooting=nmpc.nlp[0].ns,
+            turn_number=args.cycles_per_window,
+            ode_solver=nmpc.nlp[0].dynamics_type.ode_solver,
+            window_duration_s=isokinetic_config.duration_s,
+        )
+        initial_guess_state_traces = _states_with_prescribed_kinematics(
+            initial_guess_state_traces, initial_time, reduced_model
+        )
     initial_guess_control_traces = initial_guess_snapshot["controls"]
     if initial_guess_diagnostic_summary is not None:
         initial_guess_audit["defects"] = initial_guess_diagnostic_summary
@@ -23576,7 +23741,7 @@ def solve_case(
             )
             applied_dual_summary["window"] = cycle_idx - 1
             acados_dual_warm_start_summaries.append(applied_dual_summary)
-        if echo and _sol is not None:
+        if echo and _sol is not None and _nmpc.position_state_key is not None:
             state_extraction_start = perf_counter()
             states = _sol.decision_states(to_merge=SolutionMerge.NODES)
             orchestration_timing_samples["terminal_state_extraction"].append(
@@ -25555,6 +25720,7 @@ def solve_case(
             cycle_progress_tolerance=wheel_cycle_progress_tolerance,
             absolute_cycle_reference=absolute_wheel_q_reference,
             absolute_cycle_tolerance=wheel_absolute_cycle_tolerance,
+            prescribed_model=getattr(nmpc.nlp[0].model, "bio_model", nmpc.nlp[0].model),
         )
         if args.solver == "acados" and args.acados_diagnostics:
             if not acados_window_diagnostics:
@@ -25568,6 +25734,7 @@ def solve_case(
         cycle_progress_tolerance=wheel_cycle_progress_tolerance,
         absolute_cycle_reference=absolute_wheel_q_reference,
         absolute_cycle_tolerance=wheel_absolute_cycle_tolerance,
+        prescribed_model=getattr(nmpc.nlp[0].model, "bio_model", nmpc.nlp[0].model),
     )
     if isokinetic_config is not None:
         attach_isokinetic_audits(

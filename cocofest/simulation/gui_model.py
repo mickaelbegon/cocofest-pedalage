@@ -23,6 +23,7 @@ FORM_FIELDS = (
     FieldSpec("mechanics", "Mécanique", "Problème", "choice"),
     FieldSpec("bilateral_reduced", "Deux bras combinés : manivelle mécanique unique", "Problème", "bool"),
     FieldSpec("formulation", "Dynamique (dynamic = cadence libre)", "Problème", "choice"),
+    FieldSpec("isokinetic_kinematics", "Cinématique isocinétique (prescribed = θ/ω éliminés)", "Isocinétique", "choice"),
     FieldSpec("cycles", "Cycles exécutés", "Problème"),
     FieldSpec("cycles_per_window", "Cycles par fenêtre RHO", "Problème"),
     FieldSpec("stimulations_per_cycle", "Contrôles / stimulations par cycle", "Problème"),
@@ -135,6 +136,8 @@ def config_from_form(values: Mapping[str, str | bool], base: SimulationConfig | 
 def scientific_summary(config: SimulationConfig) -> str:
     window = config.cycles if config.mode == "fho" else config.cycles_per_window
     dynamics = "cadence libre" if config.formulation == "dynamic" else f"ω = {config.isokinetic_omega:g} rad/s"
+    if config.formulation == "isokinetic":
+        dynamics += f" · cinématique {config.isokinetic_kinematics}"
     slew = "aucune borne ΔPW" if config.pulse_width_max_step_us is None else f"|u[k+1] − u[k]| ≤ {config.pulse_width_max_step_us:g} µs"
     reduction = (
         "\nRéduction Ding ACADOS expérimentale activée : F,A conservés ; Cn,Tau1,Km reconstruits avec IRK Gauss-Legendre 4×5. "
