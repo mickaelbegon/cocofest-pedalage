@@ -92,3 +92,18 @@ def test_signed_torque_and_assistance_are_mutually_exclusive():
         assert error.code == 2
     else:
         raise AssertionError("The two torque conventions must not be combined")
+
+
+def test_cpu_affinity_parser_accepts_ranges_and_individual_cpus():
+    args = driver.parse_arguments(["--cpu-affinity", "0-3,8,10-11"])
+
+    assert args.cpu_affinity == frozenset({0, 1, 2, 3, 8, 10, 11})
+
+
+def test_cpu_affinity_parser_rejects_invalid_ranges():
+    try:
+        driver.parse_arguments(["--cpu-affinity", "3-1"])
+    except SystemExit as error:
+        assert error.code == 2
+    else:
+        raise AssertionError("A descending CPU affinity range must be rejected")

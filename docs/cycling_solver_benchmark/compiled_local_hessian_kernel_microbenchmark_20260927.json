@@ -1,0 +1,147 @@
+{
+  "kind": "local_exact_hessian_kernel_only_not_an_ipopt_or_fho_solve",
+  "casadi": "3.7.2",
+  "python": "3.11.16",
+  "stages": 180,
+  "local_dimension": 12,
+  "local_hessian_entries": 144,
+  "global_variables": 1444,
+  "global_hessian_triplets_before_coalescing": 25920,
+  "vm_symbolic_build_s": 0.022426815005019307,
+  "c_generate_and_compile_s": 1.9476792409550399,
+  "generated_library_bytes": 82560,
+  "cpu_affinity": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31
+  ],
+  "numeric_threads_env": {
+    "OMP_NUM_THREADS": "1",
+    "OPENBLAS_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "NUMEXPR_NUM_THREADS": "1"
+  },
+  "workers": {
+    "1": {
+      "map_backend": "Map",
+      "matrix_nnz": 23056,
+      "max_abs_error_compiled_vs_vm": 0.0,
+      "vm_map_only": {
+        "median_s": 0.018186381086707115,
+        "minimum_s": 0.017577658989466727,
+        "p90_s": 0.018430417007766663
+      },
+      "compiled_map_only": {
+        "median_s": 0.0005919599207118154,
+        "minimum_s": 0.0005794670432806015,
+        "p90_s": 0.0005974928149953485
+      },
+      "vm_map_and_assemble": {
+        "median_s": 0.020072889979928732,
+        "minimum_s": 0.01959003391675651,
+        "p90_s": 0.020701662614010276
+      },
+      "compiled_map_and_assemble": {
+        "median_s": 0.0022485170047730207,
+        "minimum_s": 0.0022142130183055997,
+        "p90_s": 0.0022866023471578957
+      },
+      "map_only_speedup": 30.72231826918028,
+      "end_to_end_speedup": 8.927168412477723,
+      "compiled_break_even_map_evaluations": 110.69868241640796,
+      "compiled_break_even_end_to_end_evaluations": 109.27056136391386
+    },
+    "8": {
+      "map_backend": "MXFunction",
+      "matrix_nnz": 23056,
+      "max_abs_error_compiled_vs_vm": 0.0,
+      "vm_map_only": {
+        "median_s": 0.0099823831114918,
+        "minimum_s": 0.007083475938998163,
+        "p90_s": 0.010479507199488581
+      },
+      "compiled_map_only": {
+        "median_s": 0.00048417795915156603,
+        "minimum_s": 0.0004582599503919482,
+        "p90_s": 0.0005222192266955972
+      },
+      "vm_map_and_assemble": {
+        "median_s": 0.012213569018058479,
+        "minimum_s": 0.00925466907210648,
+        "p90_s": 0.013653873931616545
+      },
+      "compiled_map_and_assemble": {
+        "median_s": 0.002270238008350134,
+        "minimum_s": 0.0022208449663594365,
+        "p90_s": 0.0024622485507279634
+      },
+      "map_only_speedup": 20.61717788431368,
+      "end_to_end_speedup": 5.379862804312105,
+      "compiled_break_even_map_evaluations": 205.05760927633335,
+      "compiled_break_even_end_to_end_evaluations": 195.87794462976132
+    },
+    "12": {
+      "map_backend": "ThreadMap",
+      "matrix_nnz": 23056,
+      "max_abs_error_compiled_vs_vm": 0.0,
+      "vm_map_only": {
+        "median_s": 0.020568729960359633,
+        "minimum_s": 0.018539954093284905,
+        "p90_s": 0.022491053817793726
+      },
+      "compiled_map_only": {
+        "median_s": 0.0005537379765883088,
+        "minimum_s": 0.0005277100717648864,
+        "p90_s": 0.000603169179521501
+      },
+      "vm_map_and_assemble": {
+        "median_s": 0.020084321033209562,
+        "minimum_s": 0.01895651500672102,
+        "p90_s": 0.022244165558367966
+      },
+      "compiled_map_and_assemble": {
+        "median_s": 0.0023126170272007585,
+        "minimum_s": 0.002287760959006846,
+        "p90_s": 0.0023866706527769566
+      },
+      "map_only_speedup": 37.145239860714845,
+      "end_to_end_speedup": 8.684672298517173,
+      "compiled_break_even_map_evaluations": 97.31101778777972,
+      "compiled_break_even_end_to_end_evaluations": 109.59440019350473
+    }
+  },
+  "limitations": [
+    "The output is an already differentiated local exact Hessian, not an external primal function differentiated by CasADi.",
+    "Scatter-add is Python/SciPy here; a production hess_l callback needs native sparse assembly and an IPOPT sparsity/order audit.",
+    "No IPOPT solve, feasibility certificate, or FHO graph construction is performed."
+  ]
+}

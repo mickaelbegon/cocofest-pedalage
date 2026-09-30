@@ -79,8 +79,8 @@ prepare_seed() {
     --standard-warmup-seed .github/benchmark-seeds/legacy-resistive-0p22-warmup.npz \
     --legacy-standard-warmup-seed-signed-torque 0.22 \
     --standard-warmup-seed-continuation \
-    --warmup-ipopt-linear-solver mumps \
-    --ipopt-linear-solver mumps \
+    --warmup-ipopt-linear-solver ma57 \
+    --ipopt-linear-solver ma57 \
     --ipopt-max-iter 2000 \
     --ipopt-disable-historical-initial-guess \
     --reduced-cycling-profile "$workspace/benchmark-seed-result/reduced-cycling-fourier12.npz" \

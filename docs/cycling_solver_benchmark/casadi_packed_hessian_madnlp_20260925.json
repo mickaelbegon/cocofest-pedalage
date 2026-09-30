@@ -1,0 +1,199 @@
+{
+  "casadi": "3.7.2+",
+  "casadi_path": "/home/mickaelbegon/miniforge3/envs/cocofest-madnlp32/lib/python3.11/site-packages/casadi/__init__.py",
+  "numpy": "2.4.6",
+  "scipy": "1.17.1",
+  "python": "3.11.16",
+  "machine": "x86_64",
+  "cpu_affinity": [
+    12,
+    13,
+    14,
+    15
+  ],
+  "numeric_threads_env": {
+    "OMP_NUM_THREADS": "1",
+    "OMP_THREAD_LIMIT": null,
+    "OPENBLAS_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "BLIS_NUM_THREADS": null,
+    "NUMEXPR_NUM_THREADS": "1"
+  },
+  "cases": [
+    {
+      "n_stages": 60,
+      "n_variables": 484,
+      "workers": 4,
+      "global_serial_build_s": 0.05974927800707519,
+      "global_serial_nnz": 5772,
+      "global_thread_build_s": 0.014636482927016914,
+      "global_thread_nnz": 5772,
+      "global_openmp_build_s": 0.01411951391492039,
+      "global_openmp_nnz": 5772,
+      "global_serial_max_abs_error": 0.0,
+      "global_serial_eval": {
+        "median_s": 0.04351801396114752,
+        "min_s": 0.04298642696812749,
+        "p90_s": 0.04414252903079614
+      },
+      "global_serial_children": [
+        "MXFunction",
+        "MXFunction",
+        "Map",
+        "MXFunction",
+        "MXFunction",
+        "Map",
+        "MXFunction"
+      ],
+      "global_thread_max_abs_error": 0.0,
+      "global_thread_eval": {
+        "median_s": 0.012335056439042091,
+        "min_s": 0.011028225999325514,
+        "p90_s": 0.012952706532087178
+      },
+      "global_thread_children": [
+        "MXFunction",
+        "MXFunction",
+        "ThreadMap",
+        "MXFunction",
+        "MXFunction",
+        "Map",
+        "MXFunction"
+      ],
+      "global_openmp_max_abs_error": 0.0,
+      "global_openmp_eval": {
+        "median_s": 0.04272523708641529,
+        "min_s": 0.041830169036984444,
+        "p90_s": 0.04404080129461363
+      },
+      "global_openmp_children": [
+        "MXFunction",
+        "MXFunction",
+        "OmpMap",
+        "MXFunction",
+        "MXFunction",
+        "Map",
+        "MXFunction"
+      ],
+      "local_serial_max_abs_error": 8.326672684688674e-17,
+      "local_serial_map_only": {
+        "median_s": 0.0058589240070432425,
+        "min_s": 0.005806391010992229,
+        "p90_s": 0.006044792686589062
+      },
+      "local_serial_eval_assemble": {
+        "median_s": 0.006603215995710343,
+        "min_s": 0.006455157999880612,
+        "p90_s": 0.0066678476636298
+      },
+      "local_serial_map_class": "Map",
+      "local_thread_max_abs_error": 8.326672684688674e-17,
+      "local_thread_map_only": {
+        "median_s": 0.004137074516620487,
+        "min_s": 0.0038584269350394607,
+        "p90_s": 0.004470111022237688
+      },
+      "local_thread_eval_assemble": {
+        "median_s": 0.004949798982124776,
+        "min_s": 0.004707169020548463,
+        "p90_s": 0.005336085625458509
+      },
+      "local_thread_map_class": "ThreadMap",
+      "local_openmp_max_abs_error": 8.326672684688674e-17,
+      "local_openmp_map_only": {
+        "median_s": 0.00641707592876628,
+        "min_s": 0.006223683012649417,
+        "p90_s": 0.006570522673428059
+      },
+      "local_openmp_eval_assemble": {
+        "median_s": 0.006906804454047233,
+        "min_s": 0.006846670992672443,
+        "p90_s": 0.006984947179444134
+      },
+      "local_openmp_map_class": "OmpMap",
+      "packets": {
+        "1": {
+          "n_packets": 60,
+          "packet_dim": 12,
+          "build_s": 0.02758888597600162,
+          "serial_max_abs_error": 8.326672684688674e-17,
+          "serial_map_only": {
+            "median_s": 0.029399062041193247,
+            "min_s": 0.02726213401183486,
+            "p90_s": 0.029808538337238132
+          },
+          "serial_eval_assemble": {
+            "median_s": 0.02984172198921442,
+            "min_s": 0.028396771987900138,
+            "p90_s": 0.03031496861949563
+          },
+          "thread_max_abs_error": 8.326672684688674e-17,
+          "thread_map_only": {
+            "median_s": 0.008379536971915513,
+            "min_s": 0.007572763948701322,
+            "p90_s": 0.008539715025108308
+          },
+          "thread_eval_assemble": {
+            "median_s": 0.009057438524905592,
+            "min_s": 0.008888059994205832,
+            "p90_s": 0.009207074262667448
+          }
+        },
+        "5": {
+          "n_packets": 12,
+          "packet_dim": 44,
+          "build_s": 0.035083994967862964,
+          "serial_max_abs_error": 6.938893903907228e-17,
+          "serial_map_only": {
+            "median_s": 0.031399634026456624,
+            "min_s": 0.029689727001823485,
+            "p90_s": 0.031764439702965316
+          },
+          "serial_eval_assemble": {
+            "median_s": 0.03181541449157521,
+            "min_s": 0.03004206798505038,
+            "p90_s": 0.032430082885548474
+          },
+          "thread_max_abs_error": 6.938893903907228e-17,
+          "thread_map_only": {
+            "median_s": 0.008371071016881615,
+            "min_s": 0.007797845988534391,
+            "p90_s": 0.008482987771276384
+          },
+          "thread_eval_assemble": {
+            "median_s": 0.00993024103809148,
+            "min_s": 0.009663495002314448,
+            "p90_s": 0.01020332919433713
+          }
+        },
+        "10": {
+          "n_packets": 6,
+          "packet_dim": 84,
+          "build_s": 0.009160691988654435,
+          "serial_max_abs_error": 8.326672684688674e-17,
+          "serial_map_only": {
+            "median_s": 0.03930783306714147,
+            "min_s": 0.03864057606551796,
+            "p90_s": 0.03985939455451444
+          },
+          "serial_eval_assemble": {
+            "median_s": 0.042447441432159394,
+            "min_s": 0.04203659493941814,
+            "p90_s": 0.04318378297612071
+          },
+          "thread_max_abs_error": 8.326672684688674e-17,
+          "thread_map_only": {
+            "median_s": 0.011679621995426714,
+            "min_s": 0.010405938024632633,
+            "p90_s": 0.01183314536465332
+          },
+          "thread_eval_assemble": {
+            "median_s": 0.01382760051637888,
+            "min_s": 0.013386188074946404,
+            "p90_s": 0.014330644661094993
+          }
+        }
+      }
+    }
+  ]
+}

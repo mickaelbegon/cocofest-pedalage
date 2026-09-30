@@ -65,6 +65,57 @@ INTERESTING = re.compile(
 NOISE = re.compile(r"CUDA\.jl|CUDA runtime|CUDA_Runtime|cuda\.juliagpu\.org")
 
 
+def parse_cpu_affinity(raw: str) -> frozenset[int]:
+    """Parse a Linux CPU set such as ``0-3,8,10-11``.
+
+    A process affinity is inherited by every RHO/FHO solver child, which is
+    exactly what the continuation needs: constrain the whole process tree, not
+    only the lightweight Python driver.
+    """
+
+    cpus: set[int] = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            raise argparse.ArgumentTypeError(
+                "CPU affinity must be a comma-separated list of CPUs or ranges."
+            )
+        match = re.fullmatch(r"(\d+)(?:-(\d+))?", part)
+        if match is None:
+            raise argparse.ArgumentTypeError(
+                f"invalid CPU affinity element {part!r}; use e.g. 0-3,8,10-11."
+            )
+        start = int(match.group(1))
+        stop = int(match.group(2) or start)
+        if stop < start:
+            raise argparse.ArgumentTypeError(
+                f"invalid descending CPU range {part!r}."
+            )
+        cpus.update(range(start, stop + 1))
+    if not cpus:
+        raise argparse.ArgumentTypeError("CPU affinity cannot be empty.")
+    return frozenset(cpus)
+
+
+def validate_cpu_affinity(cpus: frozenset[int], worker_threads: int) -> None:
+    """Fail early rather than silently oversubscribing an unavailable CPU set."""
+
+    if not hasattr(os, "sched_setaffinity") or not hasattr(os, "sched_getaffinity"):
+        raise ValueError("--cpu-affinity requires Linux sched_setaffinity support.")
+    allowed = os.sched_getaffinity(0)
+    unavailable = sorted(cpus.difference(allowed))
+    if unavailable:
+        raise ValueError(
+            "--cpu-affinity contains CPUs unavailable to this process: "
+            + ",".join(map(str, unavailable))
+        )
+    if worker_threads > len(cpus):
+        raise ValueError(
+            "--threads cannot exceed the number of CPUs selected by "
+            "--cpu-affinity."
+        )
+
+
 def parse_arguments(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -84,15 +135,39 @@ def parse_arguments(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument("--threads", type=int, default=default_worker_threads())
     parser.add_argument("--numeric-threads", type=int, default=1)
+    parser.add_argument(
+        "--cpu-affinity",
+        type=parse_cpu_affinity,
+        metavar="CPUS",
+        help=(
+            "Linux CPU set inherited by the FHO/RHO process tree, e.g. 0-11. "
+            "Use it with --threads no greater than the selected CPU count."
+        ),
+    )
     parser.add_argument("--memory-limit-gib", default="auto",
                         help="process-tree peak RSS cap, or 'auto'")
     parser.add_argument("--max-iterations", type=int, default=2000)
+    parser.add_argument(
+        "--bootstrap-rho-prefix-cycles",
+        type=int,
+        choices=(2, 3),
+        help="Initial FHO built directly from this many certified reference RHO cycles (default: 2).",
+    )
     parser.add_argument(
         "--continuation-step-cycles",
         type=int,
         help="RHO cycles appended before the next FHO (new-run default: 3)",
     )
     parser.add_argument("--jump-objective-relative-tolerance", type=float)
+    parser.add_argument(
+        "--allow-fho-terminal-bridge",
+        action="store_true",
+        help=(
+            "when an RHO extension fails, test the next FHO directly from the "
+            "last certified FHO terminal state instead of imposing the RHO "
+            "prefix ceiling"
+        ),
+    )
     torque_group = parser.add_mutually_exclusive_group()
     torque_group.add_argument(
         "--assistance",
@@ -117,6 +192,14 @@ def parse_arguments(argv: list[str] | None) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--q-slack", default="0.002")
+    parser.add_argument(
+        "--reduced-terminal-half-step-velocity-guard",
+        action="store_true",
+        help=(
+            "Apply the optional terminal half-step cadence guard to RHO "
+            "handoffs; the MX FHO itself is unchanged."
+        ),
+    )
     location = parser.add_mutually_exclusive_group()
     location.add_argument("--output-dir")
     location.add_argument(
@@ -136,6 +219,14 @@ def parse_arguments(argv: list[str] | None) -> argparse.Namespace:
         help=(
             "solve and certify only the N-cycle RHO reference; do not launch "
             "any monolithic FHO"
+        ),
+    )
+    parser.add_argument(
+        "--rho-extension-only",
+        action="store_true",
+        help=(
+            "with --resume, certify sequential local RHO extensions from the "
+            "last FHO without launching another monolithic FHO"
         ),
     )
     parser.add_argument("--resume", action="store_true",
@@ -200,11 +291,20 @@ def apply_run_defaults(args: argparse.Namespace, output_dir: Path) -> dict | Non
             args.continuation_step_cycles = int(
                 report.get("continuation_step_cycles") or 1
             )
+        if args.bootstrap_rho_prefix_cycles is None:
+            args.bootstrap_rho_prefix_cycles = int(
+                report.get("bootstrap_rho_prefix_cycles") or 2
+            )
         if args.jump_objective_relative_tolerance is None:
             stored_tolerance = report.get("jump_objective_relative_tolerance")
             args.jump_objective_relative_tolerance = float(
                 0.005 if stored_tolerance is None else stored_tolerance
             )
+        # A resumed campaign must not silently restore the old RHO-prefix
+        # ceiling when its previous continuation explicitly enabled the
+        # independent FHO terminal bridge.
+        if report.get("allow_fho_terminal_bridge", False):
+            args.allow_fho_terminal_bridge = True
     else:
         args.max_cycles = 6 if args.max_cycles is None else args.max_cycles
         args.solver = "madnlp" if args.solver is None else args.solver
@@ -212,6 +312,10 @@ def apply_run_defaults(args: argparse.Namespace, output_dir: Path) -> dict | Non
             3
             if args.continuation_step_cycles is None
             else args.continuation_step_cycles
+        )
+        args.bootstrap_rho_prefix_cycles = (
+            2 if args.bootstrap_rho_prefix_cycles is None
+            else args.bootstrap_rho_prefix_cycles
         )
         args.jump_objective_relative_tolerance = (
             0.005
@@ -244,6 +348,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_arguments(argv)
     if args.rho_only and (args.resume or args.resume_from is not None):
         raise ValueError("--rho-only cannot be combined with --resume or --resume-from.")
+    if args.rho_extension_only and not (args.resume or args.resume_from is not None):
+        raise ValueError("--rho-extension-only requires --resume or --resume-from.")
     if args.resume_from is not None:
         output_dir = find_resume_directory(args.resume_from)
         args.resume = True
@@ -263,9 +369,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Missing {BENCHMARK}", file=sys.stderr)
         return 1
 
+    if args.cpu_affinity is not None:
+        validate_cpu_affinity(args.cpu_affinity, args.threads)
+
     raw_seed_dir = args.seed_dir or (REPO_ROOT / "benchmark-seed")
     seed_dir = raw_seed_dir.expanduser().resolve()
-    missing = [name for name in SEED_FILES if not (seed_dir / name).exists()]
+    # This continuation driver builds both its RHO reference and monolithic
+    # FHO attempts with ``mechanical_formulation=reduced``.  Neither path
+    # evaluates the full mechanical model, so a ``common-full`` artefact is
+    # not an input to this workflow.  Requiring it would turn an unrelated
+    # full-model seed contract into a blocker for a valid reduced FHO run.
+    required_seed_files = ("common-reduced.npz", "reduced-cycling-fourier12.npz")
+    missing = [name for name in required_seed_files if not (seed_dir / name).exists()]
     if missing:
         print(f"Missing seed file(s): {', '.join(missing)}", file=sys.stderr)
         print("Build them first: python .github/scripts/run_benchmarks.py --seed-only",
@@ -298,6 +413,7 @@ def main(argv: list[str] | None = None) -> int:
         "--memory-limit-gib", str(args.memory_limit_gib),
         "--n-threads", str(args.threads),
         "--max-iterations", str(args.max_iterations),
+        "--bootstrap-rho-prefix-cycles", str(args.bootstrap_rho_prefix_cycles),
         "--continuation-step-cycles", str(args.continuation_step_cycles),
         "--jump-objective-relative-tolerance", str(args.jump_objective_relative_tolerance),
         "--full-horizon-solver", args.solver,
@@ -313,8 +429,14 @@ def main(argv: list[str] | None = None) -> int:
         command += ["--attempt-timeout-s", str(args.attempt_timeout_s)]
     if args.resume:
         command.append("--resume")
+    if args.allow_fho_terminal_bridge:
+        command.append("--allow-fho-terminal-bridge")
+    if args.reduced_terminal_half_step_velocity_guard:
+        command.append("--reduced-terminal-half-step-velocity-guard")
     if args.rho_only:
         command.append("--rho-only")
+    if args.rho_extension_only:
+        command.append("--rho-extension-only")
 
     environment = base_environment(prefix, suite, args.threads, args.numeric_threads)
     log_path = output_dir / "driver.log"
@@ -332,6 +454,12 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Horizon     : up to {args.max_cycles} cycles, step "
           f"{args.continuation_step_cycles}, RSS cap {args.memory_limit_gib}")
     print(f"Threads     : {args.threads} (numerical libraries: {args.numeric_threads})")
+    if args.cpu_affinity is not None:
+        print(
+            "CPU affinity: "
+            + ",".join(map(str, sorted(args.cpu_affinity)))
+            + " (inherited by solver children)"
+        )
     torque_label = (
         f"signed {args.signed_crank_torque:+g} N.m"
         if args.signed_crank_torque is not None
@@ -350,6 +478,13 @@ def main(argv: list[str] | None = None) -> int:
                 f"\n{'=' * 78}\nRESUME to FHO_{args.max_cycles} at "
                 f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n{'=' * 78}\n"
             )
+        affinity_preexec = None
+        if args.cpu_affinity is not None:
+            affinity = set(args.cpu_affinity)
+
+            def affinity_preexec() -> None:
+                os.sched_setaffinity(0, affinity)
+
         process = subprocess.Popen(
             command,
             cwd=REPO_ROOT,
@@ -358,6 +493,7 @@ def main(argv: list[str] | None = None) -> int:
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            preexec_fn=affinity_preexec,
         )
         assert process.stdout is not None
         for line in process.stdout:

@@ -4,8 +4,15 @@
 Two consecutive reduced RHO cycles first initialize FHO_2.  Every subsequent
 problem is built from the last certified full-horizon solution.  By default the
 horizon grows by one cycle.  An adaptive step can instead append several
-terminal-state-homotoped RHO cycles before solving the next FHO; a rejected
+autonomous terminal-state RHO cycles before solving the next FHO; a rejected
 multi-cycle jump automatically falls back to the certified one-cycle ladder.
+Each local RHO first uses the carrier's extrapolated last cycle. Initial-state
+homotopy is a recovery recipe; the long RHO reference is never a prerequisite.
+
+Optionally, a failed one-cycle RHO handoff falls back to a direct FHO terminal
+bridge.  This deliberately separates ``RHO cannot produce cycle N+1`` from
+``FHO_N+1 is infeasible``: the latter is tested by IPOPT on an MX, uncompiled
+FHO transcription seeded from the certified FHO terminal state.
 """
 
 from __future__ import annotations
@@ -16,6 +23,7 @@ import json
 import math
 import os
 from pathlib import Path
+import shutil
 import signal
 import subprocess
 import sys
@@ -24,10 +32,53 @@ from typing import Iterable
 
 import numpy as np
 
+from cocofest.optimization.solution_archive import physical_archive_arrays
+
 GIB = 1024**3
 SMALL_RUNNER_RSS_LIMIT_GIB = 12.5
 LARGE_RUNNER_RSS_LIMIT_GIB = 97.5
 RHO_INITIAL_STATE_HOMOTOPY_MIN_STEP = 1.0 / 256.0
+
+
+def _refresh_physical_archive(
+    payload: dict[str, np.ndarray], metadata: dict,
+) -> dict:
+    """Regenerate physical replay arrays after changing a trajectory length.
+
+    The FHO/RHO seed constructors frequently reduce a multi-cycle archive to
+    one cycle.  Retaining the source ``physical__*`` arrays or its
+    ``physical_cycles`` metadata then makes the otherwise valid seed fail
+    strict archive validation before the NLP is built.
+    """
+
+    for key in tuple(payload):
+        if key.startswith("physical__"):
+            payload.pop(key)
+    states = {
+        key.removeprefix("states__"): value
+        for key, value in payload.items()
+        if key.startswith("states__")
+    }
+    controls = {
+        key.removeprefix("controls__"): value
+        for key, value in payload.items()
+        if key.startswith("controls__")
+    }
+    arrays, refreshed = physical_archive_arrays(states, controls, metadata)
+    payload.update(arrays)
+    return refreshed
+
+
+class RhoReferenceCycleUnavailable(ValueError):
+    """A valid RHO reference ends before the requested continuation cycle."""
+
+    def __init__(self, target_cycle: int, available_cycles: int):
+        self.target_cycle = target_cycle
+        self.available_cycles = available_cycles
+        super().__init__(
+            f"RHO reference contains {available_cycles} certified cycles; "
+            f"cycle {target_cycle} is unavailable."
+        )
 
 
 def horizon_sweep_targets(max_cycles: int) -> list[int]:
@@ -392,6 +443,7 @@ def write_rho_seed_prefix(
             "discarded_trailing_failed_rho_window": discarded_failed_window,
         }
     )
+    metadata = _refresh_physical_archive(payload, metadata)
     payload["metadata__json"] = np.asarray(
         json.dumps(metadata, sort_keys=True, separators=(",", ":"))
     )
@@ -408,10 +460,14 @@ def write_rho_seed_cycle(
     with np.load(source_path, allow_pickle=False) as data:
         metadata = _load_metadata(data)
         source_cycles = int(metadata["cycles_per_window"])
-        if cycle_number < 1 or cycle_number > source_cycles:
+        if source_cycles < 1:
+            raise ValueError("The RHO reference must contain a positive number of cycles.")
+        if cycle_number < 1:
             raise ValueError(
                 f"cycle_number must be in [1, {source_cycles}], got {cycle_number}."
             )
+        if cycle_number > source_cycles:
+            raise RhoReferenceCycleUnavailable(cycle_number, source_cycles)
         cycle_index = cycle_number - 1
         payload: dict[str, np.ndarray] = {}
         discarded_failed_window = False
@@ -452,6 +508,7 @@ def write_rho_seed_cycle(
             "producer_cycle_number": cycle_number,
         }
     )
+    metadata = _refresh_physical_archive(payload, metadata)
     payload["metadata__json"] = np.asarray(
         json.dumps(metadata, sort_keys=True, separators=(",", ":"))
     )
@@ -577,6 +634,7 @@ def write_rho_initial_state_homotopy_seed(
             "homotopy_theta_winding_shift": theta_winding_shift,
         }
     )
+    metadata = _refresh_physical_archive(payload, metadata)
     payload["metadata__json"] = np.asarray(
         json.dumps(metadata, sort_keys=True, separators=(",", ":"))
     )
@@ -603,6 +661,7 @@ def write_fho_terminal_continuation_seed(source_path: Path, output_path: Path) -
             raise ValueError("The continuation source must use reduced mechanics.")
 
         payload: dict[str, np.ndarray] = {}
+        terminal_theta_phase_projection_rad = 0.0
         for key in data.files:
             if key == "metadata__json":
                 continue
@@ -620,14 +679,54 @@ def write_fho_terminal_continuation_seed(source_path: Path, output_path: Path) -
                 continuation[:, :1] = last_cycle[:, -1:]
                 continuation[:, 1:] = last_cycle[:, 1:]
                 if state_key == "theta":
+                    # The FHO terminal bound permits a small phase slack.  A
+                    # terminal RHO, however, starts at that exact terminal
+                    # state and must complete one physical winding.  Repeating
+                    # the previous FHO increment transfers the slack twice and
+                    # leaves the RHO seed on its terminal bound.  Project only
+                    # the *seed* phase progressively so x(0) is untouched and
+                    # theta(T) = theta(0) +/- 2*pi exactly.
                     continuation[:, 1:] += drift
+                    winding = np.where(drift < 0.0, -2.0 * np.pi, 2.0 * np.pi)
+                    desired_terminal = continuation[:, :1] + winding
+                    phase_correction = desired_terminal - continuation[:, -1:]
+                    continuation[:, 1:] += phase_correction * np.linspace(
+                        1.0 / intervals, 1.0, intervals
+                    )
+                    terminal_theta_phase_projection_rad = float(
+                        np.max(np.abs(phase_correction))
+                    )
                 elif state_key == "q":
                     continuation[-1:, 1:] += drift[-1:, :]
                     if continuation.shape[0] > 1:
                         continuation[:-1, 1:] += drift[:-1, :] * np.linspace(
                             1.0, 0.0, intervals
                         )
-                elif state_key.startswith(("F_", "A_", "Tau1_", "Km_")):
+                elif state_key.startswith("F_"):
+                    # Force is a fast, phase-dependent state.  Unlike fatigue
+                    # states, translating the whole repeated cycle by its
+                    # boundary drift can make the force nonphysical (the
+                    # FHO_91 -> RHO_92 handoff, for instance, produced a
+                    # negative Delt_post force).  Preserve the exact terminal
+                    # state at node zero and fade the template correction over
+                    # a short initial segment.  The subsequent RHO projection
+                    # and solve are still responsible for restoring dynamics.
+                    #
+                    # This is deliberately local: it does not alter the
+                    # certified FHO trajectory or its terminal slack.
+                    transition_nodes = min(12, intervals)
+                    correction_weights = np.zeros(intervals, dtype=float)
+                    correction_weights[:transition_nodes] = 1.0 - (
+                        np.arange(1, transition_nodes + 1, dtype=float)
+                        / float(transition_nodes)
+                    )
+                    continuation[:, 1:] += drift * correction_weights
+                    # Muscle force has a physical lower bound at zero.  The
+                    # transition is only a warm start, but keeping it inside
+                    # this bound avoids presenting IPOPT with an artificial
+                    # infeasible force state solely due to seed stitching.
+                    continuation[:, 1:] = np.maximum(continuation[:, 1:], 0.0)
+                elif state_key.startswith(("A_", "Tau1_", "Km_")):
                     continuation[:, 1:] += drift
                 else:
                     continuation[:, 1:] += drift * np.linspace(1.0, 0.0, intervals)
@@ -647,8 +746,12 @@ def write_fho_terminal_continuation_seed(source_path: Path, output_path: Path) -
             "cycles_per_window": 1,
             "producer_mode": "full_horizon_terminal_continuation",
             "producer_source_cycles": source_cycles,
+            "producer_terminal_theta_phase_projection_rad": (
+                terminal_theta_phase_projection_rad
+            ),
         }
     )
+    metadata = _refresh_physical_archive(payload, metadata)
     payload["metadata__json"] = np.asarray(
         json.dumps(metadata, sort_keys=True, separators=(",", ":"))
     )
@@ -679,11 +782,13 @@ def append_rho_extension_cycle(
 
         prefix_keys = {
             key for key in prefix_data.files
-            if key != "metadata__json" and not key.startswith("applied_pulse_widths__")
+            if key != "metadata__json"
+            and not key.startswith(("applied_pulse_widths__", "physical__"))
         }
         extension_keys = {
             key for key in extension_data.files
-            if key != "metadata__json" and not key.startswith("applied_pulse_widths__")
+            if key != "metadata__json"
+            and not key.startswith(("applied_pulse_widths__", "physical__"))
         }
         if prefix_keys != extension_keys:
             raise ValueError("The RHO prefix and extension variables do not match.")
@@ -734,12 +839,34 @@ def append_rho_extension_cycle(
             ),
         }
     )
+    metadata = _refresh_physical_archive(payload, metadata)
     payload["metadata__json"] = np.asarray(
         json.dumps(metadata, sort_keys=True, separators=(",", ":"))
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(output_path, **payload)
     return metadata
+
+
+def _terminal_handoff_error(source_path: Path, extension_path: Path) -> float:
+    """Audit every first-node state, including fatigue and stimulation memory."""
+    with np.load(source_path, allow_pickle=False) as source, np.load(
+        extension_path, allow_pickle=False
+    ) as extension:
+        keys = {key for key in source.files if key.startswith("states__")}
+        if not keys or keys != {key for key in extension.files if key.startswith("states__")}:
+            return math.inf
+        maximum = 0.0
+        for key in keys:
+            terminal = np.asarray(source[key], dtype=float)[..., -1]
+            initial = np.asarray(extension[key], dtype=float)[..., 0]
+            if terminal.shape != initial.shape or not np.all(np.isfinite(initial)):
+                return math.inf
+            error = float(np.max(np.abs(initial - terminal)))
+            if not math.isfinite(error):
+                return math.inf
+            maximum = max(maximum, error)
+        return maximum
 
 
 def _linear_solver_for(solver: str) -> str:
@@ -882,6 +1009,78 @@ def _benchmark_validated_cycles(
         return 0
 
 
+def _rho_prefix_stop_assessment(result_path: Path) -> dict:
+    """Keep a RHO seed ceiling distinct from a physiological verdict."""
+
+    unknown = {
+        "classification": "unknown",
+        "physiological_limit_certified": False,
+        "grid_or_transfer_diagnostic_present": False,
+        "solver_or_numerical_failure_present": False,
+        "failed_cycle": None,
+        "evidence": ["unreadable_rho_result"],
+    }
+    try:
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+        result = payload["results"][0]
+        diagnostics = result.get("physical_crank_diagnostics") or {}
+        issues = [str(issue) for issue in diagnostics.get("issues") or []]
+        grid_issue = any("wheel_cycle_grid" in issue for issue in issues)
+        failed_window = next(
+            (
+                window
+                for window in reversed(result.get("windows") or [])
+                if window.get("validated") is False
+            ),
+            None,
+        )
+        solver_failed = bool(
+            failed_window
+            and (
+                failed_window.get("solver_converged") is False
+                or failed_window.get("primal_feasible") is False
+            )
+        )
+        fatigue = result.get("fatigue_endurance_outcome") or {}
+        fatigue_accepted = fatigue.get("accepted") is True
+        first_failed = result.get("first_failed_rho")
+        failed_cycle = (
+            int(first_failed)
+            if isinstance(first_failed, (int, float))
+            else None
+        )
+        evidence = list(issues)
+        if failed_window:
+            evidence.extend(
+                [
+                    "failed_window_solver_converged="
+                    f"{failed_window.get('solver_converged')}",
+                    "failed_window_primal_feasible="
+                    f"{failed_window.get('primal_feasible')}",
+                ]
+            )
+        if solver_failed:
+            classification = "numerical_or_optimization_failure"
+        elif grid_issue:
+            classification = "grid_or_transfer_diagnostic"
+        elif fatigue_accepted:
+            classification = "physiological_endurance_limit"
+        else:
+            classification = "inconclusive"
+        return {
+            "classification": classification,
+            "physiological_limit_certified": bool(
+                classification == "physiological_endurance_limit"
+            ),
+            "grid_or_transfer_diagnostic_present": grid_issue,
+            "solver_or_numerical_failure_present": solver_failed,
+            "failed_cycle": failed_cycle,
+            "evidence": evidence,
+        }
+    except (OSError, ValueError, KeyError, IndexError, TypeError):
+        return unknown
+
+
 def _seed_cycle_count(seed_path: Path) -> int:
     try:
         with np.load(seed_path, allow_pickle=False) as data:
@@ -890,11 +1089,23 @@ def _seed_cycle_count(seed_path: Path) -> int:
         return 0
 
 
-def _common_solver_options(args: argparse.Namespace) -> list[str]:
+def _common_solver_options(
+    args: argparse.Namespace, *, standard_warmup_seed: bool = True
+) -> list[str]:
     torque_option = (
         ["--signed-crank-torque", str(args.signed_crank_torque)]
         if getattr(args, "signed_crank_torque", None) is not None
         else ["--crank-assistance", str(args.crank_assistance)]
+    )
+    warmup_options = (
+        [
+            "--standard-warmup-seed",
+            str(args.workspace / ".github/benchmark-seeds/legacy-resistive-0p22-warmup.npz"),
+            "--legacy-standard-warmup-seed-signed-torque",
+            "0.22",
+            "--standard-warmup-seed-continuation",
+        ]
+        if standard_warmup_seed else []
     )
     return [
         "--objective",
@@ -918,13 +1129,7 @@ def _common_solver_options(args: argparse.Namespace) -> list[str]:
         "1e-8",
         "--primal-feasibility-threshold",
         "1e-5",
-        "--standard-warmup-seed",
-        str(
-            args.workspace / ".github/benchmark-seeds/legacy-resistive-0p22-warmup.npz"
-        ),
-        "--legacy-standard-warmup-seed-signed-torque",
-        "0.22",
-        "--standard-warmup-seed-continuation",
+        *warmup_options,
         "--warmup-ipopt-linear-solver",
         "ma57",
         "--ipopt-linear-solver",
@@ -959,6 +1164,7 @@ def _rho_command(
         n_windows = args.max_cycles
     if n_windows < 1:
         raise ValueError("n_windows must be strictly positive.")
+    is_terminal_extension = common_initial_solution is not None
     if common_initial_solution is None:
         common_initial_solution = args.seed_dir / "common-reduced.npz"
     command = [
@@ -969,14 +1175,38 @@ def _rho_command(
         ),
         "--solvers",
         "ipopt",
-        *_common_solver_options(args),
+        *_common_solver_options(args, standard_warmup_seed=not is_terminal_extension),
     ]
-    # All reference-RHO windows share one fixed one-cycle transcription.  C
-    # codegen is therefore built once and reused for every window in this
-    # process.  Do not enable it for the one-cycle homotopy extensions: each
-    # extension is a separate process, so it would only add a build cost.
+    if is_terminal_extension:
+        # A local continuation already carries the certified chronology and
+        # terminal fatigue; a fresh warmup would change its initial problem.
+        command.append("--ipopt-disable-standard-warmup")
+    # The RHO transcription stays SX and its numerical initial state is an
+    # input (``x0``), not part of the generated NLP.  The reference RHO keeps
+    # its in-process compilation, while the one-cycle homotopy extensions use
+    # a persistent content-addressed cache: the first child process builds the
+    # native evaluator and later children load that same library despite using
+    # different warm-start states.  Do not apply this to FHO: its MX graph is
+    # intentionally interpreted, without C compilation.
     if n_windows > 1:
         command.append("--ipopt-c-compile")
+    else:
+        cache_dir = Path(
+            getattr(
+                args,
+                "rho_transition_c_cache_dir",
+                Path(args.output_dir) / "rho-transition-ipopt-c-cache",
+            )
+        )
+        command.extend(
+            [
+                "--ipopt-c-compile",
+                "--ipopt-c-cache-dir",
+                str(cache_dir),
+                "--ipopt-c-cache-name",
+                "rho-transition-sx",
+            ]
+        )
     command.extend(
         [
             "--ipopt-use-sx",
@@ -993,6 +1223,11 @@ def _rho_command(
             str(n_windows),
             "--max-consecutive-failing",
             "1",
+            # A failed RHO primal is not a valid state transition. Keeping the
+            # last certified first node makes the reported RHO ceiling usable
+            # as an FHO seed boundary instead of exporting a shifted failed
+            # terminal state.
+            "--retry-failed-rho-without-advance",
             "--mechanical-formulation",
             "reduced",
             "--common-initial-solution",
@@ -1006,6 +1241,11 @@ def _rho_command(
             str(result_path),
         ]
     )
+    if getattr(args, "reduced_terminal_half_step_velocity_guard", False):
+        # This is intentionally limited to the one-cycle RHO handoffs.  It
+        # makes the state inherited by the next RHO feasible for the first
+        # frozen half interval, without changing the MX full-horizon NLP.
+        command.append("--reduced-terminal-half-step-velocity-guard")
     return command
 
 
@@ -1030,23 +1270,21 @@ def _full_horizon_command(
         ),
         "--solvers",
         full_horizon_solver,
-        *_common_solver_options(args),
+        *_common_solver_options(args, standard_warmup_seed=False),
         "--ipopt-no-use-sx",
         "--ipopt-max-iter",
         str(args.max_iterations),
     ]
-    if cycles >= 2:
-        # Every full-horizon attempt consumes a prefix from the certified RHO
-        # reference. That prefix has already consumed the one-cycle warmup, so
-        # it must supply the solver chronology itself. This includes FHO_2:
-        # loading the standard warmup there would conflict with the prefix
-        # metadata before IPOPT starts.
-        command.extend(
-            [
-                "--ipopt-disable-standard-warmup",
-                "--adopt-common-initial-solution-warmup-cycles",
-            ]
-        )
+    # Every FHO consumes an explicit certified RHO/FHO seed, including FHO_1.
+    # Its warmup chronology belongs to that seed, not to the horizon length.
+    # Running a fresh warmup here either changes the initial problem or rejects
+    # the seed's warmup_cycles_consumed before the numerical solve even starts.
+    command.extend(
+        [
+            "--ipopt-disable-standard-warmup",
+            "--adopt-common-initial-solution-warmup-cycles",
+        ]
+    )
     command.extend(
         [
             "--optional-nlp-periodic-ipopt-hot-start",
@@ -1081,6 +1319,40 @@ def _full_horizon_command(
     return command
 
 
+def _seed_handoff_error(result_path: Path, log_path: Path) -> str | None:
+    """Identify explicit seed contract exceptions without inferring fatigue."""
+
+    messages: list[str] = []
+    try:
+        payload = json.loads(result_path.read_text(encoding="utf-8"))
+        error = payload["results"][0].get("error")
+        if error is not None:
+            messages.append(str(error))
+    except (OSError, ValueError, KeyError, IndexError, TypeError):
+        pass
+    try:
+        # Normal diagnostic lines mention the seed too; only exception lines
+        # indicate a failed contract.
+        messages.extend(
+            line
+            for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            if line.startswith(("ValueError:", "KeyError:", "FileNotFoundError:"))
+        )
+    except OSError:
+        pass
+    for message in messages:
+        if any(
+            marker in message.lower()
+            for marker in (
+                "common initial solution",
+                "full-horizon prefix",
+                "warmup_cycles_consumed",
+            )
+        ):
+            return message
+    return None
+
+
 def _attempt_record(
     cycles: int,
     phase: str,
@@ -1093,6 +1365,7 @@ def _attempt_record(
     expected_solver: str = "ipopt",
 ) -> dict:
     unknown_mumps_warning = _log_has_unknown_mumps_warning(Path(monitored.log_path))
+    handoff_error = _seed_handoff_error(result_path, Path(monitored.log_path))
     certificate = _benchmark_success(
         result_path,
         expected_mode="single_shot",
@@ -1108,6 +1381,7 @@ def _attempt_record(
             monitored.return_code != 0
             or not _benchmark_payload_is_readable(result_path)
             or unknown_mumps_warning
+            or handoff_error is not None
             or (certificate and not solution_available)
         )
     )
@@ -1117,6 +1391,7 @@ def _attempt_record(
         and monitored.return_code == 0
         and not monitored.memory_limit_exceeded
         and not monitored.timed_out
+        and not infrastructure_error
     )
     failure_kind = (
         None
@@ -1128,7 +1403,11 @@ def _attempt_record(
                 "timeout"
                 if monitored.timed_out
                 else (
-                    "infrastructure_error" if infrastructure_error else "solver_failure"
+                    "seed_handoff_error"
+                    if handoff_error is not None
+                    else (
+                        "infrastructure_error" if infrastructure_error else "solver_failure"
+                    )
                 )
             )
         )
@@ -1139,9 +1418,16 @@ def _attempt_record(
         "phase": phase,
         "success": success,
         "failure_kind": failure_kind,
+        "failure_class": (
+            None if success else "resource_limit" if monitored.memory_limit_exceeded or monitored.timed_out
+            else "handoff_failure" if handoff_error is not None
+            else "infrastructure_error" if infrastructure_error else "numerical_unresolved"
+        ),
         "certificate_valid": certificate,
         "solution_available": solution_available,
         "infrastructure_error": infrastructure_error,
+        "seed_handoff_error": handoff_error,
+        "physiological_limit_certified": False,
         "unknown_mumps_warning": unknown_mumps_warning,
         "result_path": str(result_path),
         "solution_path": None if solution_path is None else str(solution_path),
@@ -1172,6 +1458,8 @@ def _write_report(path: Path, report: dict) -> None:
 
 
 def _write_markdown(path: Path, report: dict) -> None:
+    prefix_assessment = report.get("rho_prefix_stop_assessment") or {}
+    prefix_classification = prefix_assessment.get("classification", "unknown")
     lines = [
         "# RHO reduced vs full-horizon size homotopy",
         "",
@@ -1190,6 +1478,11 @@ def _write_markdown(path: Path, report: dict) -> None:
         f"- Chaîne RHO/FHO construite : `{report.get('homotopy_constructed_cycles', 0)} cycles`",
         f"- Plus grand full horizon validé : `{report['largest_successful_cycles']}`",
         f"- Trous de convergence : `{report.get('solver_gap_cycles', [])}`",
+        (
+            "- Diagnostic du plafond de graine RHO : "
+            f"`{prefix_classification}` "
+            "(ce diagnostic n'est pas, à lui seul, une limite physiologique)"
+        ),
         (
             "- Initialisation : `FHO_N certifié + un RHO résolu depuis son état "
             "terminal`"
@@ -1309,6 +1602,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--n-threads", type=int, required=True)
     parser.add_argument("--max-iterations", type=int, default=2000)
     parser.add_argument(
+        "--bootstrap-rho-prefix-cycles",
+        type=int,
+        choices=(2, 3),
+        default=2,
+        help="Build the first FHO directly from 2 or 3 certified RHO reference cycles.",
+    )
+    parser.add_argument(
         "--continuation-step-cycles",
         type=int,
         default=1,
@@ -1324,6 +1624,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Maximum relative objective degradation of a multi-cycle FHO "
             "against its additive FHO+RHO seed before falling back to +1."
+        ),
+    )
+    parser.add_argument(
+        "--allow-fho-terminal-bridge",
+        action="store_true",
+        help=(
+            "When a one-cycle RHO extension cannot be certified, try the next "
+            "MX FHO directly from the certified FHO terminal state instead of "
+            "treating the RHO prefix ceiling as an FHO ceiling."
         ),
     )
     parser.add_argument(
@@ -1350,11 +1659,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--terminal-wheel-q-slack", type=float, default=0.002)
     parser.add_argument(
+        "--reduced-terminal-half-step-velocity-guard",
+        action="store_true",
+        help=(
+            "Apply the optional reduced cadence half-step guard to terminal "
+            "RHO nodes used to extend a certified FHO."
+        ),
+    )
+    parser.add_argument(
         "--rho-only",
         action="store_true",
         help=(
             "solve and certify only the concatenated RHO reference; skip all "
             "full-horizon attempts"
+        ),
+    )
+    parser.add_argument(
+        "--rho-extension-only",
+        action="store_true",
+        help=(
+            "With --resume, extend the last certified FHO using only sequential "
+            "one-cycle RHO handoffs.  This is a feasibility probe: it never "
+            "constructs or solves a new full-horizon NLP."
         ),
     )
     parser.add_argument("--python", default=sys.executable)
@@ -1390,16 +1716,19 @@ def _resume_run(
         raise ValueError(
             "The resumed --full-horizon-solver must match the existing report."
         )
+    if int(report.get("bootstrap_rho_prefix_cycles") or 2) != args.bootstrap_rho_prefix_cycles:
+        raise ValueError("The resumed bootstrap RHO prefix must match the existing report.")
+    if report.get("allow_fho_terminal_bridge", False):
+        args.allow_fho_terminal_bridge = True
 
     rho = report.get("rho") or {}
     rho_seed_path = Path(str(rho.get("seed_path", "")))
     rho_available_cycles = int(report.get("rho_available_cycles") or 0)
-    if not rho_seed_path.is_file() or _seed_cycle_count(rho_seed_path) != rho_available_cycles:
-        raise ValueError("The certified concatenated RHO seed is unavailable or inconsistent.")
-
     largest_successful_cycles = int(report.get("largest_successful_cycles") or 0)
-    if largest_successful_cycles < 2:
-        raise ValueError("Resume requires a certified FHO with at least two cycles.")
+    if largest_successful_cycles < 2 and (
+        not rho_seed_path.is_file() or _seed_cycle_count(rho_seed_path) != rho_available_cycles
+    ):
+        raise ValueError("The bootstrap concatenated RHO seed is unavailable or inconsistent.")
     successful_attempts = [
         attempt
         for attempt in report.get("full_horizon_attempts", [])
@@ -1407,13 +1736,19 @@ def _resume_run(
         and attempt.get("accepted_for_continuation", True)
         and int(attempt.get("cycles") or 0) == largest_successful_cycles
     ]
-    if not successful_attempts:
+    if largest_successful_cycles >= 2 and not successful_attempts:
         raise ValueError("The report does not identify the last certified FHO solution.")
-    current_full_solution = Path(successful_attempts[-1]["solution_path"])
-    if not current_full_solution.is_file():
+    current_full_solution = (
+        Path(successful_attempts[-1]["solution_path"])
+        if largest_successful_cycles >= 2
+        else None
+    )
+    if current_full_solution is not None and not current_full_solution.is_file():
         raise FileNotFoundError(f"Missing certified FHO solution: {current_full_solution}")
 
-    effective_max_cycles = min(args.max_cycles, rho_available_cycles)
+    # The reference is an optional template after the certified FHO bootstrap.
+    # Its numerical stopping point must not cap autonomous post-FHO RHO solves.
+    effective_max_cycles = args.max_cycles
     if effective_max_cycles < largest_successful_cycles:
         raise ValueError("--max-cycles cannot be below the certified resume point.")
     previous_stop_reason = report.get("stop_reason")
@@ -1429,6 +1764,9 @@ def _resume_run(
             "jump_objective_relative_tolerance": (
                 args.jump_objective_relative_tolerance
             ),
+            "allow_fho_terminal_bridge": args.allow_fho_terminal_bridge,
+            "initialization": "autonomous_certified_terminal_rho_chain",
+            "stop_class": None,
             "stop_reason": "running",
         }
     )
@@ -1442,6 +1780,38 @@ def _resume_run(
         }
     )
     _write_report(report_path, report)
+
+    if largest_successful_cycles < args.bootstrap_rho_prefix_cycles:
+        bootstrap_function = (
+            _bootstrap_direct_three_cycle_horizon
+            if args.bootstrap_rho_prefix_cycles == 3
+            else _bootstrap_full_horizon
+        )
+        bootstrap = bootstrap_function(
+            args,
+            report=report,
+            report_path=report_path,
+            markdown_path=markdown_path,
+            rho_seed_path=rho_seed_path,
+            rss_limit_bytes=rss_limit_bytes,
+        )
+        if not bootstrap["success"]:
+            return 3 if bootstrap["infrastructure_error"] else 0
+        largest_successful_cycles = args.bootstrap_rho_prefix_cycles
+        current_full_solution = Path(bootstrap["solution_path"])
+
+    if args.rho_extension_only:
+        return _probe_rho_extensions(
+            args,
+            report=report,
+            report_path=report_path,
+            markdown_path=markdown_path,
+            rho_seed_path=rho_seed_path,
+            effective_max_cycles=effective_max_cycles,
+            current_cycles=largest_successful_cycles,
+            current_solution=current_full_solution,
+            rss_limit_bytes=rss_limit_bytes,
+        )
 
     return _continue_adaptively(
         args,
@@ -1514,17 +1884,32 @@ def _run_horizon_attempt(
     mechanical_formulation: str = "reduced",
     prefix_solution_path: Path | None = None,
     heartbeat_seed_label: str | None = None,
+    common_initial_solution: Path | None = None,
 ) -> dict:
     if chance < 1:
         raise ValueError("chance must be strictly positive.")
     case_prefix = "full-horizon"
     case_dir = args.output_dir / f"{case_prefix}-{cycles:04d}" / f"chance-{chance}"
-    seed_path = case_dir / "rho-reduced-prefix.npz"
+    seed_path = case_dir / (
+        "rho-reduced-prefix.npz"
+        if common_initial_solution is None else "common-initial-solution.npz"
+    )
     result_path = case_dir / "result.json"
     solution_path = case_dir / "full-solution.npz"
     for stale_path in (result_path, solution_path):
         stale_path.unlink(missing_ok=True)
-    write_rho_seed_prefix(rho_seed, seed_path, cycles)
+    if common_initial_solution is None:
+        write_rho_seed_prefix(rho_seed, seed_path, cycles)
+    else:
+        if cycles != 1 or prefix_solution_path is not None:
+            raise ValueError("The common initial solution bootstrap is only valid for FHO_1.")
+        if _seed_cycle_count(common_initial_solution) != 1:
+            raise ValueError("The common initial solution must contain exactly one certified cycle.")
+        seed_path.parent.mkdir(parents=True, exist_ok=True)
+        # Snapshot the original certified primal exactly. RHO_1 re-solves this
+        # cycle and exports a different trajectory, which can place FHO_1 in a
+        # different basin even though the initial state/chronology agree.
+        shutil.copyfile(common_initial_solution, seed_path)
     monitored = run_monitored(
         _full_horizon_command(
             args,
@@ -1545,7 +1930,7 @@ def _run_horizon_attempt(
         poll_interval_s=args.poll_interval_s,
         timeout_s=args.attempt_timeout_s,
     )
-    return _attempt_record(
+    record = _attempt_record(
         cycles,
         phase,
         monitored,
@@ -1555,6 +1940,12 @@ def _run_horizon_attempt(
         prefix_solution_path=prefix_solution_path,
         expected_solver=getattr(args, "full_horizon_solver", "ipopt"),
     )
+    record["seed_source_path"] = str(
+        rho_seed if common_initial_solution is None else common_initial_solution
+    )
+    if common_initial_solution is not None:
+        record["seed_origin"] = "common_initial_solution"
+    return record
 
 
 def _run_extension_rho(
@@ -1567,15 +1958,34 @@ def _run_extension_rho(
     source_label: str | None = None,
     run_number: int = 1,
 ) -> dict:
-    """Homotope RHO_(N+1) from its RHO reference to the FHO_N terminal state."""
+    """Solve a local RHO at the carrier terminal, then recover by homotopy.
+
+    The carrier is either the certified FHO or the preceding certified local
+    RHO. Its last cycle is sufficient; a long reference is only a recovery
+    template. Intermediate homotopy solutions never extend the FHO prefix.
+    """
 
     if run_number < 1:
         raise ValueError("run_number must be strictly positive.")
     case_dir = args.output_dir / f"rho-extension-after-fho-{after_cycles:04d}"
     if run_number > 1:
         case_dir = case_dir / f"retry-{run_number:02d}"
+    local_seed_path = case_dir / "terminal-continuation-seed.npz"
+    write_fho_terminal_continuation_seed(source_full_solution, local_seed_path)
     reference_cycle_path = case_dir / "reference-rho-cycle.npz"
-    write_rho_seed_cycle(reference_rho_seed, reference_cycle_path, after_cycles + 1)
+    reference_origin = "carrier_last_certified_cycle"
+    # Build the autonomous fallback first. A damaged optional reference must
+    # not prevent a solve from an intact certified carrier.
+    write_rho_seed_cycle(
+        source_full_solution, reference_cycle_path, _seed_cycle_count(source_full_solution)
+    )
+    reference_warning = None
+    if reference_rho_seed.is_file():
+        try:
+            write_rho_seed_cycle(reference_rho_seed, reference_cycle_path, after_cycles + 1)
+            reference_origin = "long_rho_reference"
+        except (RhoReferenceCycleUnavailable, ValueError, KeyError, OSError) as error:
+            reference_warning = str(error)
 
     accepted_fraction = 0.0
     step = 0.25
@@ -1593,9 +2003,10 @@ def _run_extension_rho(
     memory_limit_exceeded = False
     timed_out = False
     return_code = 0
+    direct_attempt = True
 
     while accepted_fraction < 1.0:
-        fraction = min(1.0, accepted_fraction + step)
+        fraction = 1.0 if direct_attempt else min(1.0, accepted_fraction + step)
         attempt_number = len(stages) + 1
         stage_dir = case_dir / f"stage-{attempt_number:02d}-{fraction:.6f}"
         seed_path = stage_dir / "homotopy-seed.npz"
@@ -1603,13 +2014,18 @@ def _run_extension_rho(
         solution_path = stage_dir / "rho-solution.npz"
         for stale_path in (result_path, solution_path):
             stale_path.unlink(missing_ok=True)
-        seed_metadata = write_rho_initial_state_homotopy_seed(
-            source_solution_path,
-            reference_cycle_path,
-            source_full_solution,
-            seed_path,
-            fraction,
-        )
+        if direct_attempt:
+            seed_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(local_seed_path, seed_path)
+            seed_metadata = {"homotopy_maximum_initial_state_change": 0.0}
+        else:
+            seed_metadata = write_rho_initial_state_homotopy_seed(
+                source_solution_path,
+                reference_cycle_path,
+                source_full_solution,
+                seed_path,
+                fraction,
+            )
         monitored = run_monitored(
             _rho_command(
                 args,
@@ -1633,6 +2049,11 @@ def _run_extension_rho(
         solution_available = bool(
             solution_path.is_file() and _seed_cycle_count(solution_path) == 1
         )
+        handoff_error = (
+            _terminal_handoff_error(source_full_solution, solution_path)
+            if solution_available and fraction == 1.0 else None
+        )
+        handoff_valid = handoff_error is None or handoff_error <= 1e-5
         stage_unknown_warning = _log_has_unknown_mumps_warning(monitored.log_path)
         stage_infrastructure_error = bool(
             not monitored.memory_limit_exceeded
@@ -1647,6 +2068,8 @@ def _run_extension_rho(
         stage_success = bool(
             certificate
             and solution_available
+            and handoff_valid
+            and not stage_infrastructure_error
             and monitored.return_code == 0
             and not monitored.memory_limit_exceeded
             and not monitored.timed_out
@@ -1663,7 +2086,7 @@ def _run_extension_rho(
                     else (
                         "infrastructure_error"
                         if stage_infrastructure_error
-                        else "solver_failure"
+                        else "initial_state_mismatch" if not handoff_valid else "solver_failure"
                     )
                 )
             )
@@ -1671,10 +2094,12 @@ def _run_extension_rho(
         stages.append(
             {
                 "attempt": attempt_number,
+                "recipe": "terminal_projection" if direct_attempt else "initial_state_homotopy",
                 "fraction": fraction,
                 "step": step,
                 "success": stage_success,
                 "failure_kind": stage_failure_kind,
+                "terminal_handoff_max_abs_error": handoff_error,
                 "maximum_initial_state_change": seed_metadata[
                     "homotopy_maximum_initial_state_change"
                 ],
@@ -1710,6 +2135,10 @@ def _run_extension_rho(
             or step / 2.0 < minimum_step
         ):
             break
+        if direct_attempt:
+            direct_attempt = False
+            step = 0.25
+            continue
         step /= 2.0
 
     success = accepted_fraction == 1.0 and final_solution_path is not None
@@ -1722,11 +2151,24 @@ def _run_extension_rho(
         "source_label": source_label or f"FHO_{after_cycles}",
         "success": success,
         "failure_kind": failure_kind,
+        "failure_class": (
+            None if success else "resource_limit" if memory_limit_exceeded or timed_out
+            else "infrastructure_error" if infrastructure_error else "handoff_numerical_unresolved"
+        ),
+        "physiological_limit_certified": False,
         "certificate_valid": success,
         "solution_available": final_solution_path is not None,
         "infrastructure_error": infrastructure_error,
         "unknown_mumps_warning": unknown_mumps_warning,
-        "seed_origin": "rho_reference_to_certified_fho_terminal_homotopy",
+        "seed_origin": "certified_terminal_local_rho",
+        "provenance": {
+            "source_certificate_solution": str(source_full_solution),
+            "initial_state_origin": f"{source_label or f'FHO_{after_cycles}'}:terminal",
+            "primal_seed_path": str(local_seed_path),
+            "dual_policy": "fresh_solver_no_transferred_multipliers",
+            "recovery_template_origin": reference_origin,
+            "optional_reference_warning": reference_warning,
+        },
         "accepted_fraction": accepted_fraction,
         "homotopy_stages": stages,
         "reference_cycle_path": str(reference_cycle_path),
@@ -1778,6 +2220,218 @@ def _next_horizon_chance(records: list[dict], cycles: int, output_dir: Path) -> 
     return max([reported, *(number + 1 for number in existing)])
 
 
+def _bootstrap_direct_three_cycle_horizon(
+    args: argparse.Namespace,
+    *,
+    report: dict,
+    report_path: Path,
+    markdown_path: Path,
+    rho_seed_path: Path,
+    rss_limit_bytes: int,
+) -> dict:
+    """Certify FHO_3 from RHO_1..3 before starting +3 continuation.
+
+    This opt-in bootstrap has no FHO_1/2 dependency. It preserves the same
+    per-attempt certificate and report contract as the ordinary bootstrap.
+    """
+
+    cycles = 3
+    if _seed_cycle_count(rho_seed_path) < cycles:
+        raise ValueError("Direct FHO_3 bootstrap needs three certified RHO cycles.")
+    records = report.setdefault("full_horizon_attempts", [])
+    chance = _next_horizon_chance(records, cycles, args.output_dir)
+    report["bootstrap_state"] = {
+        "cycles": cycles,
+        "phase": "bootstrap_direct_rho3",
+        "chance": chance,
+        "status": "running",
+    }
+    report["stop_reason"] = "running"
+    _write_report(report_path, report)
+    attempt = _run_horizon_attempt(
+        args,
+        rho_seed=rho_seed_path,
+        cycles=cycles,
+        phase="bootstrap_direct_rho3",
+        chance=chance,
+        rss_limit_bytes=rss_limit_bytes,
+        heartbeat_seed_label="RHO_1..RHO_3",
+    )
+    attempt.update(
+        {
+            "chance": chance,
+            "adaptive_source_cycles": 0,
+            "adaptive_step_cycles": cycles,
+            "accepted_for_continuation": bool(attempt["success"]),
+        }
+    )
+    records.append(attempt)
+    report["homotopy_constructed_cycles"] = max(
+        int(report.get("homotopy_constructed_cycles") or 0), cycles
+    )
+    report["bootstrap_state"]["status"] = (
+        "certified" if attempt["success"] else "failed"
+    )
+    if attempt["success"]:
+        report["largest_successful_cycles"] = cycles
+        report["solver_gap_cycles"] = []
+        report["stop_reason"] = (
+            "requested_ceiling_reached" if args.max_cycles == cycles else "running"
+        )
+    else:
+        report["stop_reason"] = attempt["failure_kind"]
+        report["solver_gap_cycles"] = (
+            [cycles] if attempt["failure_kind"] == "solver_failure" else []
+        )
+    _write_report(report_path, report)
+    _write_markdown(markdown_path, report)
+    return attempt
+
+
+def _bootstrap_full_horizon(
+    args: argparse.Namespace,
+    *,
+    report: dict,
+    report_path: Path,
+    markdown_path: Path,
+    rho_seed_path: Path,
+    rss_limit_bytes: int,
+) -> dict:
+    """Reach certified FHO_2, retaining each recoverable bootstrap checkpoint.
+
+    A direct two-cycle attempt is tried once. On numerical failure, certify
+    FHO_1 from the original common seed and splice it onto the second RHO cycle
+    before retrying FHO_2. Resume
+    can enter at any of these boundaries without recalculating the reference
+    RHO or overwriting earlier solver attempts.
+    """
+
+    records = report.setdefault("full_horizon_attempts", [])
+
+    def certified_checkpoint(cycles: int) -> dict | None:
+        for record in reversed(records):
+            if (
+                int(record.get("cycles") or 0) == cycles
+                and record.get("success") is True
+                and record.get("certificate_valid") is True
+                and record.get("accepted_for_continuation", True)
+                and record.get("solution_path")
+                and record.get("result_path")
+                and _seed_cycle_count(Path(record["solution_path"])) == cycles
+                and _benchmark_success(
+                    Path(record["result_path"]),
+                    expected_mode="single_shot",
+                    expected_cycles=cycles,
+                    expected_solver=args.full_horizon_solver,
+                    expected_mechanics="reduced",
+                )
+            ):
+                return record
+        return None
+
+    def attempt(cycles: int, phase: str, prefix: dict | None = None) -> dict:
+        common_seed = args.seed_dir / "common-reduced.npz" if cycles == 1 else None
+        seed = rho_seed_path
+        if common_seed is None:
+            seed = args.output_dir / "homotopy-seeds" / f"rho-prefix-{cycles:04d}.npz"
+            write_rho_seed_prefix(rho_seed_path, seed, cycles)
+        chance = _next_horizon_chance(records, cycles, args.output_dir)
+        report["stop_reason"] = "running"
+        report["bootstrap_state"] = {
+            "cycles": cycles, "phase": phase, "chance": chance, "status": "running"
+        }
+        _write_report(report_path, report)
+        result = _run_horizon_attempt(
+            args,
+            rho_seed=seed,
+            cycles=cycles,
+            phase=phase,
+            chance=chance,
+            rss_limit_bytes=rss_limit_bytes,
+            prefix_solution_path=(
+                None if prefix is None else Path(prefix["solution_path"])
+            ),
+            heartbeat_seed_label=(
+                "common_reduced"
+                if common_seed is not None
+                else (f"RHO_1..RHO_{cycles}" if prefix is None else "FHO_1+RHO_2")
+            ),
+            common_initial_solution=common_seed,
+        )
+        source_cycles = 0 if prefix is None else 1
+        result.update(
+            {
+                "chance": chance,
+                "adaptive_source_cycles": source_cycles,
+                "adaptive_step_cycles": cycles - source_cycles,
+                "accepted_for_continuation": bool(result["success"]),
+            }
+        )
+        records.append(result)
+        report["homotopy_constructed_cycles"] = max(
+            int(report.get("homotopy_constructed_cycles") or 0), cycles
+        )
+        if result["success"]:
+            report["largest_successful_cycles"] = cycles
+        report["bootstrap_state"]["status"] = (
+            "certified" if result["success"] else "failed"
+        )
+        _write_report(report_path, report)
+        return result
+
+    def finish(result: dict) -> dict:
+        if result["success"] and result["cycles"] == 2:
+            report["largest_successful_cycles"] = 2
+            report["solver_gap_cycles"] = []
+            report["stop_reason"] = (
+                "requested_ceiling_reached"
+                if args.max_cycles == 2
+                else (
+                    "rho_prefix_ceiling_reached"
+                    if report.get("effective_max_cycles") == 2
+                    else "running"
+                )
+            )
+        else:
+            # The final bootstrap verdict must refer to the actual failing
+            # attempt, including FHO_1 or the retried FHO_2, not to stale FHO_2.
+            report["stop_reason"] = result["failure_kind"]
+            report["solver_gap_cycles"] = (
+                [result["cycles"]]
+                if result["failure_kind"] == "solver_failure"
+                else []
+            )
+        _write_report(report_path, report)
+        _write_markdown(markdown_path, report)
+        return result
+
+    bootstrap_two = certified_checkpoint(2)
+    if bootstrap_two is not None:
+        return finish(bootstrap_two)
+
+    bootstrap_one = certified_checkpoint(1)
+    previous_bootstrap_attempt = any(
+        int(record.get("cycles") or 0) in (1, 2) for record in records
+    )
+    if bootstrap_one is None and not previous_bootstrap_attempt:
+        direct_two = attempt(2, "bootstrap")
+        if direct_two["success"] or direct_two["failure_kind"] != "solver_failure":
+            return finish(direct_two)
+
+    if bootstrap_one is None:
+        bootstrap_one = attempt(1, "bootstrap_fho1")
+        if not bootstrap_one["success"]:
+            return finish(bootstrap_one)
+    else:
+        report.setdefault("bootstrap_reuse_events", []).append(
+            {"cycles": 1, "solution_path": bootstrap_one["solution_path"]}
+        )
+        report["largest_successful_cycles"] = 1
+        _write_report(report_path, report)
+
+    return finish(attempt(2, "bootstrap_from_fho1", prefix=bootstrap_one))
+
+
 def _next_extension_run_number(
     records: list[dict], target_cycle: int, output_dir: Path
 ) -> int:
@@ -1794,6 +2448,62 @@ def _next_extension_run_number(
         if path.is_dir() and path.name.removeprefix("retry-").isdigit()
     )
     return max([reported, *(number + 1 for number in existing)])
+
+
+def _run_fho_terminal_bridge(
+    args: argparse.Namespace,
+    *,
+    source_full_solution: Path,
+    target_cycles: int,
+    rss_limit_bytes: int,
+    chance: int,
+) -> dict:
+    """Try FHO_(N+1) without requiring an RHO_(N+1) prefix.
+
+    The bridge is only valid for exactly one appended cycle.  Its seed is the
+    certified FHO_N solution plus an extrapolation whose first state node is
+    exactly FHO_N's terminal state.  The monolithic FHO solve, rather than an
+    RHO transfer, is therefore the sole feasibility authority for N+1.
+    """
+
+    source_cycles = _seed_cycle_count(source_full_solution)
+    if target_cycles != source_cycles + 1:
+        raise ValueError("An FHO terminal bridge must append exactly one cycle.")
+    bridge_dir = (
+        args.output_dir
+        / "fho-terminal-bridges"
+        / f"from-{source_cycles:04d}-to-{target_cycles:04d}"
+        / f"chance-{chance}"
+    )
+    extension_seed = bridge_dir / "terminal-cycle-seed.npz"
+    concatenated_seed = bridge_dir / "fho-terminal-bridge-seed.npz"
+    write_fho_terminal_continuation_seed(source_full_solution, extension_seed)
+    bridge_metadata = append_rho_extension_cycle(
+        source_full_solution, extension_seed, concatenated_seed
+    )
+    attempt = _run_horizon_attempt(
+        args,
+        rho_seed=concatenated_seed,
+        cycles=target_cycles,
+        phase="fho_terminal_bridge",
+        chance=chance,
+        rss_limit_bytes=rss_limit_bytes,
+        prefix_solution_path=source_full_solution,
+        heartbeat_seed_label=f"FHO_{source_cycles}+terminal_bridge",
+    )
+    attempt.update(
+        {
+            "bridge_source_cycles": source_cycles,
+            "bridge_seed_path": str(concatenated_seed),
+            "bridge_terminal_cycle_seed_path": str(extension_seed),
+            "bridge_boundary_maximum_absolute_change": bridge_metadata[
+                "replaced_reduced_boundary_maximum_absolute_change"
+            ],
+            "seed_origin": "certified_fho_terminal_direct_bridge",
+            "accepted_for_continuation": bool(attempt["success"]),
+        }
+    )
+    return attempt
 
 
 def _continue_adaptively(
@@ -1857,6 +2567,7 @@ def _continue_adaptively(
                 )
                 extension_attempt.update(
                     {
+                        "source_fho_certificate_path": str(current_full_solution),
                         "adaptive_source_cycles": current_cycles,
                         "adaptive_target_cycles": target_cycles,
                         "adaptive_step_cycles": step_cycles,
@@ -1864,6 +2575,13 @@ def _continue_adaptively(
                 )
                 report["extension_rho_attempts"].append(extension_attempt)
                 _write_report(report_path, report)
+                if extension_attempt.get("memory_limit_exceeded") or extension_attempt.get("timed_out"):
+                    report["stop_reason"] = "rho_extension_" + str(extension_attempt["failure_kind"])
+                    report["stop_class"] = "resource_limit"
+                    report["physiological_limit_certified"] = False
+                    _write_report(report_path, report)
+                    _write_markdown(markdown_path, report)
+                    return 3
                 if extension_attempt["infrastructure_error"]:
                     infrastructure_error = True
                     step_failure = "rho_extension_infrastructure_error"
@@ -1894,6 +2612,68 @@ def _continue_adaptively(
                 )
                 concatenated_seed = next_seed
                 carrier_solution = Path(extension_attempt["solution_path"])
+
+            # A physical/numerical failure of the auxiliary RHO handoff is not
+            # evidence that the monolithic FHO has reached its feasibility
+            # limit.  For the one-cycle fallback, test that question directly
+            # from the terminal state of the last certified FHO.
+            if (
+                step_failure is not None
+                and step_cycles == 1
+                and getattr(args, "allow_fho_terminal_bridge", False)
+                and not infrastructure_error
+            ):
+                chance = _next_horizon_chance(
+                    report["full_horizon_attempts"], target_cycles, args.output_dir
+                )
+                bridge_attempt = _run_fho_terminal_bridge(
+                    args,
+                    source_full_solution=current_full_solution,
+                    target_cycles=target_cycles,
+                    rss_limit_bytes=rss_limit_bytes,
+                    chance=chance,
+                )
+                bridge_attempt.update(
+                    {
+                        "adaptive_source_cycles": current_cycles,
+                        "adaptive_step_cycles": 1,
+                        "rho_extension_failure": step_failure,
+                    }
+                )
+                report["full_horizon_attempts"].append(bridge_attempt)
+                report.setdefault("terminal_bridge_attempts", []).append(
+                    {
+                        "from_cycles": current_cycles,
+                        "to_cycles": target_cycles,
+                        "success": bridge_attempt["success"],
+                        "failure_kind": bridge_attempt["failure_kind"],
+                        "rho_extension_failure": step_failure,
+                        "result_path": bridge_attempt["result_path"],
+                        "solution_path": bridge_attempt["solution_path"],
+                    }
+                )
+                _write_report(report_path, report)
+                if bridge_attempt["infrastructure_error"]:
+                    report["stop_reason"] = "fho_terminal_bridge_infrastructure_error"
+                    _write_report(report_path, report)
+                    _write_markdown(markdown_path, report)
+                    return 3
+                if bridge_attempt["success"]:
+                    current_cycles = target_cycles
+                    current_full_solution = Path(bridge_attempt["solution_path"])
+                    report["homotopy_constructed_cycles"] = current_cycles
+                    report["largest_successful_cycles"] = current_cycles
+                    report["stop_reason"] = (
+                        "requested_ceiling_reached"
+                        if current_cycles == args.max_cycles
+                        else "running"
+                    )
+                    _write_report(report_path, report)
+                    accepted = True
+                    break
+                step_failure = "fho_terminal_bridge_" + str(
+                    bridge_attempt["failure_kind"]
+                )
 
             if step_failure is None:
                 chance = _next_horizon_chance(
@@ -1931,6 +2711,8 @@ def _continue_adaptively(
                 )
                 attempt.update(
                     {
+                        "construction_method": "certified_post_fho_rho_chain",
+                        "source_fho_certificate_path": str(current_full_solution),
                         "chance": chance,
                         "adaptive_source_cycles": current_cycles,
                         "adaptive_step_cycles": step_cycles,
@@ -1991,6 +2773,12 @@ def _continue_adaptively(
 
             solver_gap_cycles.append(target_cycles)
             report["stop_reason"] = step_failure
+            report["stop_class"] = (
+                "resource_limit" if step_failure and any(word in step_failure for word in ("memory_limit", "timeout"))
+                else "handoff_numerical_unresolved" if step_failure and step_failure.startswith("rho_extension_")
+                else "numerical_unresolved"
+            )
+            report["physiological_limit_certified"] = False
             break
 
         if not accepted:
@@ -2002,12 +2790,115 @@ def _continue_adaptively(
     return 0
 
 
+def _probe_rho_extensions(
+    args: argparse.Namespace,
+    *,
+    report: dict,
+    report_path: Path,
+    markdown_path: Path,
+    rho_seed_path: Path,
+    effective_max_cycles: int,
+    current_cycles: int,
+    current_solution: Path,
+    rss_limit_bytes: int,
+) -> int:
+    """Certify the RHO-only tail from a fixed FHO terminal state.
+
+    This deliberately does not call ``append_rho_extension_cycle`` nor create
+    an FHO candidate.  It answers the narrower question: how many locally
+    feasible, audited one-cycle handoffs can follow the last certified FHO?
+    """
+
+    report.setdefault("extension_rho_attempts", [])
+    report["rho_extension_probe"] = {
+        "source_fho_cycles": current_cycles,
+        "maximum_probe_cycles": effective_max_cycles,
+        "status": "running",
+    }
+    _write_report(report_path, report)
+
+    carrier_solution = current_solution
+    source_fho_solution = current_solution
+    while current_cycles < effective_max_cycles:
+        target_cycle = current_cycles + 1
+        run_number = _next_extension_run_number(
+            report["extension_rho_attempts"], target_cycle, args.output_dir
+        )
+        attempt = _run_extension_rho(
+            args,
+            source_full_solution=carrier_solution,
+            reference_rho_seed=rho_seed_path,
+            after_cycles=current_cycles,
+            rss_limit_bytes=rss_limit_bytes,
+            source_label=(
+                f"FHO_{current_cycles}"
+                if carrier_solution == source_fho_solution
+                else f"RHO_{current_cycles}"
+            ),
+            run_number=run_number,
+        )
+        attempt.update(
+            {
+                "source_fho_certificate_path": str(source_fho_solution),
+                "rho_extension_probe": True,
+                "probe_source_cycles": current_cycles,
+                "probe_target_cycles": target_cycle,
+            }
+        )
+        report["extension_rho_attempts"].append(attempt)
+        report["rho_extension_probe"].update(
+            {
+                "last_attempted_cycle": target_cycle,
+                "last_successful_cycle": (
+                    target_cycle if attempt.get("success") else current_cycles
+                ),
+            }
+        )
+        _write_report(report_path, report)
+
+        if attempt.get("success"):
+            carrier_solution = Path(attempt["solution_path"])
+            current_cycles = target_cycle
+            continue
+
+        failure_kind = str(attempt.get("failure_kind") or "unknown")
+        report["rho_extension_probe"].update(
+            {"status": "stopped", "failure_kind": failure_kind}
+        )
+        report["stop_reason"] = "rho_extension_probe_" + failure_kind
+        report["stop_class"] = (
+            "resource_limit"
+            if attempt.get("memory_limit_exceeded") or attempt.get("timed_out")
+            else ("infrastructure_error" if attempt.get("infrastructure_error") else "rho_handoff_failure")
+        )
+        _write_report(report_path, report)
+        _write_markdown(markdown_path, report)
+        return 3 if attempt.get("infrastructure_error") else 0
+
+    report["rho_extension_probe"].update(
+        {"status": "requested_ceiling_reached", "last_successful_cycle": current_cycles}
+    )
+    report["stop_reason"] = "rho_extension_probe_requested_ceiling_reached"
+    report["stop_class"] = None
+    _write_report(report_path, report)
+    _write_markdown(markdown_path, report)
+    return 0
+
+
 def run(args: argparse.Namespace) -> int:
     args.workspace = args.workspace.resolve()
     args.seed_dir = args.seed_dir.resolve()
     args.output_dir = args.output_dir.resolve()
+    # Keep this campaign-level path stable when adaptive +N continuation
+    # creates per-attempt output directories.  ``Namespace(**vars(args))``
+    # carries it into every one-cycle RHO child process.
+    args.rho_transition_c_cache_dir = (
+        args.output_dir / "rho-transition-ipopt-c-cache"
+    ).resolve()
     if args.max_cycles < 2:
         raise ValueError("--max-cycles must be at least two.")
+    if args.max_cycles < args.bootstrap_rho_prefix_cycles:
+        raise ValueError("--max-cycles must cover the chosen bootstrap RHO prefix.")
     if args.n_threads < 1:
         raise ValueError("--n-threads must be strictly positive.")
     if args.continuation_step_cycles < 1:
@@ -2050,11 +2941,19 @@ def run(args: argparse.Namespace) -> int:
         "rho_graph": "SX",
         "full_horizon_graph": "MX",
         "rho_solver": "ipopt",
+        "rho_transition_codegen": {
+            "graph": "SX",
+            "c_compile": True,
+            "cache_dir": str(args.rho_transition_c_cache_dir),
+            "cache_name": "rho-transition-sx",
+        },
         "full_horizon_solver": args.full_horizon_solver,
         "rho_only": args.rho_only,
         "linear_solver": "ma57",
-        "initialization": "rho_reference_to_fho_terminal_state_homotopy",
+        "initialization": "autonomous_certified_terminal_rho_chain",
+        "allow_fho_terminal_bridge": args.allow_fho_terminal_bridge,
         "continuation_step_cycles": args.continuation_step_cycles,
+        "bootstrap_rho_prefix_cycles": args.bootstrap_rho_prefix_cycles,
         "jump_objective_relative_tolerance": (
             args.jump_objective_relative_tolerance
         ),
@@ -2062,6 +2961,7 @@ def run(args: argparse.Namespace) -> int:
         "rho": None,
         "paired_reduced_control_attempts": [],
         "extension_rho_attempts": [],
+        "terminal_bridge_attempts": [],
         "homotopy_constructed_cycles": 0,
         "full_horizon_attempts": [],
         "largest_successful_cycles": 0,
@@ -2100,6 +3000,12 @@ def run(args: argparse.Namespace) -> int:
         rho_result_cycles if rho_result_cycles == rho_seed_cycles else 0
     )
     report["rho_available_cycles"] = rho_available_cycles
+    # Keep the seed-ceiling reason separate from the endurance verdict.  This
+    # remains useful even when RHO supplied a valid prefix: it explains why a
+    # later FHO continuation cannot be extended beyond that prefix.
+    report["rho_prefix_stop_assessment"] = _rho_prefix_stop_assessment(
+        rho_result_path
+    )
     report["rho"].update(
         {
             "success": (
@@ -2163,54 +3069,36 @@ def run(args: argparse.Namespace) -> int:
         )
         return 0
 
-    effective_max_cycles = min(args.max_cycles, rho_available_cycles)
+    effective_max_cycles = args.max_cycles
     report["effective_max_cycles"] = effective_max_cycles
-    current_seed_path = args.output_dir / "homotopy-seeds" / "rho-prefix-0002.npz"
-    write_rho_seed_prefix(rho_seed_path, current_seed_path, 2)
-    report["homotopy_constructed_cycles"] = 2
-    attempt = _run_horizon_attempt(
+    bootstrap_function = (
+        _bootstrap_direct_three_cycle_horizon
+        if args.bootstrap_rho_prefix_cycles == 3
+        else _bootstrap_full_horizon
+    )
+    attempt = bootstrap_function(
         args,
-        rho_seed=current_seed_path,
-        cycles=2,
-        phase="bootstrap",
-        chance=1,
+        report=report,
+        report_path=report_path,
+        markdown_path=markdown_path,
+        rho_seed_path=rho_seed_path,
         rss_limit_bytes=rss_limit_bytes,
     )
-    attempt.update(
-        {
-            "chance": 1,
-            "adaptive_source_cycles": 0,
-            "adaptive_step_cycles": 2,
-            "accepted_for_continuation": bool(attempt["success"]),
-        }
-    )
-    report["full_horizon_attempts"].append(attempt)
-    _write_report(report_path, report)
-    if attempt["infrastructure_error"]:
-        report["stop_reason"] = "infrastructure_error"
-        _write_report(report_path, report)
-        _write_markdown(markdown_path, report)
-        return 3
     if not attempt["success"]:
-        report["solver_gap_cycles"] = [2]
-        report["stop_reason"] = attempt["failure_kind"]
-        _write_report(report_path, report)
-        _write_markdown(markdown_path, report)
-        return 0
+        return 3 if attempt["infrastructure_error"] else 0
 
     current_full_solution = Path(attempt["solution_path"])
-    report["largest_successful_cycles"] = 2
+    report["largest_successful_cycles"] = args.bootstrap_rho_prefix_cycles
     report["stop_reason"] = (
         "requested_ceiling_reached"
-        if args.max_cycles == 2
+        if args.max_cycles == args.bootstrap_rho_prefix_cycles
         else (
             "rho_prefix_ceiling_reached"
-            if effective_max_cycles == 2
+            if effective_max_cycles == args.bootstrap_rho_prefix_cycles
             else "running"
         )
     )
-    # Persist the certified bootstrap before attempting RHO_3 so an unrelated
-    # continuation failure can always resume from FHO_2.
+    # Persist the certified bootstrap before any local RHO extension.
     _write_report(report_path, report)
     return _continue_adaptively(
         args,
@@ -2219,7 +3107,7 @@ def run(args: argparse.Namespace) -> int:
         markdown_path=markdown_path,
         rho_seed_path=rho_seed_path,
         effective_max_cycles=effective_max_cycles,
-        current_cycles=2,
+        current_cycles=args.bootstrap_rho_prefix_cycles,
         current_full_solution=current_full_solution,
         rss_limit_bytes=rss_limit_bytes,
     )

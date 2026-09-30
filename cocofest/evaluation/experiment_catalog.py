@@ -35,6 +35,8 @@ _METRICS = (
     "hot_solver_time_p90_s",
     "hot_wall_time_median_s",
     "hot_wall_time_p90_s",
+    "hot_complete_iteration_wall_time_median_s",
+    "hot_complete_iteration_wall_time_p90_s",
     "target_solver_only_hot_solver_time_mean_s",
     "target_solver_only_hot_solver_time_median_s",
     "target_solver_only_hot_solver_time_p90_s",

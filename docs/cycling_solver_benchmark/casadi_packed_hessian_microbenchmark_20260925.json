@@ -1,0 +1,350 @@
+{
+  "casadi": "3.7.2",
+  "casadi_path": "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/lib/python3.11/site-packages/casadi/__init__.py",
+  "numpy": "2.4.6",
+  "scipy": "1.17.1",
+  "python": "3.11.16",
+  "machine": "x86_64",
+  "cpu_affinity": [
+    12,
+    13,
+    14,
+    15
+  ],
+  "numeric_threads_env": {
+    "OMP_NUM_THREADS": "1",
+    "OMP_THREAD_LIMIT": null,
+    "OPENBLAS_NUM_THREADS": "1",
+    "MKL_NUM_THREADS": "1",
+    "BLIS_NUM_THREADS": null,
+    "NUMEXPR_NUM_THREADS": "1"
+  },
+  "cases": [
+    {
+      "n_stages": 20,
+      "n_variables": 164,
+      "workers": 4,
+      "global_serial_build_s": 0.04018847004044801,
+      "global_serial_nnz": 1932,
+      "global_thread_build_s": 0.004395914962515235,
+      "global_thread_nnz": 1932,
+      "global_openmp_build_s": 0.00474781496450305,
+      "global_openmp_nnz": 1932,
+      "global_serial_max_abs_error": 0.0,
+      "global_serial_eval": {
+        "median_s": 0.01600900205085054,
+        "min_s": 0.015519498963840306,
+        "p90_s": 0.016114959400147198
+      },
+      "global_serial_children": [
+        "MXFunction",
+        "MXFunction",
+        "Map"
+      ],
+      "global_thread_max_abs_error": 0.0,
+      "global_thread_eval": {
+        "median_s": 0.006174180540256202,
+        "min_s": 0.004131480003707111,
+        "p90_s": 0.0077784900087863205
+      },
+      "global_thread_children": [
+        "ThreadMap",
+        "MXFunction",
+        "MXFunction"
+      ],
+      "global_openmp_max_abs_error": 0.0,
+      "global_openmp_eval": {
+        "median_s": 0.015664135513361543,
+        "min_s": 0.01552368700504303,
+        "p90_s": 0.015951103216502817
+      },
+      "global_openmp_children": [
+        "MXFunction",
+        "OmpMap",
+        "MXFunction"
+      ],
+      "local_serial_max_abs_error": 5.551115123125783e-17,
+      "local_serial_map_only": {
+        "median_s": 0.0020804725354537368,
+        "min_s": 0.0020493140909820795,
+        "p90_s": 0.00210214207181707
+      },
+      "local_serial_eval_assemble": {
+        "median_s": 0.002377965545747429,
+        "min_s": 0.002347633009776473,
+        "p90_s": 0.002421969745773822
+      },
+      "local_serial_map_class": "Map",
+      "local_thread_max_abs_error": 5.551115123125783e-17,
+      "local_thread_map_only": {
+        "median_s": 0.0013329500216059387,
+        "min_s": 0.0010597680229693651,
+        "p90_s": 0.0015953783760778606
+      },
+      "local_thread_eval_assemble": {
+        "median_s": 0.001585363526828587,
+        "min_s": 0.0013318079290911555,
+        "p90_s": 0.0018401577253825963
+      },
+      "local_thread_map_class": "ThreadMap",
+      "local_openmp_max_abs_error": 5.551115123125783e-17,
+      "local_openmp_map_only": {
+        "median_s": 0.002129664469975978,
+        "min_s": 0.0018562820041552186,
+        "p90_s": 0.002182920987252146
+      },
+      "local_openmp_eval_assemble": {
+        "median_s": 0.002429798012599349,
+        "min_s": 0.0023971559712663293,
+        "p90_s": 0.002480074670165777
+      },
+      "local_openmp_map_class": "OmpMap",
+      "packets": {
+        "1": {
+          "n_packets": 20,
+          "packet_dim": 12,
+          "build_s": 0.02254763199016452,
+          "serial_max_abs_error": 5.551115123125783e-17,
+          "serial_map_only": {
+            "median_s": 0.010419037484098226,
+            "min_s": 0.010032708058133721,
+            "p90_s": 0.01058570616878569
+          },
+          "serial_eval_assemble": {
+            "median_s": 0.010488452506251633,
+            "min_s": 0.01027517206966877,
+            "p90_s": 0.010687146591953934
+          },
+          "thread_max_abs_error": 5.551115123125783e-17,
+          "thread_map_only": {
+            "median_s": 0.002726079022977501,
+            "min_s": 0.0026629349449649453,
+            "p90_s": 0.003988394024781883
+          },
+          "thread_eval_assemble": {
+            "median_s": 0.0032253394601866603,
+            "min_s": 0.0031902040354907513,
+            "p90_s": 0.003250824648421258
+          }
+        },
+        "5": {
+          "n_packets": 4,
+          "packet_dim": 44,
+          "build_s": 0.02679079899098724,
+          "serial_max_abs_error": 5.551115123125783e-17,
+          "serial_map_only": {
+            "median_s": 0.011182785034179688,
+            "min_s": 0.010893402039073408,
+            "p90_s": 0.011284047970548272
+          },
+          "serial_eval_assemble": {
+            "median_s": 0.01151827402645722,
+            "min_s": 0.011123463045805693,
+            "p90_s": 0.011664553300943226
+          },
+          "thread_max_abs_error": 5.551115123125783e-17,
+          "thread_map_only": {
+            "median_s": 0.002900745952501893,
+            "min_s": 0.0028085579397156835,
+            "p90_s": 0.00299825391266495
+          },
+          "thread_eval_assemble": {
+            "median_s": 0.0036542039597406983,
+            "min_s": 0.003607597085647285,
+            "p90_s": 0.0037018162896856666
+          }
+        },
+        "10": {
+          "n_packets": 2,
+          "packet_dim": 84,
+          "build_s": 0.003933737985789776,
+          "serial_max_abs_error": 1.3877787807814457e-17,
+          "serial_map_only": {
+            "median_s": 0.010961724969092757,
+            "min_s": 0.01087276404723525,
+            "p90_s": 0.011284611618611962
+          },
+          "serial_eval_assemble": {
+            "median_s": 0.012124861998017877,
+            "min_s": 0.01166672189719975,
+            "p90_s": 0.012431620445568115
+          },
+          "thread_max_abs_error": 1.3877787807814457e-17,
+          "thread_map_only": {
+            "median_s": 0.005240329017397016,
+            "min_s": 0.005004766979254782,
+            "p90_s": 0.005526759079657495
+          },
+          "thread_eval_assemble": {
+            "median_s": 0.006499726034235209,
+            "min_s": 0.006066779023967683,
+            "p90_s": 0.006756735546514392
+          }
+        }
+      }
+    },
+    {
+      "n_stages": 60,
+      "n_variables": 484,
+      "workers": 4,
+      "global_serial_build_s": 0.04253379802685231,
+      "global_serial_nnz": 5772,
+      "global_thread_build_s": 0.010720968013629317,
+      "global_thread_nnz": 5772,
+      "global_openmp_build_s": 0.010738602024503052,
+      "global_openmp_nnz": 5772,
+      "global_serial_max_abs_error": 0.0,
+      "global_serial_eval": {
+        "median_s": 0.04919803800294176,
+        "min_s": 0.04814512294251472,
+        "p90_s": 0.05011336762690917
+      },
+      "global_serial_children": [
+        "Map",
+        "MXFunction",
+        "MXFunction"
+      ],
+      "global_thread_max_abs_error": 0.0,
+      "global_thread_eval": {
+        "median_s": 0.01344364503165707,
+        "min_s": 0.012889766017906368,
+        "p90_s": 0.013681922422256321
+      },
+      "global_thread_children": [
+        "MXFunction",
+        "ThreadMap",
+        "MXFunction"
+      ],
+      "global_openmp_max_abs_error": 0.0,
+      "global_openmp_eval": {
+        "median_s": 0.04869726346805692,
+        "min_s": 0.047648630919866264,
+        "p90_s": 0.04892116960836575
+      },
+      "global_openmp_children": [
+        "MXFunction",
+        "OmpMap",
+        "MXFunction"
+      ],
+      "local_serial_max_abs_error": 8.326672684688674e-17,
+      "local_serial_map_only": {
+        "median_s": 0.006454451009631157,
+        "min_s": 0.006399091915227473,
+        "p90_s": 0.006475169607438147
+      },
+      "local_serial_eval_assemble": {
+        "median_s": 0.007019761484116316,
+        "min_s": 0.0069395959144458175,
+        "p90_s": 0.007042700820602476
+      },
+      "local_serial_map_class": "Map",
+      "local_thread_max_abs_error": 8.326672684688674e-17,
+      "local_thread_map_only": {
+        "median_s": 0.003915288485586643,
+        "min_s": 0.0030928809428587556,
+        "p90_s": 0.004631342203356326
+      },
+      "local_thread_eval_assemble": {
+        "median_s": 0.004560749512165785,
+        "min_s": 0.0038540889509022236,
+        "p90_s": 0.00536943570477888
+      },
+      "local_thread_map_class": "ThreadMap",
+      "local_openmp_max_abs_error": 8.326672684688674e-17,
+      "local_openmp_map_only": {
+        "median_s": 0.006607283023186028,
+        "min_s": 0.006398461991921067,
+        "p90_s": 0.0067394722253084184
+      },
+      "local_openmp_eval_assemble": {
+        "median_s": 0.007129828503821045,
+        "min_s": 0.006977147073484957,
+        "p90_s": 0.007169924536719918
+      },
+      "local_openmp_map_class": "OmpMap",
+      "packets": {
+        "1": {
+          "n_packets": 60,
+          "packet_dim": 12,
+          "build_s": 0.020944204065017402,
+          "serial_max_abs_error": 8.326672684688674e-17,
+          "serial_map_only": {
+            "median_s": 0.03145055554341525,
+            "min_s": 0.030761527945287526,
+            "p90_s": 0.031914155022241174
+          },
+          "serial_eval_assemble": {
+            "median_s": 0.032282605941873044,
+            "min_s": 0.03144047106616199,
+            "p90_s": 0.03288650236791
+          },
+          "thread_max_abs_error": 8.326672684688674e-17,
+          "thread_map_only": {
+            "median_s": 0.008761663979385048,
+            "min_s": 0.00814330403227359,
+            "p90_s": 0.008840287011116743
+          },
+          "thread_eval_assemble": {
+            "median_s": 0.009644625009968877,
+            "min_s": 0.009332614950835705,
+            "p90_s": 0.009680777601897717
+          }
+        },
+        "5": {
+          "n_packets": 12,
+          "packet_dim": 44,
+          "build_s": 0.026100486051291227,
+          "serial_max_abs_error": 6.938893903907228e-17,
+          "serial_map_only": {
+            "median_s": 0.032875192002393305,
+            "min_s": 0.03253857104573399,
+            "p90_s": 0.033447366242762656
+          },
+          "serial_eval_assemble": {
+            "median_s": 0.03344758599996567,
+            "min_s": 0.03290191199630499,
+            "p90_s": 0.03424162333831191
+          },
+          "thread_max_abs_error": 6.938893903907228e-17,
+          "thread_map_only": {
+            "median_s": 0.009000496473163366,
+            "min_s": 0.00826003192923963,
+            "p90_s": 0.009055610583163797
+          },
+          "thread_eval_assemble": {
+            "median_s": 0.010660530533641577,
+            "min_s": 0.010484204976819456,
+            "p90_s": 0.01079257985111326
+          }
+        },
+        "10": {
+          "n_packets": 6,
+          "packet_dim": 84,
+          "build_s": 0.004155333968810737,
+          "serial_max_abs_error": 8.326672684688674e-17,
+          "serial_map_only": {
+            "median_s": 0.04352979100076482,
+            "min_s": 0.04261219501495361,
+            "p90_s": 0.04405035161180422
+          },
+          "serial_eval_assemble": {
+            "median_s": 0.04675189952831715,
+            "min_s": 0.04545679094735533,
+            "p90_s": 0.04835137141635641
+          },
+          "thread_max_abs_error": 8.326672684688674e-17,
+          "thread_map_only": {
+            "median_s": 0.01212676550494507,
+            "min_s": 0.011550865950994194,
+            "p90_s": 0.012377315072808415
+          },
+          "thread_eval_assemble": {
+            "median_s": 0.014829043997451663,
+            "min_s": 0.014221674995496869,
+            "p90_s": 0.014999503071885556
+          }
+        }
+      }
+    }
+  ]
+}

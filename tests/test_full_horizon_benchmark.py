@@ -192,6 +192,285 @@ def test_rho_only_rejects_a_partial_reference(tmp_path, monkeypatch):
     assert report["stop_reason"] == "rho_incomplete"
 
 
+@pytest.fixture
+def bootstrap_campaign(tmp_path, monkeypatch):
+    """Exercise real commands, seed slicing, certificates and reports sans NLP."""
+
+    args = full_horizon.build_parser().parse_args(
+        [
+            "--workspace", str(tmp_path), "--seed-dir", str(tmp_path / "seed"),
+            "--output-dir", str(tmp_path / "output"), "--max-cycles", "5",
+            "--n-threads", "12", "--continuation-step-cycles", "3",
+        ]
+    )
+    state = SimpleNamespace(args=args, outcomes=[], commands=[], continuations=[])
+    args.seed_dir.mkdir(parents=True)
+    np.savez(args.seed_dir / "common-reduced.npz", **{
+        "metadata__json": np.asarray(json.dumps({
+            "cycles_per_window": 1, "mechanical_formulation": "reduced",
+            "warmup_cycles_consumed": 1, "producer_mode": "certified_common_seed",
+        })),
+        # Same first state, intentionally different trajectory than RHO_1.
+        "states__theta": np.array([[0.0, 10.0, 20.0]]),
+        "controls__pulse_width_Biceps": np.array([[0.3, 0.4]]),
+    })
+
+    def fake_run(command, **kwargs):
+        state.commands.append(command)
+        is_fho = "--single-shot" in command
+        cycles = int(command[command.index("--n-windows") + 1])
+        outcome = state.outcomes.pop(0) if is_fho else "success"
+        success = outcome == "success"
+        result_path = Path(command[command.index("--output-json") + 1])
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        error = (
+            "ValueError: Common initial solution has incompatible warmup_cycles_consumed: expected 0, got 1"
+            if outcome == "seed_handoff_error" else None
+        )
+        if is_fho:
+            assert "--ipopt-disable-standard-warmup" in command
+            assert "--adopt-common-initial-solution-warmup-cycles" in command
+            assert "--standard-warmup-seed" not in command
+            assert "--legacy-standard-warmup-seed-signed-torque" not in command
+            assert "--standard-warmup-seed-continuation" not in command
+            with np.load(command[command.index("--common-initial-solution") + 1]) as data:
+                metadata = full_horizon._load_metadata(data)
+                assert metadata["warmup_cycles_consumed"] == 1
+                assert metadata["cycles_per_window"] == cycles
+                if cycles == 1:
+                    assert metadata["producer_mode"] == "certified_common_seed"
+                    np.testing.assert_array_equal(data["states__theta"], [[0.0, 10.0, 20.0]])
+                    np.testing.assert_array_equal(data["controls__pulse_width_Biceps"], [[0.3, 0.4]])
+                else:
+                    # FHO_2 retains the second RHO cycle around its separately
+                    # applied certified FHO_1 prefix.
+                    np.testing.assert_array_equal(data["states__theta"][..., 2:], [[2.0, 3.0, 4.0]])
+        result_path.write_text(json.dumps({
+            "results": [{
+                "success": success, "solver_success": success,
+                "physical_success": success, "solver": "ipopt",
+                "mode": "single_shot" if is_fho else "rho",
+                "covered_cycles": cycles if success else 0,
+                "physically_validated_cycles": cycles if success else 0,
+                "error": error,
+            }],
+            "configurations": {"ipopt": {
+                "single_shot": is_fho, "mechanical_formulation": "reduced",
+                "cycles_per_window": cycles if is_fho else 1,
+                "n_windows": cycles, "use_sx": not is_fho,
+                "ipopt_linear_solver": "ma57",
+            }},
+        }))
+        if success:
+            flag = "--common-initial-solution-output" if is_fho else "--receding-horizon-solution-output"
+            solution_path = Path(command[command.index(flag) + 1])
+            np.savez(solution_path, **{
+                "metadata__json": np.asarray(json.dumps({
+                    "cycles_per_window": cycles, "mechanical_formulation": "reduced",
+                    "warmup_cycles_consumed": 1,
+                })),
+                "states__theta": np.arange(cycles * 2 + 1, dtype=float)[None, :],
+                "controls__pulse_width_Biceps": np.ones((1, cycles * 2)),
+            })
+        Path(kwargs["log_path"]).write_text(error or "solver finished\n")
+        return full_horizon.MonitoredRun(
+            command=command, return_code=1 if error else 0,
+            peak_rss_bytes=1024, elapsed_s=0.1,
+            memory_limit_exceeded=outcome == "memory_limit",
+            timed_out=outcome == "timeout", log_path=str(kwargs["log_path"]),
+        )
+
+    def fake_continue(continuation_args, **kwargs):
+        state.continuations.append((continuation_args, kwargs))
+        return 0
+
+    monkeypatch.setattr(full_horizon, "available_memory_bytes", lambda: 16 * full_horizon.GIB)
+    monkeypatch.setattr(full_horizon, "run_monitored", fake_run)
+    monkeypatch.setattr(full_horizon, "_continue_adaptively", fake_continue)
+    return state
+
+
+def test_bootstrap_recovers_two_cycles_with_the_certified_one_cycle_prefix(bootstrap_campaign):
+    campaign = bootstrap_campaign
+    campaign.outcomes[:] = ["solver_failure", "success", "success"]
+
+    assert full_horizon.run(campaign.args) == 0
+
+    report = json.loads((campaign.args.output_dir / "full-horizon-report.json").read_text())
+    attempts = report["full_horizon_attempts"]
+    assert [(item["cycles"], item["success"]) for item in attempts] == [(2, False), (1, True), (2, True)]
+    assert attempts[-1]["prefix_solution_path"] == attempts[1]["solution_path"]
+    assert attempts[1]["seed_origin"] == "common_initial_solution"
+    assert attempts[1]["seed_source_path"] == str(campaign.args.seed_dir / "common-reduced.npz")
+    assert attempts[-1]["chance"] == 2
+    assert report["largest_successful_cycles"] == 2
+    assert report["solver_gap_cycles"] == []
+    continuation_args, continuation = campaign.continuations[0]
+    assert continuation_args.continuation_step_cycles == 3
+    assert continuation["current_cycles"] == 2
+    assert continuation["current_full_solution"] == Path(attempts[-1]["solution_path"])
+    assert full_horizon.adaptive_continuation_target(2, 5, continuation_args.continuation_step_cycles) == 5
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "stop_reason", "failing_cycles", "largest", "exit_code"),
+    [
+        (["solver_failure", "seed_handoff_error"], "seed_handoff_error", 1, 0, 3),
+        (["solver_failure", "solver_failure"], "solver_failure", 1, 0, 0),
+        (["solver_failure", "success", "seed_handoff_error"], "seed_handoff_error", 2, 1, 3),
+        (["memory_limit"], "memory_limit", 2, 0, 0),
+        (["timeout"], "timeout", 2, 0, 0),
+    ],
+)
+def test_bootstrap_reports_the_actual_failure_without_claiming_fatigue(
+    bootstrap_campaign, outcomes, stop_reason, failing_cycles, largest, exit_code
+):
+    campaign = bootstrap_campaign
+    campaign.outcomes[:] = outcomes
+
+    assert full_horizon.run(campaign.args) == exit_code
+
+    report = json.loads((campaign.args.output_dir / "full-horizon-report.json").read_text())
+    assert report["stop_reason"] == stop_reason
+    assert report["largest_successful_cycles"] == largest
+    assert report["full_horizon_attempts"][-1]["cycles"] == failing_cycles
+    assert report["full_horizon_attempts"][-1]["physiological_limit_certified"] is False
+    assert report["solver_gap_cycles"] == ([failing_cycles] if stop_reason == "solver_failure" else [])
+    assert not campaign.continuations
+
+
+@pytest.mark.parametrize("has_certified_one", [False, True])
+def test_resume_bootstrap_reuses_reference_and_last_certificate_without_overwriting(
+    bootstrap_campaign, has_certified_one
+):
+    campaign = bootstrap_campaign
+    campaign.outcomes[:] = (
+        ["solver_failure", "success", "solver_failure"]
+        if has_certified_one else ["solver_failure", "seed_handoff_error"]
+    )
+    full_horizon.run(campaign.args)
+    report_path = campaign.args.output_dir / "full-horizon-report.json"
+    old_report = json.loads(report_path.read_text())
+    old_logs = {item["log_path"]: Path(item["log_path"]).read_text() for item in old_report["full_horizon_attempts"]}
+    original_command_count = len(campaign.commands)
+    campaign.args.resume = True
+    campaign.outcomes[:] = ["success"] if has_certified_one else ["success", "success"]
+
+    assert full_horizon.run(campaign.args) == 0
+
+    new_commands = campaign.commands[original_command_count:]
+    assert all("--single-shot" in command for command in new_commands)
+    assert [int(command[command.index("--n-windows") + 1]) for command in new_commands] == ([2] if has_certified_one else [1, 2])
+    report = json.loads(report_path.read_text())
+    assert report["largest_successful_cycles"] == 2
+    assert report["full_horizon_attempts"][:len(old_report["full_horizon_attempts"])] == old_report["full_horizon_attempts"]
+    assert report["full_horizon_attempts"][-1]["chance"] == (3 if has_certified_one else 2)
+    assert all(Path(path).read_text() == content for path, content in old_logs.items())
+    if has_certified_one:
+        assert report["bootstrap_reuse_events"][-1]["cycles"] == 1
+    assert len(campaign.continuations) == 1
+
+
+def test_rho_prefix_stop_assessment_does_not_promote_solver_failure_to_physiology(
+    tmp_path,
+):
+    result = tmp_path / "rho.json"
+    result.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "first_failed_rho": 133,
+                        "fatigue_endurance_outcome": {"accepted": False},
+                        "physical_crank_diagnostics": {
+                            "issues": ["wheel_cycle_grid_mismatch"]
+                        },
+                        "windows": [
+                            {
+                                "validated": False,
+                                "solver_converged": False,
+                                "primal_feasible": False,
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assessment = full_horizon._rho_prefix_stop_assessment(result)
+
+    assert assessment["classification"] == "numerical_or_optimization_failure"
+    assert assessment["failed_cycle"] == 133
+    assert assessment["grid_or_transfer_diagnostic_present"] is True
+    assert assessment["physiological_limit_certified"] is False
+
+
+def test_rho_prefix_stop_assessment_requires_explicit_endurance_acceptance(tmp_path):
+    result = tmp_path / "rho.json"
+    result.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "first_failed_rho": 18,
+                        "fatigue_endurance_outcome": {"accepted": True},
+                        "physical_crank_diagnostics": {"issues": []},
+                        "windows": [
+                            {
+                                "validated": False,
+                                "solver_converged": True,
+                                "primal_feasible": True,
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assessment = full_horizon._rho_prefix_stop_assessment(result)
+
+    assert assessment["classification"] == "physiological_endurance_limit"
+    assert assessment["physiological_limit_certified"] is True
+
+
+def test_rho_prefix_stop_assessment_marks_an_isolated_grid_issue_inconclusive(
+    tmp_path,
+):
+    result = tmp_path / "rho.json"
+    result.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "first_failed_rho": 18,
+                        "fatigue_endurance_outcome": {"accepted": False},
+                        "physical_crank_diagnostics": {
+                            "issues": ["wheel_cycle_grid_mismatch"]
+                        },
+                        "windows": [
+                            {
+                                "validated": False,
+                                "solver_converged": True,
+                                "primal_feasible": True,
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assessment = full_horizon._rho_prefix_stop_assessment(result)
+
+    assert assessment["classification"] == "grid_or_transfer_diagnostic"
+    assert assessment["physiological_limit_certified"] is False
+
+
 def test_resume_rebases_artifact_paths_after_the_campaign_is_moved(tmp_path):
     campaign = tmp_path / "downloaded-campaign"
     rho = campaign / "rho-reduced" / "concatenated-solution.npz"
@@ -370,6 +649,237 @@ def test_adaptive_continuation_falls_back_to_one_then_retries_jump(
     ]
 
 
+def test_adaptive_continuation_can_bypass_a_failed_rho_extension_with_fho_bridge(
+    tmp_path, monkeypatch
+):
+    """A RHO ceiling must not itself be reported as an FHO ceiling."""
+
+    bootstrap_solution = tmp_path / "fho-2.npz"
+    bootstrap_solution.touch()
+    bridge_solution = tmp_path / "fho-3.npz"
+    bridge_solution.touch()
+    result = tmp_path / "result.json"
+    result.write_text(
+        json.dumps({"results": [{"window_objective_sum": 3.0}]}),
+        encoding="utf-8",
+    )
+    report = {
+        "full_horizon_attempts": [
+            {
+                "cycles": 2,
+                "success": True,
+                "accepted_for_continuation": True,
+                "result_path": str(result),
+                "solution_path": str(bootstrap_solution),
+            }
+        ],
+        "extension_rho_attempts": [],
+        "adaptive_fallback_events": [],
+        "largest_successful_cycles": 2,
+        "homotopy_constructed_cycles": 2,
+    }
+    args = SimpleNamespace(
+        output_dir=tmp_path / "output",
+        continuation_step_cycles=1,
+        jump_objective_relative_tolerance=0.005,
+        max_cycles=3,
+        allow_fho_terminal_bridge=True,
+    )
+
+    monkeypatch.setattr(
+        full_horizon,
+        "_run_extension_rho",
+        lambda *_args, **_kwargs: {
+            "success": False,
+            "infrastructure_error": False,
+            "failure_kind": "solver_failure",
+        },
+    )
+    observed = {}
+
+    def bridge(call_args, **kwargs):
+        observed.update(kwargs)
+        return {
+            "cycles": 3,
+            "success": True,
+            "infrastructure_error": False,
+            "failure_kind": None,
+            "result_path": str(result),
+            "solution_path": str(bridge_solution),
+        }
+
+    monkeypatch.setattr(full_horizon, "_run_fho_terminal_bridge", bridge)
+    monkeypatch.setattr(full_horizon, "_write_report", lambda *args: None)
+    monkeypatch.setattr(full_horizon, "_write_markdown", lambda *args: None)
+
+    assert full_horizon._continue_adaptively(
+        args,
+        report=report,
+        report_path=tmp_path / "report.json",
+        markdown_path=tmp_path / "report.md",
+        rho_seed_path=tmp_path / "rho-reference.npz",
+        effective_max_cycles=3,
+        current_cycles=2,
+        current_full_solution=bootstrap_solution,
+        rss_limit_bytes=1024,
+    ) == 0
+    assert observed["source_full_solution"] == bootstrap_solution
+    assert observed["target_cycles"] == 3
+    assert report["largest_successful_cycles"] == 3
+    assert report["terminal_bridge_attempts"] == [
+        {
+            "from_cycles": 2,
+            "to_cycles": 3,
+            "success": True,
+            "failure_kind": None,
+            "rho_extension_failure": "rho_extension_solver_failure",
+            "result_path": str(result),
+            "solution_path": str(bridge_solution),
+        }
+    ]
+
+
+def test_reference_ceiling_does_not_prevent_plus_three_chain(tmp_path, monkeypatch):
+    """FHO65 + local RHO66/67/68 reaches FHO68 despite the reference ceiling."""
+
+    reference = tmp_path / "rho-reference.npz"
+    np.savez(reference, metadata__json=np.asarray(json.dumps({"cycles_per_window": 67})))
+    source = tmp_path / "fho-65.npz"
+    source.touch()
+    report = {
+        "full_horizon_attempts": [], "extension_rho_attempts": [],
+        "adaptive_fallback_events": [], "largest_successful_cycles": 65,
+        "homotopy_constructed_cycles": 65,
+    }
+    args = SimpleNamespace(
+        output_dir=tmp_path / "output", continuation_step_cycles=3,
+        jump_objective_relative_tolerance=0.005, max_cycles=68,
+        allow_fho_terminal_bridge=True,
+    )
+    horizon_targets, bridge_targets = [], []
+    extension_sources = []
+
+    def extension(call_args, **kwargs):
+        cycle = kwargs["after_cycles"] + 1
+        extension_sources.append((cycle, kwargs["source_full_solution"]))
+        return {
+            "target_cycle": cycle, "success": True, "failure_kind": None,
+            "infrastructure_error": False,
+            "result_path": str(tmp_path / f"rho-{cycle}.json"),
+            "solution_path": str(tmp_path / f"rho-{cycle}.npz"),
+        }
+
+    def horizon(call_args, **kwargs):
+        cycles = kwargs["cycles"]
+        horizon_targets.append(cycles)
+        return {
+            "cycles": cycles, "success": True, "infrastructure_error": False,
+            "failure_kind": None, "result_path": str(tmp_path / f"fho-{cycles}.json"),
+            "solution_path": str(tmp_path / f"fho-{cycles}.npz"),
+        }
+
+    def bridge(call_args, **kwargs):
+        bridge_targets.append(kwargs["target_cycles"])
+        assert kwargs["source_full_solution"] == tmp_path / "fho-67.npz"
+        return {
+            "cycles": 68, "success": True, "infrastructure_error": False,
+            "failure_kind": None, "result_path": str(tmp_path / "fho-68.json"),
+            "solution_path": str(tmp_path / "fho-68.npz"),
+        }
+
+    monkeypatch.setattr(full_horizon, "_run_extension_rho", extension)
+    monkeypatch.setattr(full_horizon, "_run_horizon_attempt", horizon)
+    monkeypatch.setattr(full_horizon, "_run_fho_terminal_bridge", bridge)
+    monkeypatch.setattr(full_horizon, "append_rho_extension_cycle", lambda *args: {})
+    monkeypatch.setattr(full_horizon, "_benchmark_window_objective", lambda *args: 1.0)
+    monkeypatch.setattr(full_horizon, "_certified_fho_objective", lambda *args: 10.0)
+    monkeypatch.setattr(full_horizon, "_write_report", lambda *args: None)
+    monkeypatch.setattr(full_horizon, "_write_markdown", lambda *args: None)
+    monkeypatch.setattr(full_horizon, "run_monitored", lambda *_args, **_kwargs: pytest.fail("no numerical solve expected"))
+
+    assert full_horizon._continue_adaptively(
+        args, report=report, report_path=tmp_path / "report.json",
+        markdown_path=tmp_path / "report.md", rho_seed_path=reference,
+        effective_max_cycles=68, current_cycles=65, current_full_solution=source,
+        rss_limit_bytes=1024,
+    ) == 0
+    assert horizon_targets == [68]
+    assert bridge_targets == []
+    assert extension_sources == [(66, source), (67, tmp_path / "rho-66.npz"), (68, tmp_path / "rho-67.npz")]
+    assert report["largest_successful_cycles"] == 68
+    assert report["stop_reason"] == "requested_ceiling_reached"
+    assert report["solver_gap_cycles"] == []
+
+
+@pytest.mark.parametrize("reference_present", [False, True])
+@pytest.mark.parametrize("direct_fails", [False, True])
+def test_unavailable_reference_still_solves_local_terminal_rho(tmp_path, monkeypatch, reference_present, direct_fails):
+    reference = tmp_path / "rho-reference.npz"
+    if reference_present:
+        np.savez(reference, metadata__json=np.asarray(json.dumps({"cycles_per_window": 67})))
+    source = tmp_path / "fho67.npz"
+    # Two intervals per cycle, with absolute phase and all initial data copied.
+    np.savez(source, states__theta=np.arange(135.).reshape(1, -1),
+             states__A_Biceps=np.linspace(1, .7, 135).reshape(1, -1),
+             controls__pulse=np.ones((1, 134)),
+             metadata__json=np.asarray(json.dumps({"cycles_per_window": 67, "mechanical_formulation": "reduced"})))
+    calls = []
+    def command(args, result, solution, **kwargs):
+        calls.append(kwargs["common_initial_solution"])
+        full_horizon.shutil.copyfile(kwargs["common_initial_solution"], solution)
+        result.write_text(json.dumps({"results": [{}]}))
+        return []
+    monkeypatch.setattr(full_horizon, "_rho_command", command)
+    monkeypatch.setattr(full_horizon, "_rho_extension_success", lambda *args: not (direct_fails and len(calls) == 1))
+    monkeypatch.setattr(full_horizon, "run_monitored", lambda *_args, **kwargs: SimpleNamespace(
+        log_path=str(kwargs["log_path"]), return_code=0, memory_limit_exceeded=False,
+        timed_out=False, elapsed_s=1, peak_rss_bytes=10))
+
+    result = full_horizon._run_extension_rho(
+        SimpleNamespace(output_dir=tmp_path, workspace=tmp_path, poll_interval_s=.1, attempt_timeout_s=None), source_full_solution=source,
+        reference_rho_seed=reference, after_cycles=67, rss_limit_bytes=1024,
+    )
+
+    assert result["success"] is True
+    assert result["failure_kind"] is None
+    assert result["target_cycle"] == 68
+    assert result["infrastructure_error"] is False
+    assert result["physiological_limit_certified"] is False
+    assert result["certificate_valid"] is True
+    assert len(calls) == (5 if direct_fails else 1)
+    assert result["homotopy_stages"][0]["recipe"] == "terminal_projection"
+    assert result["homotopy_stages"][0]["terminal_handoff_max_abs_error"] == 0
+    assert result["provenance"]["initial_state_origin"] == "FHO_67:terminal"
+    if direct_fails:
+        assert [stage["fraction"] for stage in result["homotopy_stages"]] == [1, .25, .5, .75, 1]
+        assert result["homotopy_stages"][-1]["terminal_handoff_max_abs_error"] == 0
+
+
+def test_terminal_handoff_checks_fatigue_and_stimulation_memory(tmp_path):
+    source, extension = tmp_path / "source.npz", tmp_path / "next.npz"
+    np.savez(source, states__theta=[[0., 1.]], states__A_Biceps=[[.8, .7]], states__last_pulse_width_Biceps=[[.001, .002]])
+    np.savez(extension, states__theta=[[1., 2.]], states__A_Biceps=[[.7, .6]], states__last_pulse_width_Biceps=[[.003, .004]])
+    assert full_horizon._terminal_handoff_error(source, extension) == pytest.approx(.001)
+    np.savez(extension, states__theta=[[1., 2.]], states__A_Biceps=[[float("nan"), .6]], states__last_pulse_width_Biceps=[[.002, .004]])
+    assert np.isinf(full_horizon._terminal_handoff_error(source, extension))
+
+
+@pytest.mark.parametrize("problem", ["missing_file", "missing_cycles", "zero_cycles", "invalid_layout"])
+def test_extension_does_not_hide_invalid_certified_carrier(tmp_path, problem):
+    reference = tmp_path / "fho.npz"
+    if problem != "missing_file":
+        metadata = {} if problem == "missing_cycles" else {"cycles_per_window": 0 if problem == "zero_cycles" else 3}
+        np.savez(reference, metadata__json=np.asarray(json.dumps(metadata)), states__theta=np.zeros((1, 11)))
+    expected = {"missing_file": FileNotFoundError, "missing_cycles": KeyError}.get(problem, ValueError)
+
+    with pytest.raises(expected) as error:
+        full_horizon._run_extension_rho(
+            SimpleNamespace(output_dir=tmp_path), source_full_solution=reference,
+            reference_rho_seed=tmp_path / "optional-reference.npz", after_cycles=2, rss_limit_bytes=1024,
+        )
+    assert not isinstance(error.value, full_horizon.RhoReferenceCycleUnavailable)
+
+
 def test_refinement_fills_only_the_last_coarse_interval():
     assert full_horizon.refinement_targets(60, 70) == list(range(61, 70))
     assert full_horizon.refinement_targets(12, 13) == []
@@ -537,7 +1047,10 @@ def test_fho_terminal_continuation_starts_exactly_at_fho_terminal_state(tmp_path
         "cycles_per_window": 2,
         "mechanical_formulation": "reduced",
     }
-    theta = np.asarray([[0.0, -1.0, -2.0, -3.0, -4.0, -5.0, -6.0]])
+    theta = np.asarray(
+        [[0.0, -2.0 * np.pi / 3.0, -4.0 * np.pi / 3.0, -2.0 * np.pi,
+          -8.0 * np.pi / 3.0, -10.0 * np.pi / 3.0, -4.0 * np.pi]]
+    )
     fatigue = np.asarray([[1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4]])
     controls = np.arange(6, dtype=float).reshape(1, 6)
     np.savez(
@@ -558,12 +1071,66 @@ def test_fho_terminal_continuation_starts_exactly_at_fho_terminal_state(tmp_path
 
     np.testing.assert_allclose(next_theta[:, 0], theta[:, -1])
     np.testing.assert_allclose(next_fatigue[:, 0], fatigue[:, -1])
-    assert next_theta[-1, -1] == pytest.approx(-9.0)
+    assert next_theta[-1, -1] == pytest.approx(-6.0 * np.pi)
     assert next_fatigue[0, -1] == pytest.approx(0.1)
     np.testing.assert_array_equal(next_controls, controls[:, -3:])
     assert written == persisted
     assert persisted["cycles_per_window"] == 1
     assert persisted["producer_source_cycles"] == 2
+
+
+def test_fho_terminal_continuation_projects_terminal_phase_to_one_winding(tmp_path):
+    source = tmp_path / "fho-phase-1.npz"
+    output = tmp_path / "next-phase-cycle.npz"
+    slack = 0.002
+    theta = np.asarray([[0.0, -2.0, -4.0, -2.0 * np.pi + slack]])
+    np.savez(
+        source,
+        states__theta=theta,
+        metadata__json=np.asarray(
+            json.dumps({"cycles_per_window": 1, "mechanical_formulation": "reduced"})
+        ),
+    )
+
+    metadata = full_horizon.write_fho_terminal_continuation_seed(source, output)
+
+    with np.load(output, allow_pickle=False) as data:
+        continuation = data["states__theta"]
+    np.testing.assert_allclose(continuation[:, 0], theta[:, -1])
+    np.testing.assert_allclose(
+        continuation[:, -1], theta[:, -1] - 2.0 * np.pi
+    )
+    assert metadata["producer_terminal_theta_phase_projection_rad"] == pytest.approx(
+        slack
+    )
+
+
+def test_fho_terminal_continuation_fades_fast_force_boundary_correction(tmp_path):
+    """Fast force must not receive an unbounded whole-cycle translation."""
+
+    source = tmp_path / "fho-force-2.npz"
+    output = tmp_path / "next-force-cycle.npz"
+    metadata = {"cycles_per_window": 2, "mechanical_formulation": "reduced"}
+    # Last cycle begins at 32 N and ends at zero.  The previous construction
+    # translated every node by -32 N and consequently finished at -32 N.
+    force = np.asarray([[10.0, 8.0, 32.0, 36.0, 20.0, 4.0, 0.0]])
+    np.savez(
+        source,
+        states__F_Delt_post=force,
+        metadata__json=np.asarray(json.dumps(metadata)),
+    )
+
+    full_horizon.write_fho_terminal_continuation_seed(source, output)
+
+    with np.load(output, allow_pickle=False) as data:
+        continuation = data["states__F_Delt_post"]
+
+    # The exact FHO terminal force remains the RHO initial state.  The
+    # correction is local and therefore cannot manufacture the previous
+    # whole-cycle negative terminal force.
+    assert continuation[0, 0] == pytest.approx(0.0)
+    assert continuation[0, -1] == pytest.approx(0.0)
+    assert float(np.min(continuation)) >= 0.0
 
 
 def test_rho_extension_replaces_the_carrier_boundary_before_appending(tmp_path):
@@ -881,6 +1448,7 @@ def test_rho_and_full_horizon_use_the_intended_solver_contract(tmp_path):
         python="python",
         workspace=tmp_path,
         seed_dir=tmp_path / "seed",
+        output_dir=tmp_path,
         n_threads=4,
         crank_assistance=0.0,
         max_iterations=2000,
@@ -917,6 +1485,7 @@ def test_rho_and_full_horizon_use_the_intended_solver_contract(tmp_path):
     assert full[full.index("--solvers") + 1] == "ipopt"
     assert "--single-shot" not in rho
     assert "--allow-partial-receding-horizon-solution-output" in rho
+    assert "--retry-failed-rho-without-advance" in rho
     assert "--ipopt-use-sx" in rho
     assert "--ipopt-c-compile" in rho
     assert "--ipopt-enable-periodic-fes-warmup-projection" in rho
@@ -930,7 +1499,31 @@ def test_rho_and_full_horizon_use_the_intended_solver_contract(tmp_path):
         tmp_path / "one-cycle-rho.npz",
         n_windows=1,
     )
-    assert "--ipopt-c-compile" not in one_cycle_rho
+    # A one-cycle transition is a separate child process.  It compiles SX
+    # once into a campaign-level cache so later transitions can reuse the
+    # native evaluator while changing only their numerical warm start.
+    assert "--ipopt-c-compile" in one_cycle_rho
+    assert one_cycle_rho[
+        one_cycle_rho.index("--ipopt-c-cache-dir") + 1
+    ] == str(tmp_path / "rho-transition-ipopt-c-cache")
+    assert one_cycle_rho[
+        one_cycle_rho.index("--ipopt-c-cache-name") + 1
+    ] == "rho-transition-sx"
+    changed_state_rho = full_horizon._rho_command(
+        args,
+        tmp_path / "changed-state-rho.json",
+        tmp_path / "changed-state-rho.npz",
+        n_windows=1,
+        common_initial_solution=tmp_path / "different-initial-state.npz",
+    )
+    assert changed_state_rho[
+        changed_state_rho.index("--ipopt-c-cache-dir") + 1
+    ] == one_cycle_rho[one_cycle_rho.index("--ipopt-c-cache-dir") + 1]
+    assert changed_state_rho[
+        changed_state_rho.index("--common-initial-solution") + 1
+    ] == str(tmp_path / "different-initial-state.npz")
+    assert "--ipopt-disable-standard-warmup" in changed_state_rho
+    assert "--standard-warmup-seed" not in changed_state_rho
     assert "--single-shot" in full
     assert full[full.index("--mechanical-formulation") + 1] == "reduced"
     assert full[full.index("--full-horizon-prefix-solution") + 1] == str(
@@ -943,12 +1536,13 @@ def test_rho_and_full_horizon_use_the_intended_solver_contract(tmp_path):
     assert "--ipopt-no-use-sx" in paired_reduced
     assert full[full.index("--ipopt-linear-solver") + 1] == "ma57"
     assert "--ipopt-no-use-sx" in full
+    assert "--ipopt-c-compile" not in full
     assert "--ipopt-disable-standard-warmup" in full
     assert "--adopt-common-initial-solution-warmup-cycles" in full
     assert "--ipopt-disable-standard-warmup" in paired_reduced
     assert "--adopt-common-initial-solution-warmup-cycles" in paired_reduced
-    assert "--ipopt-disable-standard-warmup" not in one_cycle_full
-    assert "--adopt-common-initial-solution-warmup-cycles" not in one_cycle_full
+    assert "--ipopt-disable-standard-warmup" in one_cycle_full
+    assert "--adopt-common-initial-solution-warmup-cycles" in one_cycle_full
     assert "--optional-nlp-periodic-ipopt-hot-start" in full
     assert "--initial-guess-diagnostics" in full
     assert "--exact-initial-nlp-audit" not in full
