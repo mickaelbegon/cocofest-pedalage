@@ -41,6 +41,34 @@ class _Factory:
         return instance
 
 
+class _IpoptWithHessianDefaults(_FakeSolver):
+    """Model the Bioptim IPOPT attributes which unsafe assignment cannot replace."""
+
+    def __init__(self, **constructor_options):
+        super().__init__(**constructor_options)
+        self._hessian_approximation = "exact"
+        self._limited_memory_max_history = 50
+
+    def set_hessian_approximation(self, value):
+        self._hessian_approximation = value
+        self.calls.append(("set_hessian_approximation", value))
+
+    def set_limited_memory_max_history(self, value):
+        self._limited_memory_max_history = value
+        self.calls.append(("set_limited_memory_max_history", value))
+
+
+class _TypedFactory:
+    def __init__(self, solver_type):
+        self.solver_type = solver_type
+        self.instances = []
+
+    def __call__(self, **kwargs):
+        instance = self.solver_type(**kwargs)
+        self.instances.append(instance)
+        return instance
+
+
 def _solver_namespace(*names):
     return SimpleNamespace(**{name: _Factory() for name in names})
 
@@ -246,6 +274,25 @@ def test_configure_ipopt_retains_robust_cocofest_settings():
     assert ("set_option_unsafe", "none", "linear_system_scaling") in solver.calls
     assert ("set_option_unsafe", "yes", "ma57_automatic_scaling") in solver.calls
     assert ("set_c_compile", True) in solver.calls
+
+
+def test_configure_ipopt_overrides_bioptim_hessian_defaults_with_setters():
+    factory = _TypedFactory(_IpoptWithHessianDefaults)
+    solver = configure_nlp_solver(
+        "ipopt",
+        max_iterations=10,
+        ipopt_options={
+            "hessian_approximation": "limited-memory",
+            "limited_memory_max_history": 10,
+        },
+        solver_namespace=SimpleNamespace(IPOPT=factory),
+        check_availability=False,
+    )
+
+    assert solver._hessian_approximation == "limited-memory"
+    assert solver._limited_memory_max_history == 10
+    assert ("set_hessian_approximation", "limited-memory") in solver.calls
+    assert ("set_limited_memory_max_history", 10) in solver.calls
 
 
 def test_configure_ipopt_serializes_an_hsl_path_for_casadi():

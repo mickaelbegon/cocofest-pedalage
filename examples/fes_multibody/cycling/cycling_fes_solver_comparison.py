@@ -188,6 +188,7 @@ BENCHMARK_CONFIGURATION_FIELDS = (
     "terminal_wheel_qdot_bound_margin",
     "acados_terminal_wheel_qdot_homotopy_margins",
     "reduced_internal_crank_velocity_guard",
+    "reduced_terminal_half_step_velocity_guard",
     "acados_wheel_q_slack",
     "acados_wheel_qdot_slack",
     "acados_terminal_wheel_q_slack",
@@ -1764,6 +1765,8 @@ def _solver_config(
     acados_ext_qp_res: bool,
     acados_project_qdot_from_q: bool,
     disable_periodic_fes_warmup_projection: bool,
+    common_initial_solution_fes_forward_rollout: bool,
+    common_initial_solution_fes_forward_rollout_substeps: int,
     periodic_fes_warmup_projection_weight: float,
     periodic_fes_warmup_projection_mode: str,
     periodic_fes_warmup_projection_strategy: str,
@@ -1915,6 +1918,12 @@ def _solver_config(
             disable_periodic_fes_warmup_projection=_pick(
                 ipopt_disable_periodic_fes_warmup_projection,
                 disable_projection_default,
+            ),
+            common_initial_solution_fes_forward_rollout=(
+                common_initial_solution_fes_forward_rollout
+            ),
+            common_initial_solution_fes_forward_rollout_substeps=(
+                common_initial_solution_fes_forward_rollout_substeps
             ),
             periodic_fes_warmup_projection_weight=periodic_fes_warmup_projection_weight,
             periodic_fes_warmup_projection_mode=periodic_fes_warmup_projection_mode,
@@ -2071,6 +2080,12 @@ def _solver_config(
             acados_project_qdot_from_q=acados_project_qdot_from_q,
             disable_periodic_fes_warmup_projection=(
                 disable_periodic_fes_warmup_projection
+            ),
+            common_initial_solution_fes_forward_rollout=(
+                common_initial_solution_fes_forward_rollout
+            ),
+            common_initial_solution_fes_forward_rollout_substeps=(
+                common_initial_solution_fes_forward_rollout_substeps
             ),
             periodic_fes_warmup_projection_weight=periodic_fes_warmup_projection_weight,
             periodic_fes_warmup_projection_mode=periodic_fes_warmup_projection_mode,
@@ -3445,6 +3460,21 @@ def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
             else None
         )
         execution_timing = dict(result.get("execution_timing") or {})
+        complete_iteration_samples = np.asarray(
+            execution_timing.get("rho_complete_iteration_wall_time_samples_s")
+            or [],
+            dtype=float,
+        )
+        complete_iteration_samples = complete_iteration_samples[
+            np.isfinite(complete_iteration_samples)
+        ]
+        # An interval is indexed by the update callback that starts it.  Keep
+        # only certified physical windows and, like solver hot timing, omit
+        # the first window from the online population.
+        complete_iteration_samples = complete_iteration_samples[
+            : performance["successful_prefix_windows"]
+        ]
+        hot_complete_iteration_samples = complete_iteration_samples[1:]
         rho_solve_loop_wall_time = _finite_float(
             execution_timing.get("rho_solve_loop_wall_time_s")
         )
@@ -3564,6 +3594,16 @@ def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
                 "hot_solver_time_p90_s": performance["hot_solver_time_p90_s"],
                 "hot_wall_time_median_s": performance["hot_wall_time_median_s"],
                 "hot_wall_time_p90_s": performance["hot_wall_time_p90_s"],
+                "hot_complete_iteration_wall_time_median_s": (
+                    None
+                    if not hot_complete_iteration_samples.size
+                    else float(np.median(hot_complete_iteration_samples))
+                ),
+                "hot_complete_iteration_wall_time_p90_s": (
+                    None
+                    if not hot_complete_iteration_samples.size
+                    else float(np.percentile(hot_complete_iteration_samples, 90))
+                ),
                 "target_solver_only_window_count": performance[
                     "target_solver_only_window_count"
                 ],
@@ -4253,6 +4293,8 @@ def main(
     acados_sim_steps: int = 5,
     acados_newton_iter: int = 5,
     disable_periodic_fes_warmup_projection: bool = False,
+    common_initial_solution_fes_forward_rollout: bool = False,
+    common_initial_solution_fes_forward_rollout_substeps: int = 10,
     periodic_fes_warmup_projection_weight: float = 1.0,
     periodic_fes_warmup_projection_mode: str = "all",
     periodic_fes_warmup_projection_strategy: str = "sequential",
@@ -4444,6 +4486,12 @@ def main(
         acados_ext_qp_res=False,
         acados_project_qdot_from_q=False,
         disable_periodic_fes_warmup_projection=(disable_periodic_fes_warmup_projection),
+        common_initial_solution_fes_forward_rollout=(
+            common_initial_solution_fes_forward_rollout
+        ),
+        common_initial_solution_fes_forward_rollout_substeps=(
+            common_initial_solution_fes_forward_rollout_substeps
+        ),
         periodic_fes_warmup_projection_weight=periodic_fes_warmup_projection_weight,
         periodic_fes_warmup_projection_mode=periodic_fes_warmup_projection_mode,
         periodic_fes_warmup_projection_strategy=periodic_fes_warmup_projection_strategy,
@@ -4581,6 +4629,12 @@ def main(
         acados_ext_qp_res=acados_ext_qp_res,
         acados_project_qdot_from_q=acados_project_qdot_from_q,
         disable_periodic_fes_warmup_projection=disable_periodic_fes_warmup_projection,
+        common_initial_solution_fes_forward_rollout=(
+            common_initial_solution_fes_forward_rollout
+        ),
+        common_initial_solution_fes_forward_rollout_substeps=(
+            common_initial_solution_fes_forward_rollout_substeps
+        ),
         periodic_fes_warmup_projection_weight=periodic_fes_warmup_projection_weight,
         periodic_fes_warmup_projection_mode=periodic_fes_warmup_projection_mode,
         periodic_fes_warmup_projection_strategy=periodic_fes_warmup_projection_strategy,
@@ -6889,6 +6943,19 @@ def build_cli() -> argparse.ArgumentParser:
     )
     parser.add_argument("--disable-periodic-fes-warmup-projection", action="store_true")
     parser.add_argument(
+        "--common-initial-solution-fes-forward-rollout",
+        action="store_true",
+        help=(
+            "Forward-roll common continuation FES states from its inherited first node "
+            "after seed loading."
+        ),
+    )
+    parser.add_argument(
+        "--common-initial-solution-fes-forward-rollout-substeps",
+        type=int,
+        default=10,
+    )
+    parser.add_argument(
         "--periodic-fes-warmup-projection-weight", type=float, default=1.0
     )
     parser.add_argument(
@@ -7552,6 +7619,12 @@ if __name__ == "__main__":
         acados_newton_iter=args.acados_newton_iter,
         disable_periodic_fes_warmup_projection=(
             args.disable_periodic_fes_warmup_projection
+        ),
+        common_initial_solution_fes_forward_rollout=(
+            args.common_initial_solution_fes_forward_rollout
+        ),
+        common_initial_solution_fes_forward_rollout_substeps=(
+            args.common_initial_solution_fes_forward_rollout_substeps
         ),
         periodic_fes_warmup_projection_weight=(
             args.periodic_fes_warmup_projection_weight

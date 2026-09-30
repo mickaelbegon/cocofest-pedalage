@@ -15,7 +15,7 @@ from cocofest.optimization.pulse_width_slew import (
 )
 from cocofest.simulation import CapabilityRegistry, SimulationConfig, build_launch_plan
 from cocofest.simulation.gui_model import config_from_form, form_values, scientific_summary
-from tests.test_pulse_width_slew import _ocp
+from tests.test_pulse_width_slew import _ocp, _direct_ocp
 
 
 def _with_regularization(n=10, weight=1.0, *, keep_tracking=False):
@@ -63,6 +63,55 @@ def test_constant_control_derivative_is_not_an_adjacent_control_difference():
     function = ocp.nlp[0].J[0].function[0]
     arguments = [DM.ones(*function.size_in(i)) for i in range(function.n_in())]
     assert float(function(*arguments)) == 0
+
+
+@pytest.mark.parametrize("n", [30, 50])
+def test_direct_regularization_is_nonzero_normalized_and_has_no_final_pair(n):
+    ocp = _direct_ocp(n, collocation=True)
+    dimensions = (ocp.nlp[0].states.shape, ocp.nlp[0].controls.shape)
+    objectives = ObjectiveList()
+    add_slew_regularization(objectives, ocp.nlp[0].model, weight=2.5,
+                            n_shooting=n, interval_s=1 / n)
+    ocp.update_objectives(objectives)
+    assert (ocp.nlp[0].states.shape, ocp.nlp[0].controls.shape) == dimensions == (1, 1)
+    penalties = ocp.nlp[0].J
+    assert len(penalties) == n - 1
+    differences = np.linspace(-100e-6, 100e-6, n - 1)
+    total = 0.0
+    for node, (penalty, difference) in enumerate(zip(penalties, differences)):
+        assert penalty.node_idx == [node]
+        function = penalty.weighted_function[node]
+        arguments = {function.name_in(i): DM.zeros(*function.size_in(i)) for i in range(function.n_in())}
+        arguments["dt"] = 1 / n
+        arguments["u"] = DM([300e-6, 300e-6 + difference]) / .0025
+        arguments["weight"] = float(penalty.weight.evaluate_at(0, 1)[0])
+        total += float(function(**arguments)["val"])
+    assert total > 0
+    assert total == pytest.approx(2.5 * np.mean((differences / 100e-6) ** 2))
+
+
+def test_direct_regularization_smooths_without_lifting_or_losing_the_bound():
+    variations = []
+    for weight in (0, 100):
+        ocp = _direct_ocp(10, collocation=True)
+        objectives = ObjectiveList()
+        add_slew_regularization(objectives, ocp.nlp[0].model, weight=weight,
+                                n_shooting=10, interval_s=.1)
+        for index, objective in enumerate(objectives[0] if weight else []):
+            objective.list_index = index + 1
+        if weight:
+            ocp.update_objectives(objectives)
+        solver = Solver.IPOPT(show_online_optim=False)
+        solver.set_print_level(0)
+        solver.set_tol(1e-9)
+        solution = ocp.solve(solver)
+        assert solution.status == 0
+        controls = solution.decision_controls(to_merge=SolutionMerge.NODES)
+        assert set(controls) == {"last_pulse_width_m"}
+        delta = np.diff(controls["last_pulse_width_m"][0])
+        assert max(abs(delta)) <= 100e-6 + 1e-10
+        variations.append(float(np.sum(delta ** 2)))
+    assert variations[1] < .9 * variations[0]
 
 
 @pytest.mark.parametrize("n", [30, 50])
@@ -131,6 +180,18 @@ def test_audit_separates_intra_window_cost_from_executed_seams():
     assert summary["pulse_width_slew_audit"]["muscles"]["m"]["maximum_executed_cycle_seam_change_us"] == pytest.approx(200)
 
 
+def test_direct_audit_does_not_report_nonexistent_auxiliary_variables():
+    summary = {"validated_cycles": 1,
+               "control_traces": {"last_pulse_width_m": np.array([200, 250, 300]) * 1e-6}}
+    args = SimpleNamespace(stimulations_per_cycle=3, pulse_width_max_step_us=100,
+                           pulse_width_slew_weight=.1, pulse_width_slew_reference_us=100,
+                           pulse_width_slew_formulation="direct_constraints")
+    attach_slew_audit(summary, args)
+    assert summary["pulse_width_slew_audit"]["auxiliary_control_representation"] is None
+    assert summary["pulse_width_slew_regularization_audit"]["final_auxiliary_increment"] is None
+    assert summary["pulse_width_slew_regularization_audit"]["reported_cost_excludes_final_auxiliary_increment"] is False
+
+
 def test_comparison_json_preserves_regularization_audit():
     from examples.fes_multibody.cycling.cycling_fes_solver_comparison import solver_overview_rows
     from tests.shard1.test_periodic_pulse_width import _benchmark_result
@@ -183,6 +244,22 @@ def test_both_cli_parsers_expose_regularization_and_signature_changes():
         assert defaults.pulse_width_slew_reference_us == 100
         args = parser.parse_args(["--pulse-width-max-step-us", "100", "--pulse-width-slew-weight", ".1"])
         assert pulse_width_slew_signature(args) != pulse_width_slew_signature(defaults)
+
+
+@pytest.mark.parametrize("solver", ["ipopt", "madnlp"])
+def test_comparison_forwards_direct_slew_formulation_to_actual_solver(monkeypatch, solver):
+    from examples.fes_multibody.cycling import cycling_fes_solver_comparison as comparison
+    captured = {}
+    monkeypatch.setattr(comparison, "_run_benchmark_case",
+                        lambda name, args, **kwargs: captured.setdefault(name, {"args": args}))
+    monkeypatch.setattr(comparison, "print_solver_overview", lambda _: None)
+    comparison.main(solvers=(solver,), n_windows=3, stimulations_per_cycle=30,
+                    mechanical_formulation="reduced", pulse_width_max_step_us=100,
+                    pulse_width_slew_weight=.1, pulse_width_slew_formulation="direct_constraints")
+    args = captured[solver]["args"]
+    assert args.pulse_width_slew_formulation == "direct_constraints"
+    assert args.pulse_width_slew_weight == .1
+    assert args.stimulations_per_cycle == 30
 
 
 @pytest.mark.parametrize("field,value", [

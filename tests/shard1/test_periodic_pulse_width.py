@@ -269,7 +269,7 @@ def test_reduced_cadence_rk4_guard_evolves_the_full_state_vector():
     assert float(predicted) == pytest.approx(-6.0 * np.exp(0.1), abs=1e-6)
 
 
-def test_reduced_cadence_guard_is_added_at_all_shooting_nodes(monkeypatch):
+def test_reduced_cadence_guard_excludes_the_fixed_start_node(monkeypatch):
     captured = []
 
     class FakeConstraintList:
@@ -283,6 +283,7 @@ def test_reduced_cadence_guard_is_added_at_all_shooting_nodes(monkeypatch):
         reduced_model,
         enforce_start_constraints=False,
         enforce_reduced_internal_crank_velocity_guard=True,
+        cycle_len=30,
         shooting_interval_duration=1.0 / 30.0,
         physical_crank_velocity_target=-2.0 * np.pi,
         physical_crank_velocity_margin=3.0,
@@ -292,7 +293,7 @@ def test_reduced_cadence_guard_is_added_at_all_shooting_nodes(monkeypatch):
 
     assert len(captured) == 1
     assert captured[0][0] is mhe_example.reduced_internal_crank_velocity_constraint
-    assert captured[0][1]["node"] == Node.ALL_SHOOTING
+    assert captured[0][1]["node"] == tuple(range(1, 30))
     assert captured[0][1]["shooting_interval_duration"] == pytest.approx(1 / 30)
     assert captured[0][1]["min_bound"] == pytest.approx(-2.0 * np.pi - 3.0)
     assert captured[0][1]["max_bound"] == pytest.approx(-2.0 * np.pi + 3.0)
@@ -5376,6 +5377,31 @@ def test_benchmark_hot_rho_timing_includes_transfer_phase_one_cost():
         "p90_wall_time_s": pytest.approx(0.39),
         "max_wall_time_s": pytest.approx(0.4),
     }
+
+
+def test_benchmark_reports_hot_complete_rho_iteration_quantiles():
+    result = _benchmark_result([0, 0, 0], solver_success=True, success=True)
+    result.update(
+        window_solutions=[
+            SimpleNamespace(
+                status=0,
+                solver_time_to_optimize=0.1,
+                real_time_to_optimize=0.2,
+            )
+            for _ in range(3)
+        ],
+        window_feasibility=[{"passes_tolerance": True} for _ in range(3)],
+        execution_timing={
+            # The sample starts are [0.0, 1.0, 3.0, 6.0], hence complete
+            # RHO iterations are [1.0, 2.0, 3.0]; window zero is cold.
+            "rho_complete_iteration_wall_time_samples_s": [1.0, 2.0, 3.0],
+        },
+    )
+
+    row = comparison_example.solver_overview_rows({"ipopt": result})[0]
+
+    assert row["hot_complete_iteration_wall_time_median_s"] == pytest.approx(2.5)
+    assert row["hot_complete_iteration_wall_time_p90_s"] == pytest.approx(2.9)
 
 
 def test_benchmark_excludes_nlp_cycles_after_external_physical_failure():

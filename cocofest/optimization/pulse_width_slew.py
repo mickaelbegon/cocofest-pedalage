@@ -118,7 +118,11 @@ def pulse_width_slew_signature(args) -> dict:
     if weight > 0:
         signature["pulse_width_slew_normalization"] = REGULARIZATION_NORMALIZATION
     if maximum_us is not None:
-        signature["pulse_width_slew_control_representation"] = CONTROL_REPRESENTATION
+        signature["pulse_width_slew_control_representation"] = (
+            "physical_pw_v1"
+            if signature["pulse_width_slew_formulation"] == DIRECT_CONSTRAINTS_FORMULATION
+            else CONTROL_REPRESENTATION
+        )
     return signature
 
 
@@ -163,11 +167,28 @@ def normalized_slew_residual(controller, reference_s: float):
     ])
 
 
+def normalized_direct_slew_residual(controller, reference_s: float):
+    """Adjacent ZOH command differences without an auxiliary state or control.
+
+    In the supported Bioptim version ``MINIMIZE_CONTROL, derivative=True``
+    evaluates both ends with ``cx_start`` for CONSTANT controls, giving zero.
+    Explicit endpoints express the intended discrete derivative while keeping
+    Ding's physically constant command over each stimulation interval.
+    """
+    from casadi import vertcat
+    return vertcat(*[
+        adjacent_pulse_width_difference(
+            controller, muscle=muscle.muscle_name, scale=reference_s,
+        )
+        for muscle in controller.model.muscles_dynamics_model
+    ])
+
+
 def add_slew_regularization(objectives, model, *, weight=0.0, reference_us=100.0,
                             n_shooting: int, interval_s: float):
-    """Add λ mean((ΔPW/reference)²), including the otherwise free final delta.
+    """Add λ mean((ΔPW/reference)²) with no extra variables in direct mode.
 
-    Lagrange integration supplies dt. The last auxiliary increment has no
+    Lagrange integration supplies dt. In lifting mode the last increment has no
     physical successor and is driven to zero by this cost; its squared value
     remains part of the solver cost away from the optimum. The real executed
     RHO seam is bounded separately and is not penalized here.
@@ -183,6 +204,19 @@ def add_slew_regularization(objectives, model, *, weight=0.0, reference_us=100.0
     muscle_count = len(model.muscles_dynamics_model)
     if not muscle_count:
         raise ValueError("PW slew regularization requires at least one muscle.")
+    formulation = validate_slew_formulation(getattr(model, "pulse_width_slew_formulation", None))
+    if formulation == DIRECT_CONSTRAINTS_FORMULATION:
+        # Only N-1 physical pairs exist; there is no terminal command and no
+        # periodic wraparound penalty. The executed RHO seam is bounded alone.
+        # Mayer penalties allow explicit nodes and have no dt multiplier.
+        for node in range(n_shooting - 1):
+            objectives.add(
+                normalized_direct_slew_residual, custom_type=ObjectiveFcn.Mayer,
+                node=node, quadratic=True, multi_thread=False,
+                reference_s=reference_us * 1e-6,
+                weight=weight / (muscle_count * (n_shooting - 1)),
+            )
+        return
     objectives.add(
         normalized_slew_residual, custom_type=ObjectiveFcn.Lagrange,
         node=Node.ALL_SHOOTING, quadratic=True, multi_thread=False,
@@ -357,6 +391,8 @@ def attach_slew_audit(summary: dict, args) -> None:
     maximum_us = getattr(args, "pulse_width_max_step_us", None)
     weight = getattr(args, "pulse_width_slew_weight", 0.0)
     reference_us = getattr(args, "pulse_width_slew_reference_us", 100.0)
+    formulation = validate_slew_formulation(getattr(args, "pulse_width_slew_formulation", None))
+    has_lift = maximum_us is not None and formulation == LIFTING_FORMULATION
     count = int(args.stimulations_per_cycle)
     certified_cycles = _certified_cycle_prefix(summary)
     muscles = {}
@@ -390,7 +426,8 @@ def attach_slew_audit(summary: dict, args) -> None:
         "executed_seam_scope": "certified_cycle_prefix",
         "certified_cycle_count": certified_cycles,
         "control_representation": "physical PW held constant per shooting interval",
-        "auxiliary_control_representation": CONTROL_REPRESENTATION if maximum_us is not None else None,
+        "formulation": formulation,
+        "auxiliary_control_representation": CONTROL_REPRESENTATION if has_lift else None,
         "bounded_pair": "successive_controls",
         "circular_within_cycle": False,
         "actual_rho_seam_bounded": maximum_us is not None,
@@ -406,6 +443,8 @@ def attach_slew_audit(summary: dict, args) -> None:
         "actual_rho_seam_penalized": False, "circular_within_cycle": False,
         "mean_squared_normalized_intra_window_change": normalized_mean,
         "mean_weighted_intra_window_cost": weight * normalized_mean if normalized_mean is not None else None,
-        "final_auxiliary_increment": "penalized_toward_zero" if weight > 0 else "free_within_uniform_bounds",
-        "reported_cost_excludes_final_auxiliary_increment": True,
+        "final_auxiliary_increment": (
+            "penalized_toward_zero" if weight > 0 else "free_within_uniform_bounds"
+        ) if has_lift else None,
+        "reported_cost_excludes_final_auxiliary_increment": has_lift,
     }

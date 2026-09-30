@@ -27,7 +27,7 @@ def lifted_seed_target(stride=1):
               CARRIER: np.interp(dense_grid, source_grid, carrier[0])[None, :]}
     seed = example._WarmupSolutionAdapter(states, {PW: controls.copy(), DELTA: delta.copy()})
     target = SimpleNamespace(nlp=[SimpleNamespace(
-        model=SimpleNamespace(pulse_width_max_step_s=100e-6,
+        model=SimpleNamespace(pulse_width_max_step_s=100e-6, uses_pulse_width_slew_lifting=True,
                               muscles_dynamics_model=[SimpleNamespace(muscle_name="m", pd0=131.405e-6)]),
         x_init={"F_m": SimpleNamespace(init=np.zeros((1, 4))),
                 CARRIER: SimpleNamespace(init=np.full((1, 4), 300e-6))},
@@ -65,6 +65,27 @@ def test_generic_unlifted_warmup_retains_the_existing_constant_auxiliary_fallbac
     np.testing.assert_array_equal(adapted.decision_controls()[PW], target.nlp[0].u_init[PW].init)
     np.testing.assert_array_equal(adapted.decision_controls()[DELTA], target.nlp[0].u_init[DELTA].init)
     np.testing.assert_array_equal(adapted.decision_states()[CARRIER], target.nlp[0].x_init[CARRIER].init)
+
+
+def test_direct_slew_warmup_keeps_physical_pw_instead_of_lifting_fallback():
+    seed, target, controls, *_ = lifted_seed_target()
+    generic = example._WarmupSolutionAdapter({"F_m": seed.decision_states()["F_m"]}, {PW: controls})
+    target.nlp[0].model.pulse_width_slew_formulation = "direct_constraints"
+    target.nlp[0].model.uses_pulse_width_slew_lifting = False
+    target.nlp[0].x_init.pop(CARRIER)
+    target.nlp[0].u_init.pop(DELTA)
+    adapted = example._adapt_warmup_solution_to_periodic_nodes(target, generic)
+    np.testing.assert_array_equal(adapted.decision_controls()[PW], controls)
+    np.testing.assert_array_equal(adapted.decision_states()["F_m"], seed.decision_states()["F_m"])
+
+
+def test_direct_slew_seed_metadata_declares_physical_control_representation():
+    args = example.build_argument_parser().parse_args([
+        "--pulse-width-max-step-us", "100", "--pulse-width-slew-weight", ".1",
+        "--pulse-width-slew-formulation", "direct_constraints",
+    ])
+    args.terminal_wheel_q_reference_mode = "absolute_initial"
+    assert example._common_initial_solution_metadata(args)["pulse_width_slew_control_representation"] == "physical_pw_v1"
 
 
 def test_legacy_next_pw_seed_is_rejected_explicitly():

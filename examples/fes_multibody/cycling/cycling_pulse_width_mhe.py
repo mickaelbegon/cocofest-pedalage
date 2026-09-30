@@ -55,11 +55,13 @@ from cocofest.optimization.isokinetic_cycling import (
     IsokineticCyclingConfig,
     validate_external_torque_effectiveness,
 )
+from cocofest.dynamics.reduced_cycling import global_segment_moment_generalized_vector
 from cocofest.optimization.muscle_reserve import DEFAULT_SMOOTH_MIN_TEMPERATURE
 from cocofest.optimization.endurance_rollout_ocp import (
     EnduranceRolloutBinding,
 )
 from cocofest.optimization.muscle_horizon_ocp import MuscleHorizonBinding
+from cocofest.optimization.parametric_fatigue_weights import ParametricFatigueWeightBinding
 from cocofest.optimization.pulse_width_slew import (
     PREFIX as PW_SLEW_PREFIX,
     add_auxiliary_bounds_and_guesses,
@@ -1045,31 +1047,32 @@ class MyCyclicNMPC(FesNmpcMsk):
         )
         if corrected_data_input is None or corrected_bound_input is None:
             raise ValueError("Input must be either 'states' or 'controls'.")
-        # This function is called to move init guess within the bounds if not in bounds
+        # This function is called at every RHO transfer.  The former scalar
+        # loop performed one Python comparison per state/control node.  Build
+        # the same endpoint/interior bound grid and let NumPy clip each block
+        # in-place instead.  Keeping this method as the single projection path
+        # preserves the historical clipping semantics for every caller.
         for key in corrected_data_input.keys():
             data = corrected_data_input[key].init
             bounds = corrected_bound_input[key]
-            for i in range(data.shape[0]):
-                if bounds.min.shape == data.shape:
-                    min_bounds = bounds.min[:, :][i]
-                    max_bounds = bounds.max[:, :][i]
-                else:
-                    min_bounds = [
-                        bounds.min[i][0],
-                        *[bounds.min[i][1]] * (data.shape[1] - 2),
-                        bounds.min[i][2],
-                    ]
-                    max_bounds = [
-                        bounds.max[i][0],
-                        *[bounds.max[i][1]] * (data.shape[1] - 2),
-                        bounds.max[i][2],
-                    ]
+            if bounds.min.shape == data.shape:
+                np.clip(data, bounds.min, bounds.max, out=data)
+                continue
 
-                for j in range(data.shape[1]):
-                    if data[:, :][i][j] < min_bounds[j]:
-                        corrected_data_input[key].init[i, j] = min_bounds[j]
-                    if data[:, :][i][j] > max_bounds[j]:
-                        corrected_data_input[key].init[i, j] = max_bounds[j]
+            if data.shape[1] < 2:
+                raise ValueError(
+                    f"Cannot expand endpoint/interior bounds for '{key}' with {data.shape[1]} node."
+                )
+            min_bounds = np.empty_like(data)
+            max_bounds = np.empty_like(data)
+            min_bounds[:, 0] = bounds.min[:, 0]
+            min_bounds[:, -1] = bounds.min[:, 2]
+            max_bounds[:, 0] = bounds.max[:, 0]
+            max_bounds[:, -1] = bounds.max[:, 2]
+            if data.shape[1] > 2:
+                min_bounds[:, 1:-1] = bounds.min[:, 1, np.newaxis]
+                max_bounds[:, 1:-1] = bounds.max[:, 1, np.newaxis]
+            np.clip(data, min_bounds, max_bounds, out=data)
 
     def plot_initial_guess(self, data, current_bounds, past_bounds, key):
         for i in range(data.shape[0]):
@@ -1279,6 +1282,8 @@ def prepare_nmpc(
     rollout_binding = None
     muscle_horizon_options = simulation_conditions.get("muscle_horizon_options")
     muscle_horizon_binding = None
+    fatigue_weight_binding = simulation_conditions.get("fatigue_weight_binding")
+    mechanical_reserve_binding = simulation_conditions.get("mechanical_reserve_binding")
     control_regularization_weight = simulation_conditions.get(
         "control_regularization_weight", 0.0
     )
@@ -1304,6 +1309,11 @@ def prepare_nmpc(
     enforce_reduced_internal_crank_velocity_guard = bool(
         simulation_conditions.get(
             "enforce_reduced_internal_crank_velocity_guard", False
+        )
+    )
+    enforce_reduced_terminal_half_step_velocity_guard = bool(
+        simulation_conditions.get(
+            "enforce_reduced_terminal_half_step_velocity_guard", False
         )
     )
     reduced_internal_crank_velocity_rk4_fraction = simulation_conditions.get(
@@ -1339,14 +1349,6 @@ def prepare_nmpc(
         simulation_conditions.get("pulse_width_slew_reference_us", 100.0),
         max_step_s=pulse_width_max_step_s,
     )
-    if (
-        pulse_width_slew_formulation == "direct_constraints"
-        and pulse_width_slew_weight != 0.0
-    ):
-        raise ValueError(
-            "pulse_width_slew_weight is not yet available with direct PW "
-            "constraints; use the hard bound alone or the legacy lifting formulation."
-        )
     if pulse_width_max_step_s is not None and (
         n_cycles_simultaneous != 1 or simulation_conditions.get("mechanical_formulation", "full") != "reduced"
     ):
@@ -1533,6 +1535,9 @@ def prepare_nmpc(
             pulse_width_interval_s=cycle_duration / cycle_len,
             pulse_width_control_mode=pulse_width_control_mode,
             pulse_width_max_rate_s_per_s=pulse_width_max_rate_s_per_s,
+            dynamic_mechanical_residual=simulation_conditions.get(
+                "dynamic_mechanical_residual", "direct"
+            ),
         )
         x_bounds, x_init = set_reduced_x_bounds(
             model=model,
@@ -1632,6 +1637,24 @@ def prepare_nmpc(
             mechanical_formulation=mechanical_formulation,
             formulation=formulation,
         )
+    if fatigue_weight_binding is not None:
+        if not isinstance(fatigue_weight_binding, ParametricFatigueWeightBinding):
+            raise TypeError("fatigue_weight_binding must be a ParametricFatigueWeightBinding.")
+        if not minimize_fatigue:
+            raise ValueError("fatigue_weight_binding requires the fatigue objective.")
+        if fatigue_weight_binding.size != len(model.muscles_dynamics_model):
+            raise ValueError("Fatigue-weight binding does not match the model muscle count.")
+    if mechanical_reserve_binding is not None:
+        from cocofest.optimization.mechanical_reserve_projection_ocp import MechanicalReserveProjectionBinding
+
+        if not isinstance(mechanical_reserve_binding, MechanicalReserveProjectionBinding):
+            raise TypeError("mechanical_reserve_binding must be a MechanicalReserveProjectionBinding.")
+        if mechanical_reserve_binding.muscle_count != len(model.muscles_dynamics_model):
+            raise ValueError("Projected reserve binding does not match the model muscle count.")
+        if not use_sx or isokinetic_config is None or n_cycles_simultaneous != 1:
+            raise ValueError("Experimental projected reserve requires SX isokinetic one-cycle RHO.")
+        if not np.isclose(sum(mechanical_reserve_binding.durations), cycle_duration, rtol=1e-9):
+            raise ValueError("Projected reserve durations must span one physical cycle.")
     if muscle_horizon_options is not None and muscle_horizon_options.weight > 0.0:
         muscle_horizon_options.profile.validate_model(model, control_bounds=u_bounds)
         muscle_horizon_binding = MuscleHorizonBinding(
@@ -1672,6 +1695,9 @@ def prepare_nmpc(
         physical_crank_velocity_slow_margin=wheel_qdot_slow_bound_margin,
         enforce_reduced_internal_crank_velocity_guard=(
             enforce_reduced_internal_crank_velocity_guard
+        ),
+        enforce_reduced_terminal_half_step_velocity_guard=(
+            enforce_reduced_terminal_half_step_velocity_guard
         ),
         shooting_interval_duration=cycle_duration / cycle_len,
         reduced_internal_crank_velocity_rk4_fraction=(
@@ -1744,6 +1770,8 @@ def prepare_nmpc(
         terminal_reserve_temperature=terminal_reserve_temperature,
         endurance_rollout_binding=rollout_binding,
         muscle_horizon_binding=muscle_horizon_binding,
+        fatigue_weight_binding=fatigue_weight_binding,
+        mechanical_reserve_binding=mechanical_reserve_binding,
         control_regularization_weight=control_regularization_weight,
         control_regularization_target=control_regularization_target,
         wheel_qdot_regularization_weight=wheel_qdot_regularization_weight,
@@ -1804,10 +1832,23 @@ def prepare_nmpc(
     )
     if "ordering_strategy" in mhe_info:
         nmpc_options["ordering_strategy"] = mhe_info["ordering_strategy"]
-    if rollout_binding is not None:
+    parameter_bindings = tuple(
+        binding for binding in (rollout_binding, muscle_horizon_binding, fatigue_weight_binding, mechanical_reserve_binding)
+        if binding is not None
+    )
+    if len(parameter_bindings) > 1:
+        raise ValueError(
+            "Only one fixed-parameter binding is currently supported per NMPC; "
+            "combine fatigue PACE with rollout/horizon only after parameter-list merging is validated."
+        )
+    if fatigue_weight_binding is not None:
+        nmpc_options.update(fatigue_weight_binding.parameter_options(use_sx=use_sx))
+    elif rollout_binding is not None:
         nmpc_options.update(rollout_binding.parameter_options(use_sx=use_sx))
-    if muscle_horizon_binding is not None:
+    elif muscle_horizon_binding is not None:
         nmpc_options.update(muscle_horizon_binding.parameter_options(use_sx=use_sx))
+    elif mechanical_reserve_binding is not None:
+        nmpc_options.update(mechanical_reserve_binding.parameter_options(use_sx=use_sx))
     nmpc = MyCyclicNMPC(**nmpc_options)
     if rollout_binding is not None:
         rollout_binding.attach(nmpc)
@@ -1815,6 +1856,12 @@ def prepare_nmpc(
     if muscle_horizon_binding is not None:
         muscle_horizon_binding.attach(nmpc)
         nmpc.muscle_horizon_binding = muscle_horizon_binding
+    if fatigue_weight_binding is not None:
+        fatigue_weight_binding.attach(nmpc)
+        nmpc.fatigue_weight_binding = fatigue_weight_binding
+    if mechanical_reserve_binding is not None:
+        mechanical_reserve_binding.attach(nmpc)
+        nmpc.mechanical_reserve_binding = mechanical_reserve_binding
     nmpc.isokinetic_config = isokinetic_config
     if isokinetic_config is not None:
         nmpc._isokinetic_energy_seed_fraction = (
@@ -2879,6 +2926,7 @@ def set_constraints(
     physical_crank_velocity_fast_margin: float | None = None,
     physical_crank_velocity_slow_margin: float | None = None,
     enforce_reduced_internal_crank_velocity_guard: bool = False,
+    enforce_reduced_terminal_half_step_velocity_guard: bool = False,
     shooting_interval_duration: float | None = None,
     reduced_internal_crank_velocity_rk4_fraction: float | None = None,
     physical_crank_terminal_angle: float | None = None,
@@ -3083,9 +3131,20 @@ def set_constraints(
                 "The reduced internal crank-velocity margins must be finite "
                 "and positive."
             )
+        # The initial crank state belongs to the incoming RHO window and can
+        # legitimately be at rest for the cycle-1 bootstrap.  It is fixed,
+        # hence applying a path constraint at node 0 makes a free-cadence
+        # problem infeasible before the first control can act.  Guard every
+        # controllable shooting interval instead.  The optional END guard
+        # below covers the seam to the next RHO window.
+        internal_guard_nodes = (
+            tuple(range(1, int(cycle_len)))
+            if cycle_len is not None
+            else Node.INTERMEDIATES
+        )
         constraints.add(
             reduced_internal_crank_velocity_constraint,
-            node=Node.ALL_SHOOTING,
+            node=internal_guard_nodes,
             shooting_interval_duration=float(shooting_interval_duration),
             min_bound=(
                 physical_crank_velocity_target
@@ -3096,6 +3155,22 @@ def set_constraints(
                 + physical_crank_velocity_slow_margin
             ),
         )
+        if enforce_reduced_terminal_half_step_velocity_guard:
+            # The next RHO inherits this terminal state before it can change
+            # a control. This opt-in prediction closes that frozen seam.
+            constraints.add(
+                reduced_internal_crank_velocity_constraint,
+                node=Node.END,
+                shooting_interval_duration=float(shooting_interval_duration),
+                min_bound=(
+                    physical_crank_velocity_target
+                    - physical_crank_velocity_fast_margin
+                ),
+                max_bound=(
+                    physical_crank_velocity_target
+                    + physical_crank_velocity_slow_margin
+                ),
+            )
         if reduced_internal_crank_velocity_rk4_fraction is not None:
             constraints.add(
                 reduced_internal_crank_velocity_rk4_constraint,
@@ -3165,6 +3240,8 @@ def set_objective_functions(
     velocity_state_index: int = 2,
     endurance_rollout_binding=None,
     muscle_horizon_binding=None,
+    fatigue_weight_binding=None,
+    mechanical_reserve_binding=None,
 ):
     try:
         terminal_reserve_weight = float(terminal_reserve_weight)
@@ -3183,6 +3260,24 @@ def set_objective_functions(
         raise ValueError("terminal_reserve_temperature must be finite and positive.")
 
     objective_functions = ObjectiveList()
+    if mechanical_reserve_binding is not None:
+        objective_functions.add(
+            CustomObjective.minimize_terminal_projected_mechanical_reserve,
+            custom_type=ObjectiveFcn.Mayer,
+            node=Node.END,
+            weight=1.0,
+            quadratic=False,
+            binding=mechanical_reserve_binding,
+        )
+        if mechanical_reserve_binding.local_pulse_width_cost:
+            objective_functions.add(
+                CustomObjective.minimize_local_projected_mechanical_reserve_pw,
+                custom_type=ObjectiveFcn.Lagrange,
+                node=Node.ALL_SHOOTING,
+                weight=1.0,
+                quadratic=False,
+                binding=mechanical_reserve_binding,
+            )
     if muscle_horizon_binding is not None and muscle_horizon_binding.options.weight > 0.0:
         objective_functions.add(
             CustomObjective.minimize_terminal_muscle_horizon,
@@ -3213,7 +3308,11 @@ def set_objective_functions(
         )
     if minimize_fatigue:
         objective_functions.add(
-            CustomObjective.minimize_overall_muscle_fatigue,
+            (
+                CustomObjective.minimize_parameterized_overall_muscle_fatigue
+                if fatigue_weight_binding is not None
+                else CustomObjective.minimize_overall_muscle_fatigue
+            ),
             custom_type=ObjectiveFcn.Lagrange,
             node=Node.ALL,
             weight=10000 * cost_fun_weight[1],
@@ -3313,15 +3412,19 @@ def set_objective_functions(
 def build_constant_crank_torque_vector(
     model: FesMskModel, crank_torque: float
 ) -> np.ndarray:
-    dof_names = list(model.name_dofs)
-    if "wheel_rotation_RotZ" not in dof_names:
-        raise RuntimeError(
-            f"Could not find wheel_rotation_RotZ in model DoFs. Available DoFs: {', '.join(dof_names)}"
-        )
+    """Equivalent generalized load for a global wheel moment.
 
-    torque_vector = np.zeros(model.nb_tau)
-    torque_vector[dof_names.index("wheel_rotation_RotZ")] = crank_torque
-    return torque_vector
+    This mirrors ``ExternalForceSetTimeSeries.add_torque(segment='wheel')``.
+    A wheel moment acts on every upstream generalized coordinate, not only on
+    the wheel's relative-rotation coordinate.
+    """
+    import biorbd_casadi as biorbd
+
+    biorbd_model = biorbd.Model(str(model.biorbd_path))
+    projection = global_segment_moment_generalized_vector(biorbd_model, "wheel")
+    if projection.shape != (model.nb_tau,):
+        raise RuntimeError("Wheel-moment projection has incompatible generalized dimension.")
+    return float(crank_torque) * projection
 
 
 def updating_model(

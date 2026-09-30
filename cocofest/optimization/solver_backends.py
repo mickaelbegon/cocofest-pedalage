@@ -697,7 +697,21 @@ def configure_nlp_solver(
             # HSL shared-library location as a string.
             solver.set_option_unsafe(str(configured_hsl_library), "hsllib")
         for name, value in (ipopt_options or {}).items():
-            solver.set_option_unsafe(value, name)
+            # ``set_option_unsafe`` only creates missing private attributes in
+            # Bioptim.  It consequently does *not* override IPOPT defaults
+            # which are already present on Solver.IPOPT, notably
+            # ``_hessian_approximation='exact'`` and the limited-memory
+            # history.  Prefer the public setter when Bioptim exposes one;
+            # retain unsafe assignment for valid IPOPT options not modelled by
+            # the wrapper.
+            # Look on the class rather than the instance.  Some solver test
+            # doubles and proxy wrappers manufacture arbitrary ``set_*``
+            # attributes dynamically; those must keep the unsafe fallback.
+            setter = getattr(type(solver), f"set_{name}", None)
+            if callable(setter):
+                setter(solver, value)
+            else:
+                solver.set_option_unsafe(value, name)
         if ipopt_c_compile_callbacks is not None:
             compile_setter = getattr(solver, "set_c_compile_callbacks", None)
             if not callable(compile_setter):

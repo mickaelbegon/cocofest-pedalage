@@ -739,6 +739,42 @@ def validate_terminal_reserve_options(weight: float, temperature: float) -> None
         )
 
 
+def validate_experimental_mechanical_reserve_options(args: argparse.Namespace) -> bool:
+    """Validate the isolated IPOPT parameter binding before OCP construction."""
+    weight = float(getattr(args, "experimental_mechanical_reserve_weight", 0.0))
+    if not np.isfinite(weight) or weight < 0.0:
+        raise ValueError("--experimental-mechanical-reserve-weight must be finite and nonnegative.")
+    if weight == 0.0:
+        return False
+    if args.solver != "ipopt" or not args.use_sx or args.cycles_per_window != 1:
+        raise ValueError("Experimental mechanical reserve requires IPOPT SX one-cycle RHO.")
+    if args.mechanical_formulation != "reduced" or getattr(args, "formulation", "dynamic") != "isokinetic":
+        raise ValueError("Experimental mechanical reserve requires reduced isokinetic mechanics.")
+    if (getattr(args, "parametric_fatigue_weights", False)
+            or getattr(args, "_endurance_rollout_options", None) is not None
+            or getattr(args, "_muscle_horizon_options", None) is not None):
+        raise ValueError("Experimental mechanical reserve cannot share the unvalidated ParameterList bindings.")
+    horizons = tuple(getattr(args, "experimental_mechanical_reserve_horizons", (1, 5, 20)))
+    if not horizons or any(type(value) is not int or value < 1 for value in horizons):
+        raise ValueError("--experimental-mechanical-reserve-horizons must contain positive integers.")
+    if tuple(sorted(set(horizons))) != horizons:
+        raise ValueError("--experimental-mechanical-reserve-horizons must be strictly increasing and unique.")
+    global_pw = bool(getattr(args, "experimental_mechanical_reserve_pw_force_coupling", False))
+    local_pw = bool(getattr(args, "experimental_mechanical_reserve_local_pw_cost", False))
+    if global_pw and local_pw:
+        raise ValueError("Choose either global PW coupling or the local PW reserve cost, not both.")
+    if global_pw:
+        raise ValueError(
+            "Global all-node PW reserve coupling is disabled after native solver failures; "
+            "use --experimental-mechanical-reserve-local-pw-cost instead."
+        )
+    if local_pw:
+        trust_us = float(getattr(args, "experimental_mechanical_reserve_local_pw_trust_us", np.nan))
+        if not np.isfinite(trust_us) or trust_us <= 0.0:
+            raise ValueError("--experimental-mechanical-reserve-local-pw-trust-us must be finite and positive.")
+    return True
+
+
 def should_run_standard_ipopt_warmup(
     args: argparse.Namespace,
     *,
@@ -1257,6 +1293,34 @@ def build_argument_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_SMOOTH_MIN_TEMPERATURE,
         help="Dimensionless smooth-min temperature for the terminal reserve proxy.",
+    )
+    parser.add_argument(
+        "--experimental-mechanical-reserve-weight", type=float, default=0.0,
+        help="Experimental projected mechanical margin proxy. Zero omits the cost and all reserve parameters.",
+    )
+    parser.add_argument(
+        "--experimental-mechanical-reserve-horizons", type=int, nargs="+", default=(1, 5, 20),
+        help="Positive, strictly increasing projection horizons used only by the experimental reserve proxy.",
+    )
+    parser.add_argument(
+        "--experimental-mechanical-reserve-calibration-policy",
+        choices=("simultaneous_pwmax_v1", "cycle_work_gated_v1"),
+        default="simultaneous_pwmax_v1",
+        help="Experimental reserve calibration. The cycle-work policy is an unvalidated local proxy.",
+    )
+    parser.add_argument(
+        "--experimental-mechanical-reserve-pw-force-coupling", action="store_true",
+        help=("Experimental: couple the reserve force profile to candidate PW through a "
+              "boundary-updated local Ding tangent."),
+    )
+    parser.add_argument(
+        "--experimental-mechanical-reserve-local-pw-cost", action="store_true",
+        help=("Experimental: apply a boundary-updated, one-node PW reserve tangent cost. "
+              "This avoids the unsupported all-node candidate-PW Mayer coupling."),
+    )
+    parser.add_argument(
+        "--experimental-mechanical-reserve-local-pw-trust-us", type=float, default=25.0,
+        help="Maximum unconstrained local-PW correction implied by the reserve tangent, in microseconds.",
     )
     add_endurance_rollout_cli(parser)
     add_muscle_horizon_cli(parser)
@@ -3551,6 +3615,22 @@ def build_argument_parser() -> argparse.ArgumentParser:
         type=int,
         default=200,
         help="Maximum number of function evaluations for the least-squares FES projection.",
+    )
+    parser.add_argument(
+        "--common-initial-solution-fes-forward-rollout",
+        action="store_true",
+        help=(
+            "After loading a common continuation seed, forward-integrate only its "
+            "FES states from the inherited first node. This preserves the certified "
+            "boundary state while replacing algebraically tiled force/Tau1 trajectories "
+            "by a dynamically consistent initial guess."
+        ),
+    )
+    parser.add_argument(
+        "--common-initial-solution-fes-forward-rollout-substeps",
+        type=int,
+        default=10,
+        help="RK4 substeps per shooting interval for the optional common-seed FES rollout.",
     )
     parser.add_argument(
         "--disable-historical-ipopt-initial-guess",
@@ -16493,42 +16573,74 @@ def _rollout_tiled_fes_states(
     first_control_key = next(iter(nlp.u_init.keys()))
     n_state_nodes = nlp.x_init[first_state_key].init.shape[1]
     n_control_nodes = nlp.u_init[first_control_key].init.shape[1]
-    if n_state_nodes != n_control_nodes + 1:
-        raise ValueError(
-            "FES continuation rollout requires one more state node than controls."
-        )
+    shooting_indices, state_node_stride = _initial_guess_shooting_node_indices(
+        periodic_nmpc
+    )
     if start_node < 0 or start_node >= n_control_nodes:
         raise ValueError("FES continuation rollout start node is outside the horizon.")
 
-    states = _stack_initial_guess_values(nlp.x_init, nlp.states, n_state_nodes)
+    state_columns = _stack_initial_guess_values(nlp.x_init, nlp.states, n_state_nodes)
+    # The IPOPT seed can be direct collocation (several initial-guess columns
+    # per control) while ACADOS uses one state per control.  Propagate on the
+    # common shooting grid and subsequently fill the collocation columns.  We
+    # intentionally overwrite *only* FES coordinates: q/qdot remain the
+    # inherited FHO mechanical seed used by the outer optimizer.
+    states = state_columns[:, shooting_indices].copy()
     controls = _stack_initial_guess_values(nlp.u_init, nlp.controls, n_control_nodes)
     fes_indexes = np.concatenate(
         [np.asarray(nlp.states[key].index).reshape((-1,)) for key in fes_keys]
     ).astype(int)
-    tiled_fes = states[fes_indexes, :].copy()
+    tiled_fes = state_columns[fes_indexes, :].copy()
     dt = periodic_nmpc.cycle_duration / periodic_nmpc.cycle_len
 
     for node in range(start_node, n_control_nodes):
-        propagated = _rk4_full_dynamics_step(
-            nlp,
-            states[:, node],
-            controls[:, node],
-            node * dt,
-            dt,
-            n_substeps=n_substeps,
-            numerical_timeseries=_numerical_timeseries_at_node(nlp, node),
-        )
-        states[fes_indexes, node + 1] = propagated[fes_indexes]
+        interval_start = states[:, node]
+        numerical_timeseries = _numerical_timeseries_at_node(nlp, node)
+        if state_node_stride == 1:
+            interval_states = [
+                _rk4_full_dynamics_step(
+                    nlp,
+                    interval_start,
+                    controls[:, node],
+                    node * dt,
+                    dt,
+                    n_substeps=n_substeps,
+                    numerical_timeseries=numerical_timeseries,
+                )
+            ]
+        else:
+            interval_states = [
+                _rk4_full_dynamics_step(
+                    nlp,
+                    interval_start,
+                    controls[:, node],
+                    node * dt,
+                    dt * float(fraction),
+                    n_substeps=max(1, int(np.ceil(n_substeps * float(fraction)))),
+                    numerical_timeseries=numerical_timeseries,
+                )
+                for fraction in _collocation_interval_fractions(state_node_stride)
+            ]
+            first_column = int(shooting_indices[node])
+            for offset, stage_state in enumerate(interval_states, start=1):
+                state_columns[fes_indexes, first_column + offset] = stage_state[
+                    fes_indexes
+                ]
+        states[fes_indexes, node + 1] = interval_states[-1][fes_indexes]
+        state_columns[fes_indexes, shooting_indices[node + 1]] = states[
+            fes_indexes, node + 1
+        ]
 
-    max_change = float(np.max(np.abs(states[fes_indexes, :] - tiled_fes)))
+    max_change = float(np.max(np.abs(state_columns[fes_indexes, :] - tiled_fes)))
     for key in fes_keys:
         indexes = np.asarray(nlp.states[key].index).reshape((-1,)).astype(int)
-        nlp.x_init[key].init[:, :] = states[indexes, :]
+        nlp.x_init[key].init[:, :] = state_columns[indexes, :]
 
     return {
         "applied": True,
         "state_count": len(fes_keys),
         "start_node": start_node,
+        "state_node_stride": state_node_stride,
         "substeps": n_substeps,
         "max_change": max_change,
     }
@@ -18990,22 +19102,27 @@ def run_standard_ipopt_warmup(
         explicit_seed = _resolve_standard_warmup_seed(explicit_seed)
         print(f"warmup_seed: explicit ({explicit_seed})")
         warmup_seed = _load_warmup_cache(explicit_seed)
+        declared_legacy_torque = getattr(
+            args,
+            "legacy_standard_warmup_seed_signed_torque",
+            None,
+        )
         # The repository's legacy seed predates metadata.  Do not fabricate a
         # Radau-5 provenance for it: at 30 Hz it must not initialize a run
-        # because the historical Radau-3 bridge is now known to disagree with
-        # the DOP853 replay.  Fall through to the cache/new Radau-5 warmup.
-        if int(args.stimulations_per_cycle) == 30 and warmup_seed.metadata is None:
+        # unless the caller explicitly asserts its signed torque and requests
+        # the audited torque-continuation path. That declaration is the
+        # reproducible compatibility contract for legacy RHO_0 warm starts.
+        if (
+            int(args.stimulations_per_cycle) == 30
+            and warmup_seed.metadata is None
+            and declared_legacy_torque is None
+        ):
             print(
                 "warmup_seed: ignored undocumented legacy seed at 30 Hz; "
                 "building or loading a documented Radau-5 warmup instead"
             )
             explicit_seed = None
         else:
-            declared_legacy_torque = getattr(
-                args,
-                "legacy_standard_warmup_seed_signed_torque",
-                None,
-            )
             if warmup_seed.metadata is None and declared_legacy_torque is not None:
                 _attach_declared_legacy_warmup_metadata(
                     warmup_seed,
@@ -19306,6 +19423,8 @@ def solve_case(
     args.acados_qp_solver = resolve_acados_qp_solver(args)
     args._endurance_rollout_options = resolve_endurance_rollout_options(args)
     args._muscle_horizon_options = resolve_muscle_horizon_options(args)
+    if validate_experimental_mechanical_reserve_options(args):
+        args.compact_rho_output = True
     if (
         args._endurance_rollout_options is not None
         and args._muscle_horizon_options is not None
@@ -20583,6 +20702,49 @@ def solve_case(
             requested_fatigue_weights if requested_fatigue_weights is not None else [1.0] * len(muscle_models),
             allow_zero=requested_fatigue_weights is not None,
         )
+    mechanical_reserve_binding = None
+    if getattr(args, "experimental_mechanical_reserve_weight", 0.0) > 0.0:
+        from cocofest.optimization.adaptive_moment_rollout import DingPulseWidthParameters
+        from cocofest.optimization.ding_fatigue_rollout import ding_fatigue_parameters_from_model
+        from cocofest.optimization.mechanical_reserve_calibration import PulseWidthForceAffineModel
+        from cocofest.optimization.mechanical_reserve_projection import LocalMechanicalMarginModel
+        from cocofest.optimization.mechanical_reserve_projection_ocp import MechanicalReserveProjectionBinding
+
+        slow_parameters = tuple(ding_fatigue_parameters_from_model(muscle) for muscle in muscle_models)
+        reference_states = np.asarray([item.rest_state for item in slow_parameters])
+        margin_count = (
+            1 if args.experimental_mechanical_reserve_calibration_policy == "cycle_work_gated_v1"
+            else int(args.stimulations_per_cycle) + 1
+        )
+        bootstrap_margin = LocalMechanicalMarginModel(
+            reference_states=reference_states,
+            reference_margins=np.ones(margin_count),
+            state_jacobian=np.zeros((margin_count, len(muscle_models), 3)),
+        )
+        bootstrap_pw_model = None
+        if getattr(args, "experimental_mechanical_reserve_pw_force_coupling", False):
+            bootstrap_widths = np.asarray([
+                [DingPulseWidthParameters.from_model(muscle, pulse_width_max=.0006).pd0]
+                * args.stimulations_per_cycle
+                for muscle in muscle_models
+            ])
+            bootstrap_pw_model = PulseWidthForceAffineModel(
+                bootstrap_widths, np.zeros_like(bootstrap_widths),
+                np.zeros((*bootstrap_widths.shape, *bootstrap_widths.shape)),
+            )
+        mechanical_reserve_binding = MechanicalReserveProjectionBinding.configured(
+            weight=10000.0 * float(args.experimental_mechanical_reserve_weight),
+            forces=np.zeros((len(muscle_models), args.stimulations_per_cycle)),
+            durations=np.full(args.stimulations_per_cycle, cycle_duration / args.stimulations_per_cycle),
+            parameters=slow_parameters, horizons=tuple(args.experimental_mechanical_reserve_horizons),
+            margin_model=bootstrap_margin, use_sx=args.use_sx,
+            pulse_width_force_model=bootstrap_pw_model,
+            local_pulse_width_cost=bool(getattr(args, "experimental_mechanical_reserve_local_pw_cost", False)),
+            local_pulse_width_trust_s=(
+                float(args.experimental_mechanical_reserve_local_pw_trust_us) * 1e-6
+                if getattr(args, "experimental_mechanical_reserve_local_pw_cost", False) else None
+            ),
+        )
     if args.model_formulation == "periodic_node":
         args.calcium_initialization_regime = "steady_periodic_after_warmup"
         args.calcium_post_stimulation_amplitude = float(
@@ -20685,6 +20847,8 @@ def solve_case(
         "objective_shape": args.objective_shape,
         **({"fatigue_weight_binding": fatigue_weight_binding}
            if fatigue_weight_binding is not None else {}),
+        **({"mechanical_reserve_binding": mechanical_reserve_binding}
+           if mechanical_reserve_binding is not None else {}),
         "terminal_reserve_weight": args.terminal_reserve_weight,
         "terminal_reserve_temperature": args.terminal_reserve_temperature,
         **({"endurance_rollout_options": args._endurance_rollout_options}
@@ -21792,6 +21956,29 @@ def solve_case(
                     f"max_defect_after={common_projection['max_defect_after']:.6g}"
                 )
 
+        # A full-horizon terminal continuation is not periodic in fatigue: its
+        # first node is an inherited FHO state, whereas its tail is usually
+        # constructed by algebraic replication.  Periodic projection is useful
+        # for a generic warm-up but cannot guarantee the first Tau1/F continuity
+        # defect is small at this non-periodic bridge.  This optional repair
+        # keeps node 0 exactly untouched and integrates only FES states forward
+        # under the candidate mechanical/control trajectory.
+        if args.common_initial_solution_fes_forward_rollout:
+            common_fes_rollout = _rollout_tiled_fes_states(
+                nmpc,
+                start_node=0,
+                n_substeps=args.common_initial_solution_fes_forward_rollout_substeps,
+            )
+            nmpc._correct_init_guess_to_fit_bounds(corrected_input="states")
+            nmpc._sync_acados_state_bounds()
+            if echo:
+                print(
+                    "common_initial_solution_fes_forward_rollout: "
+                    f"applied={common_fes_rollout['applied']} "
+                    f"max_change={common_fes_rollout.get('max_change')} "
+                    f"substeps={common_fes_rollout.get('substeps')}"
+                )
+
         if getattr(args, "full_horizon_prefix_solution", None) is not None:
             prefix_path = _resolve_standard_warmup_seed(
                 args.full_horizon_prefix_solution
@@ -22632,6 +22819,11 @@ def solve_case(
         "initial_guess_audit": [],
         "acados_irk_rollout": [],
     }
+    # One complete online RHO iteration starts when its update callback begins
+    # and ends when the next callback starts.  This captures the transfer,
+    # solver call, certification and window advance as experienced online,
+    # while deliberately excluding one-off setup and post-run audits.
+    rho_iteration_start_times: list[float] = []
 
     def advance_only_certified_window(self, solution, *advance_args, **advance_kwargs):
         """Do not contaminate the next RHO with an uncertified primal.
@@ -24478,6 +24670,7 @@ def solve_case(
 
     def update_functions(_nmpc, cycle_idx, _sol):
         update_start = perf_counter()
+        rho_iteration_start_times.append(update_start)
         try:
             return untimed_update_functions(_nmpc, cycle_idx, _sol)
         finally:
@@ -25324,6 +25517,14 @@ def solve_case(
         attach_slew_audit(summary, args)
         return summary
     rho_solve_loop_wall_time_s = perf_counter() - rho_solve_loop_start
+    rho_complete_iteration_wall_time_samples_s = [
+        float(stop - start)
+        for start, stop in zip(
+            rho_iteration_start_times,
+            rho_iteration_start_times[1:],
+        )
+        if stop >= start
+    ]
     post_solve_start = perf_counter()
     certified_trace_filter_wall_time_s = 0.0
     raw_solver_attempt_summary = None
@@ -25733,6 +25934,9 @@ def solve_case(
     summary["execution_timing"] = {
         "pre_solve_setup_wall_time_s": pre_solve_setup_wall_time_s,
         "rho_solve_loop_wall_time_s": rho_solve_loop_wall_time_s,
+        "rho_complete_iteration_wall_time_samples_s": (
+            rho_complete_iteration_wall_time_samples_s
+        ),
         "post_solve_wall_time_s": perf_counter() - post_solve_start,
         "certified_trace_filter_wall_time_s": certified_trace_filter_wall_time_s,
         "summary_build_wall_time_s": summary_build_wall_time_s,
