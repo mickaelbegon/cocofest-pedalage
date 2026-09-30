@@ -8688,7 +8688,8 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert '--cycles-per-window "$window_cycles"' in workflow
     assert '--n-windows "$total_cycles"' in workflow
     assert (
-        '"$BENCHMARK_MODE" == "acados_active_set" && '
+        '( "$BENCHMARK_MODE" == "acados_active_set" || '
+        '"$BENCHMARK_MODE" == "acados_rho7_recovery" ) && '
         '"$BENCHMARK_TORQUE" == signed:+*' in workflow
     )
     assert "mechanics_options+=(--wheel-qdot-bound-margin 2.6)" in workflow
@@ -8965,7 +8966,7 @@ def test_github_acados_runner_uses_reference_and_option_profiles_sequentially():
     assert '--ipopt-profile "$ipopt_profile"' in benchmark_runner
     assert ".benchmark_profile == $profile" in benchmark_runner
     assert ".activate_passive_force_relationship == true" in benchmark_runner
-    assert ".control_decisions_per_cycle == 30" in benchmark_runner
+    assert ".control_decisions_per_cycle == $stimulation_count" in benchmark_runner
     assert ".enforce_start_constraints == true" in benchmark_runner
     assert 'case "$graph_mode" in' in benchmark_runner
     assert "The endurance benchmark is SX-only" in benchmark_runner
