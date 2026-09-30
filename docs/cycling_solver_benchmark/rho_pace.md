@@ -54,6 +54,36 @@ Geometric normalization preserves their ratios before box projection;
 `initial_projection_changed_ratios` records whether the projection changed
 them. Applied weights must not be labeled article `raw/max` weights.
 
+## BO de poids fixes : géométrie effective (v2)
+
+Un BO de poids fixes ne recherche pas des multiplicateurs appliqués aux poids
+physiologiques. Cette ancienne représentation était ambiguë : le contrôleur
+normalisait ensuite géométriquement puis projetait dans sa boîte, de sorte que
+plusieurs propositions distinctes pouvaient produire le même coût RHO.
+
+La campagne v2 optimise donc `n−1` coordonnées bornées dans l'espace des
+**log-poids relatifs centrés**. Biceps est la référence lorsque présent (sinon
+le premier muscle déclaré dans `model_config`) et son log-poids est déduit pour
+que la somme des logs soit zéro. Les coordonnées sont transformées directement
+en poids positifs de moyenne géométrique un, tous dans la boîte effectivement
+déclarée par `weights_config.policy` (0.25–4 par défaut). La dernière
+coordonnée sélectionne uniquement son intervalle encore faisable : il n'y a ni
+normalisation ni projection cachée entre Optuna et RHO-Physio.
+
+Chaque essai conserve dans `weights-config.json` les coordonnées, la référence,
+les logs centrés et les poids effectifs demandés. Après résolution,
+`observation.json.effective_weight_audit` relit le reçu `weights.jsonl` du
+contrôleur et consigne les poids réellement appliqués ainsi que toute éventuelle
+projection. Une absence de reçu est signalée comme lacune d'audit; elle ne
+transforme jamais seule le résultat dynamique en arrêt de fatigue.
+
+Les anciennes campagnes `muscle_weight__*` (multiplicateurs v1) restent
+lisibles comme archives, mais ne sont pas relançables : créer un nouveau dossier
+avec les champs `muscle_weight_coordinate__*` générés par l'interface ou par la
+configuration v2. Les poids des essais v1 ne doivent pas être comparés comme
+des positions exactes dans le nouvel espace, seulement comme résultats
+historiques après lecture de leurs poids effectivement appliqués.
+
 ## Launch
 
 The checked-in `rho_pace_uniform_start.json` is an executable **uniform-start

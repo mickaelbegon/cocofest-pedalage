@@ -11,7 +11,12 @@ from cocofest.optimization.compact_muscle_prediction import (
 )
 from cocofest.optimization.ding_fatigue_rollout import DingFatigueParameters
 from cocofest.optimization.weighted_cycle_prediction import (
-    POLICY_NAME, WeightedCyclePredictor, solve_weighted_recruitment,
+    ALLOCATION_OBJECTIVE_PREDICTED_DING_FATIGUE,
+    ALLOCATION_OBJECTIVE_RECRUITMENT,
+    POLICY_NAME,
+    WeightedCyclePredictor,
+    build_allocation_quadratic_objective,
+    solve_weighted_recruitment,
 )
 
 
@@ -84,6 +89,62 @@ def test_common_weight_scale_invariance_including_reference_regularization(scale
     scaled = solve_weighted_recruitment(*args, np.array([1., 4., 2.]) * scale)
     np.testing.assert_allclose(scaled.normalized_recruitment, original.normalized_recruitment, atol=1e-14)
     assert scaled.objective == pytest.approx(original.objective)
+
+
+def test_fatigue_aligned_quadratic_matches_direct_objective_gradient_and_hessian():
+    """The optional phase QP is the declared affine-A Ding surrogate exactly."""
+    normalized = np.array([.4, 1.2, 1.4])
+    xref = np.array([.25, .5, .75])
+    intercept = np.array([90., 70., 110.])
+    slope = np.array([8., -6., 4.])
+    rest = np.array([100., 120., 125.])
+    duration, epsilon = .03, 1e-3
+    objective = build_allocation_quadratic_objective(
+        normalized, xref, reference_regularization=epsilon,
+        allocation_objective=ALLOCATION_OBJECTIVE_PREDICTED_DING_FATIGUE,
+        capacity_intercept=intercept, capacity_slope=slope, rest_capacity=rest,
+        phase_duration=duration,
+    )
+    x = np.array([.3, .7, .4])
+
+    def direct(value):
+        fatigue = 1. - (intercept + slope * value) / rest
+        return .5 * duration * np.dot(normalized, fatigue**2) + .5 * epsilon * np.sum((value - xref)**2)
+
+    step = 1e-6
+    gradient_fd = np.array([(direct(x + np.eye(3)[index] * step)
+                             - direct(x - np.eye(3)[index] * step)) / (2 * step)
+                            for index in range(3)])
+    hessian_fd = np.column_stack([
+        (objective.gradient(x + np.eye(3)[index] * step)
+         - objective.gradient(x - np.eye(3)[index] * step)) / (2 * step)
+        for index in range(3)
+    ])
+    assert objective.value(x) == pytest.approx(direct(x), rel=1e-13)
+    np.testing.assert_allclose(objective.gradient(x), gradient_fd, rtol=2e-7, atol=2e-9)
+    np.testing.assert_allclose(hessian_fd, np.diag(objective.hessian_diagonal), rtol=2e-9, atol=2e-10)
+    assert np.all(objective.hessian_diagonal > 0.)
+
+
+def test_fatigue_aligned_objective_discourages_recruiting_an_already_fatigued_muscle():
+    """At A=90% A_rest, extra recruitment must increase predicted fatigue."""
+    objective = build_allocation_quadratic_objective(
+        np.ones(2), np.zeros(2), reference_regularization=1e-12,
+        allocation_objective=ALLOCATION_OBJECTIVE_PREDICTED_DING_FATIGUE,
+        capacity_intercept=np.array([90., 180.]), capacity_slope=np.array([-10., -20.]),
+        rest_capacity=np.array([100., 200.]), phase_duration=1 / 30,
+    )
+    assert np.all(objective.gradient(np.zeros(2)) > 0.)
+
+
+def test_named_legacy_objective_is_bit_compatible_with_default_allocator():
+    args = (np.array([.1, -.2, .03]), np.array([1.2, -.7, 0.]),
+            np.array([.7, -.4, .03]), np.array([1.5, .3, 4.]))
+    default = solve_weighted_recruitment(*args)
+    named = solve_weighted_recruitment(*args, allocation_objective=ALLOCATION_OBJECTIVE_RECRUITMENT)
+    assert default.allocation_objective == named.allocation_objective == ALLOCATION_OBJECTIVE_RECRUITMENT
+    np.testing.assert_allclose(default.normalized_recruitment, named.normalized_recruitment, atol=0., rtol=0.)
+    assert default.objective == named.objective
 
 
 def test_weights_change_force_and_pw_when_reference_itself_is_feasible():

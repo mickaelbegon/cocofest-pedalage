@@ -18,6 +18,7 @@ from cocofest.optimization.batched_weighted_cycle_prediction import (
 )
 from cocofest.optimization.ding_fatigue_rollout import DingFatigueParameters
 from cocofest.optimization.weighted_cycle_prediction import (
+    ALLOCATION_OBJECTIVE_PREDICTED_DING_FATIGUE,
     WeightedCyclePredictor,
     solve_weighted_recruitment,
 )
@@ -89,6 +90,34 @@ def test_batched_weighted_allocator_matches_scalar_including_projection():
             )
 
 
+def test_batched_fatigue_aligned_allocator_matches_scalar_qp():
+    rng = np.random.default_rng(592)
+    batch, muscles = 19, 4
+    intercept = rng.uniform(-.1, .1, (batch, muscles))
+    slope = rng.uniform(-1.5, 1.5, (batch, muscles))
+    reference = intercept + slope * rng.uniform(.1, .9, (batch, muscles))
+    weights = np.exp(rng.uniform(-1., 1., (batch, muscles)))
+    capacity0 = rng.uniform(40., 110., (batch, muscles))
+    capacity1 = rng.uniform(-15., 15., (batch, muscles))
+    rest = rng.uniform(115., 150., muscles)
+    actual = solve_weighted_recruitment_many(
+        intercept, slope, reference, weights,
+        allocation_objective=ALLOCATION_OBJECTIVE_PREDICTED_DING_FATIGUE,
+        capacity_intercept=capacity0, capacity_slope=capacity1, rest_capacity=rest,
+        phase_duration=.03,
+    )
+    for row in range(batch):
+        expected = solve_weighted_recruitment(
+            intercept[row], slope[row], reference[row], weights[row],
+            allocation_objective=ALLOCATION_OBJECTIVE_PREDICTED_DING_FATIGUE,
+            capacity_intercept=capacity0[row], capacity_slope=capacity1[row],
+            rest_capacity=rest, phase_duration=.03,
+        )
+        assert actual.statuses[row] == expected.status
+        np.testing.assert_allclose(actual.normalized_recruitment[row], expected.normalized_recruitment,
+                                   atol=3e-11, rtol=2e-11)
+
+
 def _weighted_predictor(substeps=4):
     parameter = DingPulseWidthParameters(
         DingFatigueParameters(1200.0, 0.060601, 0.137, -1.4, 2.1e-5, 1.9e-5, 445.5),
@@ -133,3 +162,63 @@ def test_candidate_batch_matches_scalar_rollouts(tracking_mode):
         for name in ("full_horizon_mean_squared_fatigue", "first_block_mean_squared_fatigue",
                      "terminal_minimum_capacity"):
             assert getattr(actual[row], name) == pytest.approx(getattr(expected, name), abs=1e-12)
+
+
+def test_fatigue_aligned_batch_rollout_matches_scalar_and_is_audited():
+    base = _weighted_predictor()
+    predictor = WeightedCyclePredictor(
+        base.intervals, base.parameters, substeps=base.substeps,
+        allocation_objective=ALLOCATION_OBJECTIVE_PREDICTED_DING_FATIGUE,
+    )
+    initial = np.tile([.24, 3.0, 1130.0, .081, .153], (2, 1))
+    weights = np.asarray([[1.0, 1.0], [4.0, .25]])
+    actual = BatchedWeightedCyclePredictor(predictor).rollout_many(
+        initial, weights, horizon_cycles=3, tracking_mode="projected_capacity",
+    )
+    for row, candidate in enumerate(weights):
+        expected = predictor.rollout(initial, candidate, horizon_cycles=3, tracking_mode="projected_capacity")
+        np.testing.assert_allclose(actual[row].state_history, expected.state_history,
+                                   atol=4e-10, rtol=3e-11, equal_nan=True)
+        np.testing.assert_allclose(actual[row].pulse_widths, expected.pulse_widths,
+                                   atol=4e-10, rtol=3e-11, equal_nan=True)
+        assert actual[row].metadata["allocation_objective"] == ALLOCATION_OBJECTIVE_PREDICTED_DING_FATIGUE
+        assert actual[row].metadata["fatigue_objective_full_ding_or_rho_certified"] is False
+
+
+def test_fatigue_rollouts_forward_a_rest_not_km_rest_to_both_allocators(monkeypatch):
+    """Regression test for the compact rest-vector indexing convention.
+
+    Compact predictors store [A_rest, Tau1_rest, Km_rest], whereas the
+    fatigue allocation is dimensionless only when normalized by A_rest.
+    """
+    import cocofest.optimization.batched_weighted_cycle_prediction as batch_module
+    import cocofest.optimization.weighted_cycle_prediction as scalar_module
+
+    base = _weighted_predictor()
+    predictor = WeightedCyclePredictor(
+        base.intervals, base.parameters, substeps=base.substeps,
+        allocation_objective=ALLOCATION_OBJECTIVE_PREDICTED_DING_FATIGUE,
+    )
+    initial = np.tile([.24, 3.0, 1130.0, .081, .153], (2, 1))
+    scalar_capacities, batch_capacities = [], []
+    scalar_original = scalar_module.solve_weighted_recruitment
+    batch_original = batch_module.solve_weighted_recruitment_many
+
+    def scalar_capture(*args, **kwargs):
+        scalar_capacities.append(np.asarray(kwargs["rest_capacity"]).copy())
+        return scalar_original(*args, **kwargs)
+
+    def batch_capture(*args, **kwargs):
+        batch_capacities.append(np.asarray(kwargs["rest_capacity"]).copy())
+        return batch_original(*args, **kwargs)
+
+    monkeypatch.setattr(scalar_module, "solve_weighted_recruitment", scalar_capture)
+    monkeypatch.setattr(batch_module, "solve_weighted_recruitment_many", batch_capture)
+    predictor.rollout(initial, [1., 1.], horizon_cycles=1, tracking_mode="projected_capacity")
+    BatchedWeightedCyclePredictor(predictor).rollout_many(
+        initial, np.asarray([[1., 1.]]), horizon_cycles=1, tracking_mode="projected_capacity",
+    )
+    assert scalar_capacities and batch_capacities
+    np.testing.assert_allclose(scalar_capacities[0], predictor.rest[:, 0])
+    np.testing.assert_allclose(batch_capacities[0], predictor.rest[:, 0])
+    assert not np.allclose(predictor.rest[:, 0], predictor.rest[:, 2])

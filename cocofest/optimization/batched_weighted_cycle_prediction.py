@@ -11,7 +11,14 @@ from dataclasses import dataclass
 import numpy as np
 
 from .batched_compact_muscle_prediction import BatchedCompactMusclePredictor, _physical
-from .weighted_cycle_prediction import POLICY_NAME, WeightedCycleRolloutResult, _weights, rollout_fatigue_metrics
+from .weighted_cycle_prediction import (
+    ALLOCATION_OBJECTIVE_PREDICTED_DING_FATIGUE,
+    ALLOCATION_OBJECTIVE_RECRUITMENT,
+    POLICY_NAME,
+    WeightedCycleRolloutResult,
+    _weights,
+    rollout_fatigue_metrics,
+)
 
 
 @dataclass(frozen=True)
@@ -21,6 +28,8 @@ class BatchedWeightedRecruitmentAllocation:
     normalized_weights: np.ndarray
     reference_recruitment: np.ndarray
     signed_margins: np.ndarray
+    quadratic_hessian_diagonal: np.ndarray
+    quadratic_linear: np.ndarray
 
 
 def solve_weighted_recruitment_many(
@@ -32,6 +41,11 @@ def solve_weighted_recruitment_many(
     reference_regularization=1e-3,
     moment_tolerance=1e-8,
     project_infeasible=False,
+    allocation_objective=ALLOCATION_OBJECTIVE_RECRUITMENT,
+    capacity_intercept=None,
+    capacity_slope=None,
+    rest_capacity=None,
+    phase_duration=1.0,
 ):
     """Vectorized equivalent of ``solve_weighted_recruitment``.
 
@@ -53,12 +67,38 @@ def solve_weighted_recruitment_many(
         raise ValueError("reference_regularization must be finite and strictly positive.")
     if not np.isfinite(moment_tolerance) or moment_tolerance <= 0:
         raise ValueError("moment_tolerance must be finite and strictly positive.")
+    if allocation_objective not in {
+            ALLOCATION_OBJECTIVE_RECRUITMENT, ALLOCATION_OBJECTIVE_PREDICTED_DING_FATIGUE}:
+        raise ValueError(f"Unknown allocation_objective: {allocation_objective!r}")
     raw_weights = np.asarray(weights, dtype=float)
     if raw_weights.shape != intercept.shape:
         raise ValueError("weights must have shape (candidates, muscles).")
     normalized = np.asarray([_weights(row, intercept.shape[1]) for row in raw_weights])
     xref = np.divide(reference - intercept, slope, out=np.zeros_like(slope), where=slope != 0)
     xref = np.clip(xref, 0.0, 1.0)
+    if allocation_objective == ALLOCATION_OBJECTIVE_RECRUITMENT:
+        diagonal = normalized + reference_regularization
+        linear = reference_regularization * xref
+    else:
+        capacity0 = np.asarray(capacity_intercept, dtype=float)
+        capacity1 = np.asarray(capacity_slope, dtype=float)
+        rest = np.asarray(rest_capacity, dtype=float)
+        try:
+            capacity0 = np.broadcast_to(capacity0, intercept.shape)
+            capacity1 = np.broadcast_to(capacity1, intercept.shape)
+            rest = np.broadcast_to(rest, intercept.shape)
+        except ValueError as error:
+            raise ValueError("fatigue objective capacity arrays must broadcast to (candidates, muscles).") from error
+        if (not all(np.all(np.isfinite(value)) for value in (capacity0, capacity1, rest))
+                or np.any(rest <= 0)):
+            raise ValueError("fatigue objective requires finite capacity arrays and positive rest capacity.")
+        if not np.isfinite(phase_duration) or phase_duration <= 0:
+            raise ValueError("phase_duration must be finite and strictly positive.")
+        residual0 = 1.0 - capacity0 / rest
+        residual1 = -capacity1 / rest
+        diagonal = phase_duration * normalized * residual1**2 + reference_regularization
+        linear = (reference_regularization * xref
+                  - phase_duration * normalized * residual0 * residual1)
     target = reference.sum(axis=1)
     lower = np.sum(intercept + np.minimum(slope, 0.0), axis=1)
     upper = np.sum(intercept + np.maximum(slope, 0.0), axis=1)
@@ -73,9 +113,7 @@ def solve_weighted_recruitment_many(
     infeasible = below | above
     if project_infeasible and np.any(infeasible):
         rows = np.flatnonzero(infeasible)
-        projected = reference_regularization * xref[rows] / (
-            normalized[rows] + reference_regularization
-        )
+        projected = np.clip(linear[rows] / diagonal[rows], 0.0, 1.0)
         active = slope[rows] != 0
         toward_upper = above[rows, None]
         endpoint = np.where(toward_upper, slope[rows] > 0, slope[rows] < 0)
@@ -90,10 +128,10 @@ def solve_weighted_recruitment_many(
         local_target = target[rows]
         local_normalized = normalized[rows]
         local_xref = xref[rows]
-        diagonal = local_normalized + reference_regularization
-        linear = reference_regularization * local_xref
+        local_diagonal = diagonal[rows]
+        local_linear = linear[rows]
         active = local_slope != 0
-        answer = linear / diagonal
+        answer = np.clip(local_linear / local_diagonal, 0.0, 1.0)
         at_lower = local_target <= lower[rows]
         at_upper = ~at_lower & (local_target >= upper[rows])
         answer[at_lower] = (local_slope[at_lower] < 0).astype(float)
@@ -105,8 +143,8 @@ def solve_weighted_recruitment_many(
             scale = np.max(np.abs(a_slope), axis=1)
             a = a_slope / scale[:, None]
             rhs = (local_target[ir] - local_intercept[ir].sum(axis=1)) / scale
-            diag = diagonal[ir]
-            lin = linear[ir]
+            diag = local_diagonal[ir]
+            lin = local_linear[ir]
             is_active = active[ir]
             with np.errstate(divide="ignore", invalid="ignore"):
                 zero_crossing = np.divide(-lin, a)
@@ -148,7 +186,7 @@ def solve_weighted_recruitment_many(
         answer[inaccurate] = np.nan
         x[rows] = answer
     return BatchedWeightedRecruitmentAllocation(
-        tuple(statuses), x, normalized, xref, margins
+        tuple(statuses), x, normalized, xref, margins, diagonal, linear
     )
 
 
@@ -243,6 +281,14 @@ class BatchedWeightedCyclePredictor:
                 reference_regularization=p.reference_regularization,
                 moment_tolerance=moment_tolerance,
                 project_infeasible=tracking_mode == "projected_capacity",
+                allocation_objective=p.allocation_objective,
+                capacity_intercept=transition.intercept[active_local, :, 2],
+                capacity_slope=(transition.slope[active_local, :, 2]
+                                * maximum[active_local]),
+                # ``rest`` stores [A_rest, Tau1_rest, Km_rest].  Keep this
+                # vectorized path algebraically identical to the scalar one.
+                rest_capacity=p.rest[:, 0],
+                phase_duration=interval.duration,
             )
             # The scalar predictor records the signed reachability margin for
             # the first failed phase as well as for accepted phases.
@@ -390,6 +436,12 @@ class BatchedWeightedCyclePredictor:
                     "tracking_mode": ("exact_with_numerical_tolerance" if tracking_mode == "exact"
                                       else "projected_capacity"),
                     "moment_tolerance": float(moment_tolerance),
+                    "allocation_objective": p.allocation_objective,
+                    "fatigue_objective_approximation": (
+                        "endpoint_A_plus_rectangular_phase_quadrature"
+                        if p.allocation_objective == ALLOCATION_OBJECTIVE_PREDICTED_DING_FATIGUE
+                        else None),
+                    "fatigue_objective_full_ding_or_rho_certified": False,
                     "substeps": p.substeps,
                     "evaluation_backend": "candidate_batch",
                     **diagnostics,

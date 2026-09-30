@@ -44,6 +44,14 @@ class RhoPaceConfig:
     projection_fatigue_guard: bool = True
     projection_minimum_relative_improvement: float = 0.01
     projection_minimum_absolute_improvement: float = 1e-6
+    # The default exactly preserves the historic recruitment-space QP.  The
+    # fatigue-aligned mode is experimental and only affects the slow compact
+    # rollout allocator, never the differentiable RHO objective itself.
+    projection_allocation_objective: str = "weighted_recruitment_v1"
+    # The fatigue Hessian scales with (dA / A_rest)**2.  It is many orders of
+    # magnitude smaller than the historical recruitment Hessian, so the old
+    # 1e-3 tie-breaker would mask every fatigue-weight effect.
+    projection_fatigue_reference_regularization: float = 1e-12
 
     def __post_init__(self):
         if not isinstance(self.adaptation_enabled, bool):
@@ -76,9 +84,14 @@ class RhoPaceConfig:
             raise ValueError("projection_adjustment_factor must be greater than one")
         if self.adaptation_strategy not in {"capacity_feedback", "predictive_moment"}:
             raise ValueError("adaptation_strategy must be 'capacity_feedback' or 'predictive_moment'")
+        if self.projection_allocation_objective not in {
+                "weighted_recruitment_v1", "predicted_ding_fatigue_v1"}:
+            raise ValueError("projection_allocation_objective must be weighted_recruitment_v1 or "
+                             "predicted_ding_fatigue_v1")
         for name in ("smoothing", "capacity_gain", "min_relative_weight",
                      "max_relative_weight", "max_log_step", "projection_budget_seconds",
-                     "projection_adjustment_factor", "target_cycle_seconds", "projection_budget_fraction"):
+                     "projection_adjustment_factor", "target_cycle_seconds", "projection_budget_fraction",
+                     "projection_fatigue_reference_regularization"):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be finite and positive")
         if self.smoothing > 1:

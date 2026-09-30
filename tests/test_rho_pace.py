@@ -90,10 +90,14 @@ def test_duplicate_and_maximum_cycle_are_rejected():
 
 def test_worker_cpu_ids_are_validated_and_json_friendly():
     assert RhoPaceConfig(projection_worker_cpu_ids=[4, 5]).projection_worker_cpu_ids == (4, 5)
+    assert RhoPaceConfig(projection_allocation_objective="predicted_ding_fatigue_v1").projection_allocation_objective == (
+        "predicted_ding_fatigue_v1")
     with pytest.raises(ValueError, match="duplicates"):
         RhoPaceConfig(projection_worker_cpu_ids=[4, 4])
     with pytest.raises(ValueError, match="nonnegative"):
         RhoPaceConfig(projection_worker_cpu_ids=[-1])
+    with pytest.raises(ValueError, match="projection_allocation_objective"):
+        RhoPaceConfig(projection_allocation_objective="unvalidated_magic")
 
 
 def test_static_physio_applies_initial_weights_once_even_at_update_boundaries(tmp_path):

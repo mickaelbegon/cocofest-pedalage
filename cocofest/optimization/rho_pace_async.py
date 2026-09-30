@@ -80,7 +80,9 @@ class AsyncPaceWorker:
         self.results = self.context.Queue(maxsize=1)
         self.process = self.context.Process(
             target=_evaluate_in_process,
-            args=(self.evaluator, payload, self.results, self.cpu_ids), daemon=True,
+            # A supervisor may itself fan out independent arm projections.
+            # It remains disposable and is always terminated by ``close``.
+            args=(self.evaluator, payload, self.results, self.cpu_ids), daemon=False,
         )
         try:
             self.process.start()

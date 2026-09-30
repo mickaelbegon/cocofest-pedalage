@@ -16,6 +16,12 @@ from .compact_muscle_prediction import CompactMusclePredictor
 
 
 POLICY_NAME = "weighted_normalized_recruitment_v1"
+ALLOCATION_OBJECTIVE_RECRUITMENT = "weighted_recruitment_v1"
+ALLOCATION_OBJECTIVE_PREDICTED_DING_FATIGUE = "predicted_ding_fatigue_v1"
+_ALLOCATION_OBJECTIVES = {
+    ALLOCATION_OBJECTIVE_RECRUITMENT,
+    ALLOCATION_OBJECTIVE_PREDICTED_DING_FATIGUE,
+}
 
 
 def _weights(weights, count):
@@ -41,17 +47,108 @@ class WeightedRecruitmentAllocation:
     signed_margin: float
     equality_residual: float | None
     objective: float | None
+    allocation_objective: str = ALLOCATION_OBJECTIVE_RECRUITMENT
+    quadratic_hessian_diagonal: np.ndarray | None = None
+    quadratic_linear: np.ndarray | None = None
+
+
+@dataclass(frozen=True)
+class AllocationQuadraticObjective:
+    """Diagonal quadratic written as ``.5*x'H*x - q'x + constant``.
+
+    The fatigue mode uses the *endpoint* compact phase map
+    ``A_plus(x) = A_intercept + A_slope*x`` and a rectangular phase
+    quadrature.  This is deliberately an allocator surrogate: it does not
+    certify the full Ding ODE or the following RHO solution.
+    """
+
+    mode: str
+    hessian_diagonal: np.ndarray
+    linear: np.ndarray
+    constant: float
+
+    def value(self, recruitment):
+        recruitment = np.asarray(recruitment, dtype=float)
+        return float(.5 * np.dot(self.hessian_diagonal, recruitment**2)
+                     - np.dot(self.linear, recruitment) + self.constant)
+
+    def gradient(self, recruitment):
+        recruitment = np.asarray(recruitment, dtype=float)
+        return self.hessian_diagonal * recruitment - self.linear
+
+
+def build_allocation_quadratic_objective(
+    normalized_weights, reference_recruitment, *, reference_regularization,
+    allocation_objective=ALLOCATION_OBJECTIVE_RECRUITMENT,
+    capacity_intercept=None, capacity_slope=None, rest_capacity=None,
+    phase_duration=1.0,
+):
+    """Return the strictly positive diagonal QP curvature and gradient data.
+
+    ``weighted_recruitment_v1`` exactly preserves the historical objective.
+    ``predicted_ding_fatigue_v1`` minimizes the rectangular phase integral of
+    ``sum_i w_i * (1 - A_plus_i(x_i) / A_rest_i)**2`` plus the existing small
+    reference regularizer.  The common 1/2 multiplier is immaterial to the
+    minimizer and makes the returned Hessian convention explicit.
+    """
+    normalized = np.asarray(normalized_weights, dtype=float)
+    xref = np.asarray(reference_recruitment, dtype=float)
+    if (normalized.ndim != 1 or normalized.size == 0 or xref.shape != normalized.shape
+            or not np.all(np.isfinite(normalized)) or np.any(normalized <= 0)
+            or not np.all(np.isfinite(xref))):
+        raise ValueError("normalized weights and reference recruitment must be finite matching vectors.")
+    if allocation_objective not in _ALLOCATION_OBJECTIVES:
+        raise ValueError(f"Unknown allocation_objective: {allocation_objective!r}")
+    if not np.isfinite(reference_regularization) or reference_regularization <= 0:
+        raise ValueError("reference_regularization must be finite and strictly positive.")
+    if allocation_objective == ALLOCATION_OBJECTIVE_RECRUITMENT:
+        return AllocationQuadraticObjective(
+            allocation_objective,
+            normalized + reference_regularization,
+            reference_regularization * xref,
+            float(.5 * reference_regularization * np.dot(xref, xref)),
+        )
+    intercept = np.asarray(capacity_intercept, dtype=float)
+    slope = np.asarray(capacity_slope, dtype=float)
+    rest = np.asarray(rest_capacity, dtype=float)
+    if (intercept.shape != normalized.shape or slope.shape != normalized.shape
+            or rest.shape != normalized.shape or not all(np.all(np.isfinite(value)) for value in
+                                                         (intercept, slope, rest))
+            or np.any(rest <= 0)):
+        raise ValueError("fatigue objective requires finite matching capacity intercept, slope, and positive rest.")
+    if not np.isfinite(phase_duration) or phase_duration <= 0:
+        raise ValueError("phase_duration must be finite and strictly positive.")
+    residual_intercept = 1. - intercept / rest
+    residual_slope = -slope / rest
+    curvature = phase_duration * normalized * residual_slope**2
+    # q is the negative of the conventional linear-gradient coefficient.
+    linear = (reference_regularization * xref
+              - phase_duration * normalized * residual_intercept * residual_slope)
+    return AllocationQuadraticObjective(
+        allocation_objective,
+        curvature + reference_regularization,
+        linear,
+        float(.5 * phase_duration * np.dot(normalized, residual_intercept**2)
+              + .5 * reference_regularization * np.dot(xref, xref)),
+    )
 
 
 def solve_weighted_recruitment(
     moment_intercept, moment_slope, reference_moments, weights, *,
     reference_regularization=1e-3, moment_tolerance=1e-8,
+    allocation_objective=ALLOCATION_OBJECTIVE_RECRUITMENT,
+    capacity_intercept=None, capacity_slope=None, rest_capacity=None,
+    phase_duration=1.0,
 ):
     r"""Solve a strictly convex box QP for normalized recruitment ``0 <= x <= 1``.
 
     ``moment_slope`` is the signed moment gain at maximum allowed recruitment.
-    Minimize ``0.5 sum(w_normalized*x**2 + epsilon*(x-x_ref)**2)`` subject to
-    ``sum(moment_intercept + moment_slope*x) == sum(reference_moments)``.
+    By default, minimize ``0.5 sum(w_normalized*x**2 + epsilon*(x-x_ref)**2)``
+    subject to ``sum(moment_intercept + moment_slope*x) == sum(reference_moments)``.
+    The opt-in ``predicted_ding_fatigue_v1`` objective instead uses the affine
+    compact endpoint prediction for ``A_plus`` and a rectangular phase integral
+    of the actual normalized Ding fatigue residual.  Both forms remain strictly
+    convex box QPs because the positive reference regularizer is retained.
     ``x_ref`` is clipped per-muscle reference inversion (zero for zero gain).
     Numerical tolerance admits only floating point equality error, not a
     physical tracking band. Negative and zero moment arms are supported.
@@ -75,22 +172,29 @@ def solve_weighted_recruitment(
     upper = float(np.sum(intercept + np.maximum(slope, 0.)))
     margin = min(target - lower, upper - target)
 
+    quadratic = build_allocation_quadratic_objective(
+        normalized, xref, reference_regularization=reference_regularization,
+        allocation_objective=allocation_objective,
+        capacity_intercept=capacity_intercept, capacity_slope=capacity_slope,
+        rest_capacity=rest_capacity, phase_duration=phase_duration,
+    )
+
     def result(status, x=None):
         return WeightedRecruitmentAllocation(
             status, x, normalized, xref, lower, upper, margin,
             None if x is None else float(np.sum(intercept + slope * x) - target),
-            None if x is None else float(.5 * np.sum(
-                normalized * x**2 + reference_regularization * (x - xref)**2)),
+            None if x is None else quadratic.value(x), allocation_objective,
+            quadratic.hessian_diagonal, quadratic.linear,
         )
 
     if target < lower - moment_tolerance:
         return result("infeasible_total_below_bounds")
     if target > upper + moment_tolerance:
         return result("infeasible_total_above_bounds")
-    diagonal = normalized + reference_regularization
-    linear = reference_regularization * xref
+    diagonal = quadratic.hessian_diagonal
+    linear = quadratic.linear
     active = slope != 0
-    x = linear / diagonal
+    x = np.clip(linear / diagonal, 0., 1.)
     if not np.any(active):
         return result("ok", x)
     # At reachable endpoints the equality fixes all nonzero-gain coordinates.
@@ -213,11 +317,15 @@ class WeightedCyclePredictor(CompactMusclePredictor):
     the computed trajectory; it is not a state-independent future-cycle map.
     """
 
-    def __init__(self, intervals, parameters, *, substeps=16, reference_regularization=1e-3):
+    def __init__(self, intervals, parameters, *, substeps=16, reference_regularization=1e-3,
+                 allocation_objective=ALLOCATION_OBJECTIVE_RECRUITMENT):
         super().__init__(intervals, parameters, substeps=substeps)
         if not np.isfinite(reference_regularization) or reference_regularization <= 0:
             raise ValueError("reference_regularization must be finite and strictly positive.")
+        if allocation_objective not in _ALLOCATION_OBJECTIVES:
+            raise ValueError(f"Unknown allocation_objective: {allocation_objective!r}")
         self.reference_regularization = float(reference_regularization)
+        self.allocation_objective = allocation_objective
         if np.any(self.maximum_recruitment >= 1.):
             raise ValueError("PW bounds must produce representable recruitment strictly below one.")
 
@@ -308,6 +416,12 @@ class WeightedCyclePredictor(CompactMusclePredictor):
                           "tracking_mode": ("exact_with_numerical_tolerance" if tracking_mode == "exact"
                                             else "projected_capacity"),
                           "moment_tolerance": float(moment_tolerance),
+                          "allocation_objective": self.allocation_objective,
+                          "fatigue_objective_approximation": (
+                              "endpoint_A_plus_rectangular_phase_quadrature"
+                              if self.allocation_objective == ALLOCATION_OBJECTIVE_PREDICTED_DING_FATIGUE
+                              else None),
+                          "fatigue_objective_full_ding_or_rho_certified": False,
                           "substeps": self.substeps, **diagnostics},
             )
 
@@ -337,6 +451,13 @@ class WeightedCyclePredictor(CompactMusclePredictor):
                         moment0, slope, interval.target_moments, normalized_weights,
                         reference_regularization=self.reference_regularization,
                         moment_tolerance=moment_tolerance,
+                        allocation_objective=self.allocation_objective,
+                        capacity_intercept=transition.intercept[:, 2],
+                        capacity_slope=transition.slope[:, 2] * transition.maximum_recruitment,
+                        # ``rest`` stores [A_rest, Tau1_rest, Km_rest].  The
+                        # fatigue objective is normalized by available force,
+                        # never by the resting force-rate constant Km.
+                        rest_capacity=self.rest[:, 0], phase_duration=interval.duration,
                     )
                 except (ValueError, RuntimeError, FloatingPointError) as error:
                     return result(dict(failure, status="allocation_numerical_failure", message=str(error)))
@@ -351,8 +472,7 @@ class WeightedCyclePredictor(CompactMusclePredictor):
                     # absolute total-moment deficit over the PW box. At either
                     # endpoint all nonzero-gain recruitment coordinates are
                     # fixed; zero-gain coordinates retain their QP regularizer.
-                    x = (allocation.reference_recruitment * self.reference_regularization
-                         / (allocation.normalized_weights + self.reference_regularization))
+                    x = np.clip(allocation.quadratic_linear / allocation.quadratic_hessian_diagonal, 0., 1.)
                     active = slope != 0
                     upper = original[cycle, phase] > allocation.total_upper_bound
                     x[active] = ((slope[active] > 0) if upper else (slope[active] < 0)).astype(float)

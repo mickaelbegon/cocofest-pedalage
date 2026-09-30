@@ -314,6 +314,95 @@ def propagate_ding_pulse_width_interval(
     return result
 
 
+def _propagate_ding_pulse_width_interval_with_slow_sensitivities(
+    state: Sequence[float] | np.ndarray,
+    *,
+    pulse_width: float,
+    duration: float,
+    calcium_amplitude: float,
+    mechanical_gain: MechanicalGain,
+    parameters: DingPulseWidthParameters,
+    integration_substeps: int = 8,
+    slow_state_sensitivities: np.ndarray | None = None,
+    pulse_width_sensitivity: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """RK4 Ding map and its tangent map with respect to initial ``A,Tau1,Km``.
+
+    ``slow_state_sensitivities`` is the incoming derivative of ``(F,A,Tau1,Km)``
+    with respect to arbitrary local coordinates. ``pulse_width_sensitivity``
+    supplies the derivative of this interval's PW in those same coordinates.
+    The default is the identity map with respect to the three initial slow
+    states. Keeping the tangent alongside the state replaces finite-difference
+    replays during offline calibration; it is never inserted into an RHO NLP.
+    """
+    state = _state(state)
+    duration = _finite(duration, name="duration", positive=True)
+    pulse_width = _finite(pulse_width, name="pulse_width")
+    calcium_amplitude = _finite(calcium_amplitude, name="calcium_amplitude")
+    if calcium_amplitude < 0.0:
+        raise ValueError("calcium_amplitude must be non-negative.")
+    if isinstance(integration_substeps, bool) or int(integration_substeps) != integration_substeps:
+        raise ValueError("integration_substeps must be a positive integer.")
+    integration_substeps = int(integration_substeps)
+    if integration_substeps < 1:
+        raise ValueError("integration_substeps must be a positive integer.")
+    effective_recruitment(state[2], pulse_width, parameters)
+    sensitivity = (np.vstack((np.zeros(3), np.eye(3))) if slow_state_sensitivities is None
+                   else np.asarray(slow_state_sensitivities, dtype=float).copy())
+    if sensitivity.shape != (4, 3) or not np.all(np.isfinite(sensitivity)):
+        if slow_state_sensitivities is None:
+            raise AssertionError("Default slow-state sensitivity has an invalid internal shape.")
+        if sensitivity.ndim != 2 or sensitivity.shape[0] != 4 or not sensitivity.shape[1] or not np.all(np.isfinite(sensitivity)):
+            raise ValueError("slow_state_sensitivities must be finite with shape (4, coordinates).")
+    width_sensitivity = (np.zeros(sensitivity.shape[1]) if pulse_width_sensitivity is None
+                         else np.asarray(pulse_width_sensitivity, dtype=float).reshape(-1))
+    if width_sensitivity.shape != (sensitivity.shape[1],) or not np.all(np.isfinite(width_sensitivity)):
+        raise ValueError("pulse_width_sensitivity must be finite with one value per sensitivity coordinate.")
+    initial_cn = state[0]
+    current = state[1:].copy()
+    recruitment_scale = -math.expm1(-(pulse_width - parameters.pd0) / parameters.pdt)
+    fatigue = parameters.fatigue
+
+    def rhs(local_time: float, local_state: np.ndarray, local_sensitivity: np.ndarray):
+        derivative = _four_state_rhs(
+            local_time, local_state, initial_cn=initial_cn, pulse_width=pulse_width,
+            calcium_amplitude=calcium_amplitude, mechanical_gain=mechanical_gain, parameters=parameters,
+        )
+        force, capacity, tau1, km = local_state
+        cn = periodic_calcium_state(initial_cn, local_time, calcium_amplitude, parameters.tauc)
+        activation = cn / (km + cn)
+        activation_km = -cn / (km + cn) ** 2
+        relaxation = tau1 + parameters.tau2 * activation
+        gain = _gain_value(mechanical_gain, local_time)
+        jacobian = np.array([
+            [-gain / relaxation, gain * recruitment_scale * activation,
+             gain * force / relaxation**2,
+             gain * (capacity * recruitment_scale * activation_km
+                     + force * parameters.tau2 * activation_km / relaxation**2)],
+            [fatigue.alpha_a, -1.0 / fatigue.tau_fat, 0.0, 0.0],
+            [fatigue.alpha_tau1, 0.0, -1.0 / fatigue.tau_fat, 0.0],
+            [fatigue.alpha_km, 0.0, 0.0, -1.0 / fatigue.tau_fat],
+        ])
+        direct_pw = np.zeros((4, local_sensitivity.shape[1]))
+        direct_pw[0] = gain * capacity * activation * math.exp(
+            -(pulse_width - parameters.pd0) / parameters.pdt
+        ) / parameters.pdt * width_sensitivity
+        return derivative, jacobian @ local_sensitivity + direct_pw
+
+    step = duration / integration_substeps
+    for index in range(integration_substeps):
+        time = index * step
+        k1, s1 = rhs(time, current, sensitivity)
+        k2, s2 = rhs(time + step / 2.0, current + step * k1 / 2.0, sensitivity + step * s1 / 2.0)
+        k3, s3 = rhs(time + step / 2.0, current + step * k2 / 2.0, sensitivity + step * s2 / 2.0)
+        k4, s4 = rhs(time + step, current + step * k3, sensitivity + step * s3)
+        current = current + step * (k1 + 2.0 * k2 + 2.0 * k3 + k4) / 6.0
+        sensitivity = sensitivity + step * (s1 + 2.0 * s2 + 2.0 * s3 + s4) / 6.0
+    final_cn = periodic_calcium_state(initial_cn, duration, calcium_amplitude, parameters.tauc)
+    rhs(duration, current, sensitivity)
+    return np.concatenate(([final_cn], current)), sensitivity
+
+
 def _propagate_ding_pulse_width_interval_batch(
     state: Sequence[float] | np.ndarray,
     *,
