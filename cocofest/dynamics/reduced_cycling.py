@@ -23,7 +23,7 @@ import numpy as np
 
 
 TWO_PI = 2.0 * np.pi
-REDUCED_PROFILE_SCHEMA_VERSION = 2
+REDUCED_PROFILE_SCHEMA_VERSION = 3
 
 
 def _as_numpy(value) -> np.ndarray:
@@ -65,6 +65,30 @@ def _model_dof_names(model) -> list[str]:
         model.nameDof()[index].to_string()
         for index in range(model.nbQ())
     ]
+
+
+def global_segment_moment_generalized_vector(
+    model, segment_name: str = "wheel", moment_global=(0.0, 0.0, 1.0)
+) -> np.ndarray:
+    """Project a global segment moment into generalized coordinates.
+
+    ``ExternalForceSetTimeSeries.add_torque`` is a *global* moment.  It must
+    therefore be mapped with the segment angular-velocity Jacobian, rather
+    than injected into a single relative joint coordinate.
+    """
+    segment_names = [model.segment(i).name().to_string() for i in range(model.nbSegment())]
+    if segment_name not in segment_names:
+        raise ValueError(f"Unknown segment '{segment_name}'.")
+    q = np.zeros(model.nbQ())
+    jacobian = np.empty((3, model.nbQ()))
+    for index in range(model.nbQ()):
+        qdot = np.zeros(model.nbQ())
+        qdot[index] = 1.0
+        angular_velocity = model.segmentAngularVelocity(
+            q, qdot, segment_names.index(segment_name), True
+        )
+        jacobian[:, index] = _as_numpy(angular_velocity).reshape(-1)
+    return jacobian.T @ np.asarray(moment_global, dtype=float).reshape(3)
 
 
 @dataclass(frozen=True)
@@ -883,7 +907,7 @@ class ReducedCyclingDynamics:
                 )
             )
             muscle_effectiveness = -(muscle_jacobian @ tangent)
-            external_effectiveness = float(tangent[crank_torque_dof_index])
+            external_effectiveness = float(tangent @ global_segment_moment_generalized_vector(model))
             coefficient_samples[:, index] = np.concatenate(
                 (
                     np.array(
@@ -1336,9 +1360,7 @@ def validate_reduced_cycling_dynamics(
             reduced_passive_force - exact_passive_force
         )
         generalized_torque = -muscle_jacobian.T @ forces
-        generalized_torque[reduced.crank_torque_dof_index] += (
-            external_crank_torque
-        )
+        generalized_torque += global_segment_moment_generalized_vector(model) * external_crank_torque
         qddot_full = _as_numpy(
             model.ForwardDynamicsConstraintsDirect(
                 q,
@@ -1488,7 +1510,11 @@ def benchmark_reduced_casadi_mechanical_kernel(
         muscle_indices, :
     ]
     generalized_torque = -muscle_jacobian.T @ forces_symbol
-    generalized_torque[reduced.crank_torque_dof_index] += external_symbol
+    # The symbolic validation mirrors the global wheel moment convention used
+    # by the full model.  This planar model has the constant projection below.
+    generalized_torque += casadi.DM(
+        global_segment_moment_generalized_vector(_load_numerical_biorbd().Model(str(Path(model_path))))
+    ) * external_symbol
     full_qddot = model.ForwardDynamicsConstraintsDirect(
         q,
         qdot,

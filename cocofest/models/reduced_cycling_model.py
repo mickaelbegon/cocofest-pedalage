@@ -152,6 +152,7 @@ class ReducedFesCyclingModel(StateDynamics):
         pulse_width_interval_s: float | None = None,
         pulse_width_control_mode: str = "direct",
         pulse_width_max_rate_s_per_s: float | None = None,
+        dynamic_mechanical_residual: str = "direct",
     ):
         super().__init__()
         self.reduced_dynamics = reduced_dynamics
@@ -178,6 +179,18 @@ class ReducedFesCyclingModel(StateDynamics):
         self.pulse_width_max_rate_s_per_s = validate_rate_mode(
             pulse_width_control_mode, pulse_width_max_rate_s_per_s
         )
+        self.dynamic_mechanical_residual = str(dynamic_mechanical_residual)
+        if self.dynamic_mechanical_residual not in ("direct", "implicit_inverse"):
+            raise ValueError(
+                "dynamic_mechanical_residual must be 'direct' or "
+                "'implicit_inverse'."
+            )
+        if self.isokinetic and self.dynamic_mechanical_residual != "direct":
+            raise ValueError(
+                "The isokinetic reduced formulation already eliminates the "
+                "load by inverse dynamics; dynamic_mechanical_residual applies "
+                "only to the dynamic formulation."
+            )
         if pulse_width_control_mode == PW_RATE_MODE:
             from cocofest.models.ding2007.ding2007_with_fatigue_periodic_node import (
                 DingModelPulseWidthFrequencyWithFatiguePeriodicNode,
@@ -243,6 +256,24 @@ class ReducedFesCyclingModel(StateDynamics):
                 "The reduced profile must include muscle geometry when Hill "
                 "relationships are enabled."
             )
+        self.dynamic_inverse_reference_inertia = 1.0
+        if self.dynamic_mechanical_residual == "implicit_inverse":
+            # A positive, fixed reference makes the experimental implicit
+            # balance a state-dependent row scaling of the current omega
+            # collocation defect. It therefore retains exactly the direct-model
+            # feasible set.
+            progress = np.linspace(0.0, 1.0, 512, endpoint=False)
+            inertias = np.asarray(
+                self.reduced_dynamics.coefficients.evaluate(progress)[
+                    self.reduced_dynamics._inertia_index
+                ],
+                dtype=float,
+            )
+            self.dynamic_inverse_reference_inertia = float(np.median(inertias))
+            if not math.isfinite(self.dynamic_inverse_reference_inertia) or (
+                self.dynamic_inverse_reference_inertia <= 0.0
+            ):
+                raise ValueError("The reduced effective inertia reference must be positive.")
 
     @property
     def name(self) -> str:
@@ -361,6 +392,7 @@ class ReducedFesCyclingModel(StateDynamics):
                 "pulse_width_interval_s": self.pulse_width_interval_s,
                 "pulse_width_control_mode": self.pulse_width_control_mode,
                 "pulse_width_max_rate_s_per_s": self.pulse_width_max_rate_s_per_s,
+                "dynamic_mechanical_residual": self.dynamic_mechanical_residual,
             },
         )
 
@@ -534,4 +566,30 @@ class ReducedFesCyclingModel(StateDynamics):
             defects = (
                 nlp.states_dot.scaled.cx * nlp.dt - dxdt * nlp.dt
             )
+            if (
+                not self.isokinetic
+                and self.dynamic_mechanical_residual == "implicit_inverse"
+            ):
+                # Current direct defect: alpha - N/I.  Multiplication by
+                # I(theta)/I_ref gives (I*alpha-N)/I_ref, namely the implicit
+                # inverse-balance residual, without an extra state/control.
+                # Applying the factor to the existing scaled defect preserves
+                # the exact direct collocation roots even when omega itself is
+                # decision-scaled by Bioptim.
+                values = self.reduced_dynamics.coefficients.casadi(
+                    self.reduced_dynamics.kinematics.progress(theta)
+                )
+                factor = (
+                    values[self.reduced_dynamics._inertia_index]
+                    / self.dynamic_inverse_reference_inertia
+                )
+                omega_defect_index = 5 * len(self.muscles_dynamics_model) + 1
+                defects = vertcat(
+                    *[
+                        factor * defects[index]
+                        if index == omega_defect_index
+                        else defects[index]
+                        for index in range(defects.shape[0])
+                    ]
+                )
         return DynamicsEvaluation(dxdt=dxdt, defects=defects)

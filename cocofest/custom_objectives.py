@@ -17,6 +17,25 @@ from .optimization.muscle_reserve import (
 
 class CustomObjective:
     @staticmethod
+    def minimize_terminal_projected_mechanical_reserve(controller: PenaltyController, binding):
+        """Signed projected reserve proxy from the candidate terminal slow states."""
+        from casadi import horzcat
+
+        names = CustomObjective._muscle_names(controller)
+        if len(names) != binding.muscle_count:
+            raise ValueError("Projected reserve binding/model muscle count mismatch.")
+        states = vertcat(*[
+            horzcat(*(controller.states[f"{key}_{name}"].cx for key in ("A", "Tau1", "Km")))
+            for name in names
+        ])
+        return binding.objective(states, controller)
+
+    @staticmethod
+    def minimize_local_projected_mechanical_reserve_pw(controller: PenaltyController, binding):
+        """One-node PW trust surrogate supplied by the slow reserve supervisor."""
+        return binding.local_pulse_width_objective(controller)
+
+    @staticmethod
     def _terminal_muscle_horizon_outputs(controller: PenaltyController, binding):
         from .optimization.muscle_horizon_ocp import (
             MUSCLE_HORIZON_FUTURE_PW_KEY,
@@ -105,6 +124,33 @@ class CustomObjective:
             ]
         )
         return muscle_fatigue
+
+    @staticmethod
+    def minimize_parameterized_overall_muscle_fatigue(
+        controller: PenaltyController,
+    ) -> MX:
+        """Return ``sqrt(w_i) * (1 - A_i/a_scale)`` for fixed NLP parameters.
+
+        With Bioptim's quadratic Lagrange objective this is exactly
+        ``sum_i w_i * (1 - A_i/a_scale)^2``.  The weights are fixed numerical
+        parameters, so changing their equality bounds does not reconstruct the
+        objective graph nor invalidate a compiled IPOPT callback.
+        """
+        from casadi import sqrt
+        from .optimization.parametric_fatigue_weights import FATIGUE_WEIGHT_PARAMETER_KEY
+
+        muscle_name_list = CustomObjective._muscle_names(controller)
+        muscle_model = controller.model.muscles_dynamics_model
+        weights = controller.parameters[FATIGUE_WEIGHT_PARAMETER_KEY].cx
+        if int(weights.numel()) != len(muscle_name_list):
+            raise ValueError("Fatigue weight parameter/model dimension mismatch")
+        return vertcat(
+            *[
+                sqrt(weights[x])
+                * (1 - controller.states["A_" + muscle_name_list[x]].cx / muscle_model[x].a_scale)
+                for x in range(len(muscle_name_list))
+            ]
+        )
 
     @staticmethod
     def minimize_terminal_muscle_reserve(
