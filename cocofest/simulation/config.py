@@ -25,6 +25,7 @@ class SimulationConfig:
     stimulations_per_cycle: int = 30
     signed_crank_torque: float = 0.1
     pulse_width_max_step_us: float | None = None
+    pulse_width_slew_formulation: str = "lifting"
     pulse_width_slew_weight: float = 0.0
     pulse_width_slew_reference_us: float = 100.0
     reduced_internal_crank_velocity_guard: str = "auto"

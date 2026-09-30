@@ -167,10 +167,16 @@ def _predictive_moment_proposal(*, solution, models, parsed, controller, cycle_i
                   for component in state_names)
             for name in task.muscle_names
         )
+        allocation_regularization = (
+            controller.config.projection_fatigue_reference_regularization
+            if controller.config.projection_allocation_objective == "predicted_ding_fatigue_v1"
+            else 1e-3
+        )
         predictor = WeightedCyclePredictor(
             task.intervals, task.parameters,
             substeps=controller.config.projection_substeps,
-            reference_regularization=1e-3,
+            reference_regularization=allocation_regularization,
+            allocation_objective=controller.config.projection_allocation_objective,
         )
         context = {
             "source": "current_certified_rho_only",
@@ -240,6 +246,13 @@ def _predictive_moment_proposal(*, solution, models, parsed, controller, cycle_i
             "horizon_cycles": context["horizon_cycles"],
             "update_every_cycles": controller.config.update_every_cycles,
             "tracking_mode": controller.config.projection_tracking_mode,
+            "allocation_objective": controller.config.projection_allocation_objective,
+            "allocation_reference_regularization": allocation_regularization,
+            "fatigue_objective_approximation": (
+                "endpoint_A_plus_rectangular_phase_quadrature"
+                if controller.config.projection_allocation_objective == "predicted_ding_fatigue_v1"
+                else None),
+            "fatigue_objective_full_ding_or_rho_certified": False,
             "candidate_evaluation_backend": "numpy_batch_sequential_phases",
             "candidate_rollouts": rollout_audits,
             "candidate_evaluations": [asdict(item) for item in proposal.evaluations],

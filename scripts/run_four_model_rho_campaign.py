@@ -38,6 +38,7 @@ from scripts.physiological_weight_geometry import build_geometry
 
 
 DEFAULT_FACTORS = (0.25, 0.5, 1.0, 2.0)
+RHO_CONDITIONS = ("rho", "rho-physio", "rho-pace")
 
 
 def _factor_label(factor: float) -> str:
@@ -144,7 +145,8 @@ def prepare_campaign(run_directory: Path, *, reduced_profile: Path, resistance_n
 
 
 def _base_benchmark_args(*, profile: Path, resistance_nm: float, cycles: int, hsl_library: Path,
-                         output: Path, seed: Path | None = None) -> list[str]:
+                         output: Path, seed: Path | None = None,
+                         replay_checkpoint: Path | None = None) -> list[str]:
     args = ["--solvers", "ipopt", "--objective", "fatigue", "--objective-shape", "quadratic",
             "--formulation", "dynamic", "--mechanical-formulation", "reduced",
             "--stimulations-per-cycle", "30", "--signed-crank-torque", str(resistance_nm),
@@ -157,6 +159,12 @@ def _base_benchmark_args(*, profile: Path, resistance_nm: float, cycles: int, hs
     if seed is not None:
         args += ["--common-initial-solution", str(seed), "--common-initial-solution-recenter-first-node-bounds",
                  "--adopt-common-initial-solution-warmup-cycles"]
+    if replay_checkpoint is not None:
+        # This file is overwritten only after a certified physical advance.
+        # Following a later failure it is therefore the exact frozen state and
+        # PW history needed by probe_rho_endurance_viability.py, never the
+        # failed IPOPT iterate.
+        args += ["--rho-replay-checkpoint-output", str(replay_checkpoint)]
     return args
 
 
@@ -202,7 +210,7 @@ def _archive_failed_weighted_attempt(arm: dict[str, Any]) -> None:
 
 
 def run_model(model: dict[str, Any], *, manifest: dict[str, Any], python: Path, profile: Path,
-              hsl_library: Path) -> str:
+              hsl_library: Path, conditions: tuple[str, ...] = RHO_CONDITIONS) -> str:
     """Run one model chain; completed result files are retained on service restart."""
     model_id, resistance, cycles = model["model_id"], manifest["resistance_nm"], manifest["cycles"]
     model_dir = Path(model["model_config"]).parent
@@ -220,7 +228,7 @@ def run_model(model: dict[str, Any], *, manifest: dict[str, Any], python: Path, 
         _execute([*prefix, "--model-config", model["model_config"], "--condition", "rho",
                   "--configuration-audit", str(seed_audit), "--", *seed_args], environment=env,
                  log=model_dir / "seed" / "launcher-output.log")
-    for condition in ("rho", "rho-physio", "rho-pace"):
+    for condition in conditions:
         arm = next(item for item in manifest["arms"] if item["id"] == f"{model_id}/{condition}")
         result = Path(arm["result_path"])
         if result.is_file():
@@ -228,7 +236,8 @@ def run_model(model: dict[str, Any], *, manifest: dict[str, Any], python: Path, 
         if condition != "rho":
             _archive_failed_weighted_attempt(arm)
         args = _base_benchmark_args(profile=profile, resistance_nm=resistance, cycles=cycles,
-                                    hsl_library=hsl_library, output=result, seed=seed)
+                                    hsl_library=hsl_library, output=result, seed=seed,
+                                    replay_checkpoint=result.parent / "last-certified-rho-replay.npz")
         command = [*prefix, "--model-config", model["model_config"], "--condition", condition,
                    "--configuration-audit", arm["configuration_audit_path"], "--checkpoint-every", "20",
                    "--checkpoint-directory", arm["checkpoint_directory"]]
@@ -247,12 +256,24 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--resistance-nm", type=float, default=.15)
     parser.add_argument("--cycles", type=int, default=3000)
     parser.add_argument("--max-parallel-models", type=int, default=4)
+    parser.add_argument(
+        "--conditions",
+        default=",".join(RHO_CONDITIONS),
+        help=(
+            "Comma-separated subset of rho,rho-physio,rho-pace to execute. "
+            "This permits a matched baseline/physiology campaign before a "
+            "separately configured PACE policy."
+        ),
+    )
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--resume", action="store_true",
                         help="Continue an already prepared campaign without overwriting any artifact")
     args = parser.parse_args(argv)
     if args.max_parallel_models < 1 or args.max_parallel_models > 4:
         parser.error("max-parallel-models must be in 1..4")
+    conditions = tuple(item.strip() for item in args.conditions.split(",") if item.strip())
+    if not conditions or len(set(conditions)) != len(conditions) or any(item not in RHO_CONDITIONS for item in conditions):
+        parser.error("--conditions must be a non-empty, non-repeated subset of rho,rho-physio,rho-pace")
     manifest_path = args.run_directory.expanduser().resolve() / "manifest.json"
     if args.resume:
         if not manifest_path.is_file():
@@ -272,7 +293,8 @@ def main(argv: list[str] | None = None) -> None:
     failures = []
     with ThreadPoolExecutor(max_workers=args.max_parallel_models) as pool:
         futures = {pool.submit(run_model, model, manifest=manifest, python=args.python.resolve(),
-                               profile=args.reduced_profile.resolve(), hsl_library=args.hsl_library.resolve()): model["model_id"]
+                               profile=args.reduced_profile.resolve(), hsl_library=args.hsl_library.resolve(),
+                               conditions=conditions): model["model_id"]
                    for model in manifest["models"]}
         for future in as_completed(futures):
             model = futures[future]

@@ -27,9 +27,11 @@ assert SimulationConfig().schema_version == 1
 
 def test_config_roundtrip_is_lossless_and_sequence_is_frozen():
     config = SimulationConfig(extra_arguments=["--standard-warmup-seed", "a path/$(no).npz"],
-                              acados_ipopt_cycle1_seed=Path("seed.npz"))
+                              acados_ipopt_cycle1_seed=Path("seed.npz"),
+                              common_initial_solution=Path("shared-seed.npz"))
     assert SimulationConfig.from_json(config.to_json()) == config
     assert config.extra_arguments == ("--standard-warmup-seed", "a path/$(no).npz")
+    assert config.common_initial_solution == "shared-seed.npz"
     with pytest.raises(FrozenInstanceError):
         config.cycles = 3
 
@@ -53,6 +55,7 @@ def test_invalid_documents_are_rejected(data):
     ("load_torque_min", 0), ("load_torque_max", 0), ("pulse_width_max_step_us", -1),
     ("pulse_width_max_step_us", float("inf")), ("pulse_width_max_step_us", True),
     ("output_root", ""), ("weights_config", 42), ("acados_ipopt_cycle1_seed", "\0"),
+    ("common_initial_solution", "\0"),
     ("extra_arguments", "bad"), ("extra_arguments", ["\0"]), ("compile_evaluators", "false"),
     ("madnlp_recovery", 1), ("dry_run", 0), ("schema_version", 1.0),
     ("reduced_internal_crank_velocity_guard", "invalid"),
@@ -134,6 +137,7 @@ def test_plan_does_not_touch_files_environment_or_processes(tmp_path, monkeypatc
     assert json.loads(plan.environment_updates["BENCHMARK_EXTRA_ARGUMENTS_JSON"]) == [
         "--reduced-internal-crank-velocity-guard", "auto",
         "--acados-qp-solver", "auto",
+        "--pulse-width-slew-formulation", "lifting",
         "--pulse-width-slew-weight", "0.0",
         "--pulse-width-slew-reference-us", "100.0",
         "--pulse-width-max-step-us", "100.0"]
@@ -224,6 +228,33 @@ def test_weighted_plans_use_distinct_mode_and_journal(tmp_path, mode):
     assert plan.argv[plan.argv.index("--pace-config") + 1] == str(tmp_path / "weights.json")
     assert plan.argv[plan.argv.index("--pace-journal") + 1].endswith("weights.jsonl")
     assert "--ipopt-c-compile" not in plan.argv
+
+
+def test_weighted_plan_forwards_managed_common_initial_solution(tmp_path):
+    plan = build_launch_plan(
+        SimulationConfig(
+            mode="rho-physio", weights_config="weights.json",
+            common_initial_solution=Path("seeds/shared-cycle-1.npz"),
+            compile_evaluators=False,
+        ),
+        tmp_path / "env", tmp_path,
+    )
+    seed_index = plan.argv.index("--common-initial-solution")
+    assert plan.argv[seed_index + 1] == str(tmp_path / "seeds/shared-cycle-1.npz")
+    assert "--common-initial-solution-recenter-first-node-bounds" in plan.argv
+    assert "--adopt-common-initial-solution-warmup-cycles" in plan.argv
+
+
+def test_weighted_common_seed_can_match_its_start_constraint_contract(tmp_path):
+    relaxed = build_launch_plan(
+        SimulationConfig(
+            mode="rho-physio", weights_config="weights.json", compile_evaluators=False,
+            common_initial_solution="shared-cycle-1.npz", ipopt_enforce_start_constraints=False,
+        ),
+        tmp_path / "env", tmp_path,
+    )
+    assert "--ipopt-disable-start-constraints" in relaxed.argv
+    assert "--ipopt-enforce-start-constraints" not in relaxed.argv
 
 
 def test_configured_fho_plan_preserves_model_adapter(tmp_path):

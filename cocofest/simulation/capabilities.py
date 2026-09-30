@@ -33,6 +33,7 @@ class CapabilityRegistry:
         "mechanics": ("reduced", "full"),
         "formulation": ("dynamic", "isokinetic"),
         "integration": ("radau", "irk"),
+        "pulse_width_slew_formulation": ("lifting", "direct_constraints"),
         "reduced_internal_crank_velocity_guard": ("auto", "on", "off"),
         "acados_qp_solver": (
             "auto", "PARTIAL_CONDENSING_HPIPM", "FULL_CONDENSING_HPIPM",
@@ -44,14 +45,15 @@ class CapabilityRegistry:
     FIELD_HELP = {
         "formulation": "Dynamic: free crank dynamics; isokinetic: prescribed angular velocity.",
         "pulse_width_max_step_us": "Hard ΔPW bound between successive controls, including executed RHO boundaries (µs).",
+        "pulse_width_slew_formulation": "lifting adds previous-PW states; direct_constraints bounds successive controls without extra states (IPOPT/MadNLP only). Both enforce the executed RHO seam.",
         "pulse_width_slew_weight": "Weight of mean squared normalized intra-window ΔPW; requires a hard bound. Executed RHO seams are only bounded.",
         "pulse_width_slew_reference_us": "Positive reference for ΔPW normalization (µs), independent of the hard bound.",
         "signed_crank_torque": "Signed crank torque (N.m): positive resists negative angular velocity.",
         "bilateral_reduced": "Use the bilateral Wu bioMod to build a reduced profile from two physical arm chains and one shared crank; the online OCP remains theta/omega only.",
         "acados_ipopt_cycle1_seed": "Required ACADOS initialization: certified IPOPT solution of exactly cycle 1, matching the target problem.",
-        "common_initial_solution": "Optional certified common NLP seed (.npz) shared by comparable RHO trials.",
-        "reduced_internal_crank_velocity_guard": "Internal reduced-mechanics cadence guard: auto preserves legacy behavior; exact ACADOS seed transfers use on.",
-        "reduced_terminal_half_step_velocity_guard": "Add the reduced midpoint cadence guard at the terminal node to certify the handoff to the next RHO window.",
+        "common_initial_solution": "Seed NLP commun certifié (.npz) pour les comparaisons IPOPT/MadNLP. Il doit correspondre au modèle, à la transcription, aux contrôles et aux contraintes ; le moteur vérifie sa provenance et sa compatibilité. ACADOS utilise le champ dédié au seed IPOPT du cycle 1.",
+        "reduced_internal_crank_velocity_guard": "Reduced free-cadence guard. auto enables it for ACADOS and exact cycle-1 seed producers; standalone IPOPT/MadNLP require on to enable it.",
+        "reduced_terminal_half_step_velocity_guard": "Bounds an Euler half-step cadence prediction from the terminal state before the next RHO window. Requires reduced dynamic mechanics and an active internal guard. This local predictor does not certify all next-cycle constraints.",
         "acados_qp_solver": "ACADOS QP backend: auto uses full-condensing HPIPM with a ΔPW bound and partial-condensing HPIPM otherwise.",
         "acados_ding_local_reduction": "Experimental local Ding reconstruction: ACADOS retains F and A as NLP states and reconstructs Cn, Tau1 and Km from the fixed initial state and the current pulse-width profile. It requires SQP IRK Gauss-Legendre 4×5, reduced dynamic mechanics, 50 stimulations/cycle, an active cadence guard and no slew constraint. Fixed initial states are checked by the engine; full NLP duals are not reconstructed.",
         "ipopt_ding_local_reduction": "Experimental IPOPT local Ding reconstruction: F and A remain decision states while Cn, Tau1 and Km are reconstructed with the original discrete Radau-5 operator. It requires the interpreted SX IPOPT path, one-cycle dynamic reduced RHO windows, 30 stimulations/cycle and no pulse-width slew constraint. The complete NLP is audited after each solve.",
@@ -69,6 +71,7 @@ class CapabilityRegistry:
         "--common-initial-solution", "--adopt-common-initial-solution-warmup-cycles",
         "--acados-disable-standard-ipopt-warmup", "--pulse-width-max-step-us",
         "--pulse-width-slew-weight", "--pulse-width-slew-reference-us",
+        "--pulse-width-slew-formulation",
         "--ipopt-ode-solver", "--ipopt-collocation-degree", "--ipopt-collocation-method",
         "--ipopt-c-compile", "--ipopt-c-compile-callback", "--madnlp-c-compile", "--acados-integrator-type",
         "--ipopt-profile", "--ipopt-use-sx", "--ipopt-no-use-sx",
@@ -87,6 +90,23 @@ class CapabilityRegistry:
     @classmethod
     def choices(cls, field: str) -> tuple[str, ...]:
         return cls.CHOICES.get(field, ())
+
+    @classmethod
+    def effective_reduced_velocity_guard(cls, config: SimulationConfig) -> bool:
+        """Mirror the runner's auto policy and the exact cycle-1 seed launcher."""
+        if config.reduced_internal_crank_velocity_guard == "on":
+            return True
+        if config.reduced_internal_crank_velocity_guard != "auto":
+            return False
+        extras = config.extra_arguments
+        produces_seed = isinstance(extras, (tuple, list)) and any(
+            isinstance(argument, str) and (
+                argument == "--common-initial-solution-output"
+                or argument.startswith("--common-initial-solution-output=")
+            ) for argument in extras
+        )
+        return (config.mechanics == "reduced" and config.formulation == "dynamic"
+                and (config.solver == "acados" or produces_seed))
 
     @classmethod
     def validate(cls, config: SimulationConfig) -> tuple[ValidationIssue, ...]:
@@ -147,6 +167,13 @@ class CapabilityRegistry:
             window = config.cycles if config.mode == "fho" else config.cycles_per_window
             if window != 1:
                 issue("pulse_width_max_step_us", "currently requires one-cycle windows", "unsupported")
+        if config.pulse_width_slew_formulation == "direct_constraints" and config.solver not in ("ipopt", "madnlp"):
+            issue("pulse_width_slew_formulation", "direct_constraints requires IPOPT or MadNLP", "unsupported")
+        if config.reduced_terminal_half_step_velocity_guard:
+            if config.mechanics != "reduced" or config.formulation != "dynamic":
+                issue("reduced_terminal_half_step_velocity_guard", "requires reduced dynamic mechanics (free cadence)", "unsupported")
+            elif not cls.effective_reduced_velocity_guard(config):
+                issue("reduced_terminal_half_step_velocity_guard", "requires an active internal cadence guard; select on for standalone IPOPT/MadNLP", "unsupported")
         bounds = (config.load_torque_min, config.energy_equivalent_torque, config.load_torque_max)
         if all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in bounds):
             if not bounds[0] <= bounds[1] <= bounds[2]:

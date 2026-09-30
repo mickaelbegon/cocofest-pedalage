@@ -112,8 +112,35 @@ def write_summary(study, root):
         best = {"trial": trial.number, "score": trial.value, "parameters": trial.params,
                 "sim_result": trial.user_attrs.get("sim_result"),
                 "trial_directory": trial.user_attrs.get("trial_directory")}
+    # TPE deliberately receives no censored objective value.  Consequently its
+    # ``best`` trial can be shorter than a horizon-complete trial: that is a
+    # property of the sampler, not an endurance conclusion.  Publish the
+    # longest certified prefix separately so a downstream report cannot
+    # silently present an exact/proxy score as the campaign's endurance
+    # incumbent.
+    prefix_candidates = []
+    censored_candidates = []
+    for trial in trials:
+        result = trial.user_attrs.get("sim_result")
+        if not isinstance(result, dict):
+            continue
+        cycles = result.get("validated_cycles")
+        status = result.get("status")
+        if type(cycles) is not int or cycles < 0:
+            continue
+        if status in ("observed", "horizon_censored", "administrative_censored"):
+            candidate = {"trial": trial.number, "validated_cycles": cycles,
+                         "parameters": trial.params, "sim_result": result,
+                         "trial_directory": trial.user_attrs.get("trial_directory")}
+            prefix_candidates.append(candidate)
+            if status in ("horizon_censored", "administrative_censored"):
+                censored_candidates.append(candidate)
+    best_validated_prefix = max(prefix_candidates, key=lambda item: item["validated_cycles"], default=None)
+    best_censored_lower_bound = max(censored_candidates, key=lambda item: item["validated_cycles"], default=None)
     summary = {"study_name": study.study_name, "direction": study.direction.name.lower(),
                "counts": dict(counts), "trials": len(trials), "best": best,
+               "best_validated_prefix": best_validated_prefix,
+               "best_censored_lower_bound": best_censored_lower_bound,
                "censored_trials": [{"trial": t.number, "parameters": t.params,
                                      "sim_result": t.user_attrs["sim_result"]}
                                     for t in trials if t.user_attrs.get("scientific_status") in

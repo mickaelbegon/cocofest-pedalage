@@ -67,18 +67,8 @@ def build_launch_plan(config: SimulationConfig | dict, prefix: Path, root: Path 
     extras = config["extra_arguments"]
     suite = "madnlp32" if solver == "madnlp" else "rho32"
     configured_extras = list(extras)
-    produces_cycle1_seed = any(
-        argument == "--common-initial-solution-output"
-        or argument.startswith("--common-initial-solution-output=")
-        for argument in configured_extras
-    )
     guard_mode = config["reduced_internal_crank_velocity_guard"]
-    if (
-        guard_mode == "auto"
-        and config["mechanics"] == "reduced"
-        and config["formulation"] == "dynamic"
-        and (solver == "acados" or produces_cycle1_seed)
-    ):
+    if guard_mode == "auto" and CapabilityRegistry.effective_reduced_velocity_guard(typed_config):
         # A cycle-1 IPOPT producer and its ACADOS consumer must describe the
         # same target constraint set. Standalone runs retain legacy ``auto``.
         guard_mode = "on"
@@ -91,6 +81,7 @@ def build_launch_plan(config: SimulationConfig | dict, prefix: Path, root: Path 
     if config["bilateral_reduced"]:
         configured_extras.append("--bilateral-reduced")
     configured_extras.extend([
+        "--pulse-width-slew-formulation", config["pulse_width_slew_formulation"],
         "--pulse-width-slew-weight", str(float(config["pulse_width_slew_weight"])),
         "--pulse-width-slew-reference-us", str(float(config["pulse_width_slew_reference_us"])),
     ])
@@ -244,9 +235,16 @@ def _build_adapted_plan(config, prefix, root, output, updates, suite):
     if config.bilateral_reduced:
         benchmark.append("--bilateral-reduced")
     benchmark += [
+        "--pulse-width-slew-formulation", config.pulse_width_slew_formulation,
         "--pulse-width-slew-weight", str(float(config.pulse_width_slew_weight)),
         "--pulse-width-slew-reference-us", str(float(config.pulse_width_slew_reference_us)),
     ]
+    guard_mode = config.reduced_internal_crank_velocity_guard
+    if guard_mode == "auto" and CapabilityRegistry.effective_reduced_velocity_guard(config):
+        guard_mode = "on"
+    benchmark += ["--reduced-internal-crank-velocity-guard", guard_mode]
+    if config.reduced_terminal_half_step_velocity_guard:
+        benchmark.append("--reduced-terminal-half-step-velocity-guard")
     if config.solver == "acados":
         # The configured runner enforces the same certified one-cycle IPOPT
         # transfer as its direct CLI. Keep this explicit rather than relying

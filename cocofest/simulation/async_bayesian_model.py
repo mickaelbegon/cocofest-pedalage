@@ -17,6 +17,7 @@ SOLVER_FIELDS = {"solver", "collocation_degree", "threads", "ipopt_linear_solver
                  "acados_qp_solver", "acados_sim_stages", "acados_sim_steps"}
 CONTROLLER_FIELDS = {"cycles_per_window", "pulse_width_slew_weight", "pulse_width_max_step_us"}
 MUSCLE_WEIGHT_PREFIX = "muscle_weight__"
+MUSCLE_WEIGHT_COORDINATE_PREFIX = "muscle_weight_coordinate__"
 
 
 def _finite(value):
@@ -24,10 +25,23 @@ def _finite(value):
 
 
 def muscle_weight_parameter_name(muscle_name: str) -> str:
-    """Return the stable Optuna parameter name for one configured muscle."""
+    """Return the retired v1 multiplier parameter name.
+
+    The v1 scheme was intentionally kept as a named helper so old result
+    folders remain readable.  It must not be used in new studies: multiplying
+    a calibrated input and letting RHO-Physio normalize/project it makes the
+    space seen by Optuna many-to-one.
+    """
     if not isinstance(muscle_name, str) or not muscle_name.strip():
         raise ValueError("Le nom de muscle doit être une chaîne non vide.")
     return f"{MUSCLE_WEIGHT_PREFIX}{muscle_name}"
+
+
+def muscle_weight_coordinate_name(muscle_name: str) -> str:
+    """Return the bounded latent-coordinate name for one non-reference muscle."""
+    if not isinstance(muscle_name, str) or not muscle_name.strip():
+        raise ValueError("Le nom de muscle doit être une chaîne non vide.")
+    return f"{MUSCLE_WEIGHT_COORDINATE_PREFIX}{muscle_name}"
 
 
 def configured_muscle_names(model_config: str) -> tuple[str, ...]:
@@ -43,6 +57,43 @@ def configured_muscle_names(model_config: str) -> tuple[str, ...]:
     return tuple(muscles)
 
 
+def muscle_weight_reference(muscle_names: tuple[str, ...]) -> str:
+    """Choose the reproducible gauge for centred relative log weights.
+
+    Biceps is the natural clinical reference in the cycling model.  Small test
+    and future models may not contain it, in which case the declared model
+    order supplies a deterministic reference rather than an implicit sort.
+    """
+    if not muscle_names:
+        raise ValueError("Au moins un muscle est requis.")
+    return "Biceps" if "Biceps" in muscle_names else muscle_names[0]
+
+
+def relative_weight_bounds(weights_config: str) -> tuple[float, float]:
+    """Read the actual RHO-PACE box instead of duplicating its defaults.
+
+    The policy defaults are deliberately mirrored here because this module is
+    dependency-free.  The configured runner remains the authority that
+    validates the policy at solve time.
+    """
+    source = Path(weights_config).expanduser()
+    try:
+        payload = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"weights_config illisible pour la géométrie BO : {source}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("weights_config doit être un objet JSON.")
+    policy = payload.get("policy", {})
+    if not isinstance(policy, dict):
+        raise ValueError("weights_config.policy doit être un objet quand il est fourni.")
+    lower = policy.get("min_relative_weight", 0.25)
+    upper = policy.get("max_relative_weight", 4.0)
+    if (not _finite(lower) or not _finite(upper) or lower <= 0 or upper <= 0
+            or lower > 1 or upper < 1 or lower > upper):
+        raise ValueError("Les bornes de poids relatifs doivent être finies, positives et contenir 1.")
+    return float(lower), float(upper)
+
+
 def muscle_weight_parameters(parameters: Mapping[str, Any]) -> dict[str, float]:
     """Extract and validate named candidate weights from an Optuna parameter map."""
     selected = {}
@@ -55,13 +106,85 @@ def muscle_weight_parameters(parameters: Mapping[str, Any]) -> dict[str, float]:
     return selected
 
 
+def muscle_weight_coordinates(parameters: Mapping[str, Any], muscle_names: tuple[str, ...],
+                              *, min_weight: float, max_weight: float) -> dict[str, Any]:
+    """Map independent coordinates to a unique, admissible relative cost.
+
+    The controller works in centred log-weight space, where the common scale
+    is unidentifiable.  We remove that gauge by deriving the Biceps log weight
+    (or the first declared muscle when Biceps is absent).  The first ``n-2``
+    logs are confined to a symmetric interior slab.  The final coordinate then
+    selects its *feasible interval* exactly, so the reference closes the zero
+    sum.  This is one-to-one, has geometric mean one, and cannot later be
+    altered by RHO-Physio's [min,max] projection.
+
+    With asymmetric policy bounds we use their largest symmetric log box about
+    one.  That conservative interior is still admissible and avoids inventing
+    an asymmetric normalization convention for a relative objective.
+    """
+    names = tuple(muscle_names)
+    if len(names) < 2 or len(set(names)) != len(names):
+        raise ValueError("La géométrie BO exige au moins deux muscles nommés distincts.")
+    reference = muscle_weight_reference(names)
+    free = tuple(name for name in names if name != reference)
+    expected = {muscle_weight_coordinate_name(name) for name in free}
+    supplied = {name: value for name, value in parameters.items()
+                if name.startswith(MUSCLE_WEIGHT_COORDINATE_PREFIX)}
+    if set(supplied) != expected:
+        raise ValueError("Les coordonnées BO doivent identifier exactement les muscles hors référence.")
+    coordinates = {}
+    for name in free:
+        value = supplied[muscle_weight_coordinate_name(name)]
+        if not _finite(value) or not -1.0 <= float(value) <= 1.0:
+            raise ValueError(f"Coordonnée BO hors [-1,1] : {name}")
+        coordinates[name] = float(value)
+    log_lower, log_upper = math.log(min_weight), math.log(max_weight)
+    radius = min(-log_lower, log_upper)
+    if not radius > 0:
+        raise ValueError("La boîte de poids relatifs doit contenir un voisinage de 1.")
+    # Reserve enough room for the last free muscle and the reference.  The
+    # resulting last interval has a strictly positive width for every point.
+    direct_count = len(free) - 1
+    direct_radius = radius / max(1, direct_count)
+    logs = {}
+    partial_sum = 0.0
+    for name in free[:-1]:
+        value = direct_radius * coordinates[name]
+        logs[name] = value
+        partial_sum += value
+    last = free[-1]
+    feasible_low = max(-radius, -radius - partial_sum)
+    feasible_high = min(radius, radius - partial_sum)
+    if not feasible_low < feasible_high:  # defensive: the slab above guarantees this.
+        raise AssertionError("Intervalle final de coordonnées BO dégénéré.")
+    logs[last] = .5 * (feasible_low + feasible_high) + .5 * (feasible_high - feasible_low) * coordinates[last]
+    logs[reference] = -sum(logs.values())
+    if any(value < log_lower - 1e-12 or value > log_upper + 1e-12 for value in logs.values()):
+        raise AssertionError("La géométrie BO a produit un poids hors boîte.")
+    weights = {name: math.exp(logs[name]) for name in names}
+    return {
+        "schema": "centered_log_relative_weights_v2",
+        "reference_muscle": reference,
+        "coordinates": {name: coordinates[name] for name in free},
+        "effective_centered_log_weights": {name: logs[name] for name in names},
+        "effective_initial_weights": weights,
+        "min_relative_weight": float(min_weight),
+        "max_relative_weight": float(max_weight),
+        "geometric_mean": math.prod(weights.values()) ** (1.0 / len(weights)),
+    }
+
+
 def validate_muscle_weight_search(base_config: Mapping[str, Any], search_space: Mapping[str, Any]):
-    """Check the explicit, complete named-weight BO contract.
+    """Check the exact, non-redundant relative-log BO contract.
 
     ACADOS currently has no connected physiological-weight objective adapter;
     keep this contract on the already audited IPOPT RHO-Physio/PACE routes.
     """
-    fields = {name for name in search_space if name.startswith(MUSCLE_WEIGHT_PREFIX)}
+    legacy_fields = {name for name in search_space if name.startswith(MUSCLE_WEIGHT_PREFIX)}
+    fields = {name for name in search_space if name.startswith(MUSCLE_WEIGHT_COORDINATE_PREFIX)}
+    if legacy_fields:
+        raise ValueError("Les multiplicateurs muscle_weight__ v1 sont ambigus après normalisation RHO ; "
+                         "utilisez les coordonnées centrées muscle_weight_coordinate__ v2.")
     if not fields:
         return ()
     config = SimulationConfig.from_dict(base_config)
@@ -71,7 +194,11 @@ def validate_muscle_weight_search(base_config: Mapping[str, Any], search_space: 
         raise ValueError("Les poids musculaires ne sont pas encore connectés à ACADOS ; utilisez IPOPT.")
     if not config.model_config or not config.weights_config:
         raise ValueError("Le BO de poids musculaires exige model_config et weights_config de référence.")
-    expected = {muscle_weight_parameter_name(name) for name in configured_muscle_names(config.model_config)}
+    names = configured_muscle_names(config.model_config)
+    if len(names) < 2:
+        raise ValueError("Le BO de poids musculaires exige au moins deux muscles.")
+    reference = muscle_weight_reference(names)
+    expected = {muscle_weight_coordinate_name(name) for name in names if name != reference}
     if fields != expected:
         missing, unexpected = sorted(expected - fields), sorted(fields - expected)
         details = []
@@ -79,8 +206,15 @@ def validate_muscle_weight_search(base_config: Mapping[str, Any], search_space: 
             details.append(f"manquants={missing}")
         if unexpected:
             details.append(f"inconnus={unexpected}")
-        raise ValueError("Le BO doit rechercher exactement un poids par muscle (" + ", ".join(details) + ").")
-    return tuple(name.removeprefix(MUSCLE_WEIGHT_PREFIX) for name in sorted(fields))
+        raise ValueError("Le BO doit rechercher exactement une coordonnée par muscle hors référence "
+                         f"({reference}) (" + ", ".join(details) + ").")
+    min_weight, max_weight = relative_weight_bounds(config.weights_config)
+    for name in fields:
+        spec = search_space[name]
+        if (spec.get("type") != "float" or spec.get("log", False)
+                or spec.get("low") != -1.0 or spec.get("high") != 1.0):
+            raise ValueError("Chaque coordonnée musculaire BO doit être un flottant linéaire dans [-1, 1].")
+    return tuple(name.removeprefix(MUSCLE_WEIGHT_COORDINATE_PREFIX) for name in names if name != reference), min_weight, max_weight
 
 
 @dataclass(frozen=True)
@@ -152,7 +286,9 @@ class AsyncBayesianCampaignConfig:
         if not isinstance(self.study_name, str) or not self.study_name.strip():
             raise ValueError("Nom d'étude absent.")
         allowed = SOLVER_FIELDS if self.study_kind == "solver" else CONTROLLER_FIELDS
-        dynamic_muscle_fields = {name for name in self.search_space if name.startswith(MUSCLE_WEIGHT_PREFIX)}
+        dynamic_muscle_fields = {name for name in self.search_space
+                                 if name.startswith(MUSCLE_WEIGHT_PREFIX)
+                                 or name.startswith(MUSCLE_WEIGHT_COORDINATE_PREFIX)}
         invalid = set(self.search_space) - allowed - dynamic_muscle_fields
         if not self.search_space or invalid:
             raise ValueError(f"Paramètres autorisés dans l'étude {self.study_kind}: {sorted(allowed)}")

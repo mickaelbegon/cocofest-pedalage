@@ -12,6 +12,29 @@ import numpy as np
 WEIGHTS = ("Biceps", "Delt_ant", "Delt_post", "Triceps")
 
 
+def effective_weights(entry):
+    """Prefer the controller receipt over latent BO coordinates.
+
+    v2 campaigns optimise centred-log coordinates, not independent raw
+    multipliers.  Plotting their coordinates as weights would recreate the
+    ambiguity the runner removed.  The post-run receipt is authoritative;
+    fall back to the requested effective candidate when a run did not produce
+    a journal (for example a technical failure retained for audit).
+    """
+    audit = entry.get("effective_weight_audit") or {}
+    weights = audit.get("controller_applied_initial_weights")
+    if not isinstance(weights, dict):
+        weights = audit.get("requested_effective_initial_weights")
+    if isinstance(weights, dict) and set(weights) == set(WEIGHTS):
+        return [float(weights[name]) for name in WEIGHTS]
+    # Historical v1 campaigns only recorded requested multipliers.  Retain a
+    # readable plot, but never label it as an effective v2 cost.
+    params = entry.get("parameters") or {}
+    if all(f"muscle_weight__{name}" in params for name in WEIGHTS):
+        return [float(params[f"muscle_weight__{name}"]) for name in WEIGHTS]
+    return None
+
+
 def load_rows(root: Path):
     rows = []
     for path in sorted((root / "trials").glob("trial_*/observation.json")):
@@ -19,9 +42,9 @@ def load_rows(root: Path):
         observation = entry.get("sim_result") or {}
         if observation.get("status") != "observed" or not isinstance(observation.get("score"), (int, float)):
             continue
-        params = entry["parameters"]
-        rows.append((int(entry["trial"]), float(observation["score"]),
-                     [float(params[f"muscle_weight__{name}"]) for name in WEIGHTS]))
+        weights = effective_weights(entry)
+        if weights is not None:
+            rows.append((int(entry["trial"]), float(observation["score"]), weights))
     if not rows:
         raise ValueError("Aucune observation BO valide.")
     rows.sort()
@@ -47,7 +70,7 @@ def save_overview(destination: Path, trials, scores, weights):
     for axis, name, values in zip(axes[1], WEIGHTS, weights.T):
         axis.scatter(values, scores, c=scores, cmap="viridis", s=24, alpha=.75, edgecolors="none")
         axis.set_xscale("log")
-        axis.set(title=name, xlabel="Multiplicateur (échelle log)", ylabel="Cycles proxy")
+        axis.set(title=name, xlabel="Poids relatif appliqué (échelle log)", ylabel="Cycles proxy")
         axis.axvline(1, color="0.4", lw=1, ls="--")
     fig.suptitle("BO IPOPT — poids musculaires, résistance 0,2 Nm", fontsize=16)
     fig.savefig(destination, dpi=180)
@@ -70,7 +93,7 @@ def save_pairwise(destination: Path, scores, weights):
             if col == 0: axis.set_ylabel(WEIGHTS[row], fontsize=9)
             axis.tick_params(labelsize=7)
     fig.colorbar(plt.cm.ScalarMappable(norm=norm, cmap=cmap), ax=axes, shrink=.8, label="Cycles proxy")
-    fig.suptitle("Relations entre multiplicateurs et endurance proxy", fontsize=15)
+    fig.suptitle("Relations entre poids relatifs appliqués et endurance proxy", fontsize=15)
     fig.savefig(destination, dpi=180)
     plt.close(fig)
 

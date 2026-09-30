@@ -11,6 +11,9 @@ from datetime import datetime
 import json
 from pathlib import Path
 import re
+import queue
+import threading
+import time
 
 from .config import SimulationConfig
 from .capabilities import CapabilityRegistry
@@ -24,11 +27,30 @@ from .async_bayesian_model import (
 )
 from .launch import LaunchPlan
 from .cross_rollout_model import CrossRolloutConfig, build_cross_rollout_plan, cross_rollout_summary, cross_rollout_report
-from .independent_arms_gui_model import IndependentArmsGuiConfig, independent_arms_summary
+from .independent_arms_gui_model import IndependentArmsGuiConfig, independent_arms_summary, independent_solver_choices
+from .cpu_affinity import available_cpu_ids, reserved_cpu_ids
+from .campaign_history import CampaignHistory
+from .gui_analysis import LiveArtifacts, generate_analysis_figures
 from .bilateral_endurance_campaign import BilateralEnduranceCampaignConfig, BilateralEnduranceCandidate, BilateralTorqueBracketConfig
+from .gui_problem_type import (
+    BILATERAL_COMBINED, INDEPENDENT_ARMS, PROBLEM_TYPE_DESCRIPTIONS,
+    PROBLEM_TYPE_BY_LABEL, PROBLEM_TYPE_LABELS, UNILATERAL, main_problem_type,
+)
 
 
 _MUSCLE_WEIGHT_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+
+
+def has_positive_wraplength(value) -> bool:
+    """Return whether a Tk label has an explicitly enabled numeric wrap length.
+
+    ``ttk.Label.cget("wraplength")`` is an empty string for labels created
+    without that option.  It must not make the canvas resize callback fail.
+    """
+    try:
+        return float(value or 0) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 def muscle_weight_search_space(raw_names, low, high):
@@ -99,8 +121,16 @@ class SimulationApp:
         self.active_campaign = None
         self.active_rollout = None
         self.active_independent_arms = None
+        self.active_history_id = None
+        self.campaign_history = CampaignHistory(ROOT / "gui-results" / "campaign-history.json")
         self._completion_shown = False
         self._closing = False
+        self._live_artifacts = None
+        self._live_started_at = None
+        self._live_finished_at = None
+        self._next_live_update = 0
+        self._analysis_results = queue.Queue()
+        self._analysis_busy = False
         window.title("Cocofest · Simulation de pédalage")
         window.geometry("1120x900")
         window.minsize(860, 720)
@@ -120,8 +150,65 @@ class SimulationApp:
         ttk.Button(toolbar, text="Ouvrir une configuration…", command=self.load).pack(side="left")
         ttk.Button(toolbar, text="Enregistrer JSON…", command=self.save).pack(side="left", padx=6)
         ttk.Button(toolbar, text="Valeurs par défaut", command=self.reset).pack(side="left")
-        self.form_notebook = ttk.Notebook(outer)
+        problem_row = ttk.LabelFrame(outer, text="Type de problème", padding=(10, 6))
+        problem_row.pack(fill="x", pady=(0, 10))
+        ttk.Label(problem_row, text="Architecture").grid(row=0, column=0, sticky="w", padx=(0, 10))
+        self.problem_type = tk.StringVar(value=PROBLEM_TYPE_LABELS[main_problem_type(self.config)])
+        self.problem_type_selector = ttk.Combobox(
+            problem_row,
+            textvariable=self.problem_type,
+            values=tuple(PROBLEM_TYPE_LABELS.values()),
+            state="readonly",
+            width=42,
+        )
+        self.problem_type_selector.grid(row=0, column=1, sticky="w")
+        self.problem_type_label = ttk.Label(problem_row, wraplength=790)
+        self.problem_type_label.grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self.problem_type.trace_add("write", self.select_problem_type)
+        self.update_problem_type_description()
+        self.scientific_status = tk.StringVar(value="Statut scientifique : aucun résultat pour cette session.")
+        ttk.Label(outer, textvariable=self.scientific_status, wraplength=1040).pack(side="bottom", anchor="w", pady=(8, 0))
+        # Bound the long configuration area so launch actions and live output
+        # remain reachable even at the minimum supported window size.
+        configuration_area = ttk.Frame(outer)
+        configuration_area.pack(fill="x")
+        configuration_canvas = tk.Canvas(configuration_area, height=330, highlightthickness=0)
+        configuration_scroll = ttk.Scrollbar(configuration_area, orient="vertical", command=configuration_canvas.yview)
+        configuration_canvas.configure(yscrollcommand=configuration_scroll.set)
+        configuration_scroll.pack(side="right", fill="y")
+        configuration_canvas.pack(side="left", fill="x", expand=True)
+        configuration_content = ttk.Frame(configuration_canvas)
+        configuration_item = configuration_canvas.create_window((0, 0), window=configuration_content, anchor="nw")
+        configuration_content.bind("<Configure>", lambda event: configuration_canvas.configure(
+            scrollregion=configuration_canvas.bbox("all")))
+        def resize_configuration(event):
+            configuration_canvas.itemconfigure(configuration_item, width=event.width)
+            pending = list(configuration_content.winfo_children())
+            while pending:
+                widget = pending.pop()
+                pending.extend(widget.winfo_children())
+                if isinstance(widget, ttk.Label) and has_positive_wraplength(widget.cget("wraplength")):
+                    widget.configure(wraplength=max(300, event.width - 50))
+
+        configuration_canvas.bind("<Configure>", resize_configuration)
+        self.configuration_canvas = configuration_canvas
+        section_row = ttk.Frame(configuration_content)
+        section_row.pack(fill="x", pady=(0, 6))
+        ttk.Label(section_row, text="Section de configuration").pack(side="left", padx=(0, 10))
+        self.configuration_section = tk.StringVar()
+        section_selector = ttk.Combobox(section_row, textvariable=self.configuration_section, state="readonly", width=38)
+        section_selector.pack(side="left", fill="x", expand=True)
+        self.form_notebook = ttk.Notebook(configuration_content)
         self.form_notebook.pack(fill="x")
+        def select_section(event):
+            self.form_notebook.select(section_selector.current())
+
+        def selected_section_changed(event):
+            self.configuration_section.set(self.form_notebook.tab(self.form_notebook.select(), "text"))
+            configuration_canvas.yview_moveto(0)
+
+        section_selector.bind("<<ComboboxSelected>>", select_section)
+        self.form_notebook.bind("<<NotebookTabChanged>>", selected_section_changed)
         groups = {}
         self.variables = {}
         self.controls = {}
@@ -132,6 +219,8 @@ class SimulationApp:
                 frame.columnconfigure(1, weight=1)
                 self.form_notebook.add(frame, text=spec.group)
                 groups[spec.group] = (frame, 0)
+                if spec.group == "Problème":
+                    self.main_problem_tab = frame
             frame, row = groups[spec.group]
             ttk.Label(frame, text=spec.label).grid(row=row, column=0, sticky="w", padx=(0, 16), pady=4)
             variable = tk.BooleanVar(value=initial[spec.name]) if spec.kind == "bool" else tk.StringVar(value=initial[spec.name])
@@ -202,74 +291,121 @@ class SimulationApp:
             "isokinetic_omega": str(-2.0 * 3.141592653589793),
             "right_work_j_per_cycle": "", "right_equivalent_mean_torque_nm": "0.1",
             "left_work_j_per_cycle": "", "left_equivalent_mean_torque_nm": "0.1",
-            "resistance_pace_policy": "fixed", "resistance_pace_update_every_cycles": "10", "resistance_pace_capacity_gain": "1.0",
+            "resistance_pace_policy": "fixed", "resistance_pace_initial_split_policy": "manual",
+            "resistance_pace_update_every_cycles": "10", "resistance_pace_capacity_gain": "1.0",
             "resistance_pace_smoothing": "0.25", "resistance_pace_max_fraction_step": "0.10",
             "resistance_pace_minimum_arm_torque_nm": "0.0",
             "endurance_torque_upper_nm": "0.6", "endurance_torque_tolerance_nm": "0.02",
             "parametric_fatigue_weights": "false",
+            "muscle_weight_policy": "unit", "physio_update_every_cycles": "20",
+            "physio_update_smoothing": "0.2", "physio_update_max_log_step": "0.09531017980432493",
+            "physio_update_deadband_log": "0.009950330853168083",
+            "physio_update_min_relative_weight": "0.25", "physio_update_max_relative_weight": "4.0",
+            "right_solver_cpu": "Automatique", "left_solver_cpu": "Automatique",
             "factory": "cocofest.simulation.independent_arms_process:build_process_independent_arms", "right_runner_config": "", "left_runner_config": "",
             "output_root": f"gui-results/independent-arms-{datetime.now():%Y%m%d-%H%M%S}",
         }
         self.independent_arms_variables = {name: tk.StringVar(value=value) for name, value in arms_defaults.items()}
-        arm_labels = (
-            ("Solveur (même choix pour les deux bras)", "solver"),
-            ("Cycles exécutés", "cycles"), ("Cycles par fenêtre RHO", "cycles_per_window"),
-            ("Contrôles / stimulations par cycle", "stimulations_per_cycle"),
-            ("Vitesse imposée ω (rad/s, négative)", "isokinetic_omega"),
-            ("Bras droit : travail cible / cycle (J, optionnel)", "right_work_j_per_cycle"),
-            ("Bras droit : couple moyen équivalent τ̄ (N.m, optionnel)", "right_equivalent_mean_torque_nm"),
-            ("Bras gauche : travail cible / cycle (J, optionnel)", "left_work_j_per_cycle"),
-            ("Bras gauche : couple moyen équivalent τ̄ (N.m, optionnel)", "left_equivalent_mean_torque_nm"),
-            ("Répartition de résistance", "resistance_pace_policy"),
-            ("Mise à jour de répartition tous les N cycles", "resistance_pace_update_every_cycles"),
-            ("Retour capacité : gain", "resistance_pace_capacity_gain"),
-            ("Retour capacité : lissage [0,1]", "resistance_pace_smoothing"),
-            ("Retour capacité : pas max. de fraction [0,1]", "resistance_pace_max_fraction_step"),
-            ("Retour capacité : τ̄ minimal / bras (N.m)", "resistance_pace_minimum_arm_torque_nm"),
-            ("Endurance : borne haute τ total (N.m)", "endurance_torque_upper_nm"),
-            ("Endurance : tolérance τ total (N.m)", "endurance_torque_tolerance_nm"),
-            ("Poids de fatigue paramétriques (préserve le NLP compilé)", "parametric_fatigue_weights"),
-            ("Fabrique runtime (module:fonction, optionnel si les configs la déclarent)", "factory"),
-            ("Bras droit : configuration du modèle/worker (chemin ou référence)", "right_runner_config"),
-            ("Bras gauche : configuration du modèle/worker (chemin ou référence)", "left_runner_config"),
-            ("Dossier de résultats", "output_root"),
+        arm_sections = (
+            ("Tâche", "Même solveur IPOPT et même cadence imposée pour les deux OCPs.", (
+                ("Solveur (même choix pour les deux bras)", "solver"),
+                ("Cycles exécutés", "cycles"), ("Cycles par fenêtre RHO", "cycles_per_window"),
+                ("Contrôles / stimulations par cycle", "stimulations_per_cycle"),
+                ("Vitesse imposée ω (rad/s, négative)", "isokinetic_omega"),
+                ("Bras droit : travail cible / cycle (J, optionnel)", "right_work_j_per_cycle"),
+                ("Bras droit : couple moyen équivalent τ̄ (N.m, optionnel)", "right_equivalent_mean_torque_nm"),
+                ("Bras gauche : travail cible / cycle (J, optionnel)", "left_work_j_per_cycle"),
+                ("Bras gauche : couple moyen équivalent τ̄ (N.m, optionnel)", "left_equivalent_mean_torque_nm"),
+            )),
+            ("Répartition D/G", "La rétroaction capacité ne modifie que le travail demandé au prochain cycle; elle ne couple pas les deux OCPs.", (
+                ("Répartition de résistance", "resistance_pace_policy"),
+                ("Initialisation D/G (manuel ou capacité-fatigabilité après cycle 1)", "resistance_pace_initial_split_policy"),
+                ("Mise à jour de répartition tous les N cycles", "resistance_pace_update_every_cycles"),
+                ("Retour capacité : gain", "resistance_pace_capacity_gain"),
+                ("Retour capacité : lissage [0,1]", "resistance_pace_smoothing"),
+                ("Retour capacité : pas max. de fraction [0,1]", "resistance_pace_max_fraction_step"),
+                ("Retour capacité : τ̄ minimal / bras (N.m)", "resistance_pace_minimum_arm_torque_nm"),
+            )),
+            ("Coût musculaire", "Physio-U et l'ablation mécanique nécessitent des poids paramétriques et les mettent à jour entre cycles, sans reconstruire le NLP.", (
+                ("Poids de fatigue paramétriques (préserve le NLP compilé)", "parametric_fatigue_weights"),
+                ("Politique de poids musculaires", "muscle_weight_policy"),
+                ("Physio-U : mise à jour tous les N cycles", "physio_update_every_cycles"),
+                ("Physio-U : lissage [0,1]", "physio_update_smoothing"),
+                ("Physio-U : pas maximal log", "physio_update_max_log_step"),
+                ("Physio-U : seuil mort log", "physio_update_deadband_log"),
+                ("Physio-U : poids relatif minimal", "physio_update_min_relative_weight"),
+                ("Physio-U : poids relatif maximal", "physio_update_max_relative_weight"),
+            )),
+            ("Exécution & campagnes", "La recherche d'endurance est un outil de campagne; la fabrique runtime reste un réglage avancé.", (
+                ("CPU solveur bras droit", "right_solver_cpu"),
+                ("CPU solveur bras gauche", "left_solver_cpu"),
+                ("Endurance : borne haute τ total (N.m)", "endurance_torque_upper_nm"),
+                ("Endurance : tolérance τ total (N.m)", "endurance_torque_tolerance_nm"),
+                ("Fabrique runtime (module:fonction, optionnel si les configs la déclarent)", "factory"),
+                ("Bras droit : configuration du modèle/worker (chemin ou référence)", "right_runner_config"),
+                ("Bras gauche : configuration du modèle/worker (chemin ou référence)", "left_runner_config"),
+                ("Dossier de résultats", "output_root"),
+            )),
         )
-        for row, (label, name) in enumerate(arm_labels, 1):
-            ttk.Label(arms, text=label).grid(row=row, column=0, sticky="w", pady=3, padx=(0, 16))
-            if name == "solver":
-                control = ttk.Combobox(arms, textvariable=self.independent_arms_variables[name], state="readonly", width=34,
-                                       values=("ipopt", "acados"))
-            elif name == "resistance_pace_policy":
-                control = ttk.Combobox(arms, textvariable=self.independent_arms_variables[name], state="readonly", width=34,
-                                       values=("fixed", "capacity_feedback"))
-            elif name == "parametric_fatigue_weights":
-                control = ttk.Combobox(arms, textvariable=self.independent_arms_variables[name], state="readonly", width=34,
-                                       values=("false", "true"))
-            else:
-                control = ttk.Entry(arms, textvariable=self.independent_arms_variables[name], width=55)
-            control.grid(row=row, column=1, sticky="ew", pady=3)
-            if name == "output_root":
-                ttk.Button(arms, text="Parcourir…", command=lambda: self.browse_independent_arms("output_root")).grid(row=row, column=2, padx=(6, 0))
+        arm_form = ttk.Notebook(arms)
+        arm_form.grid(row=1, column=0, columnspan=3, sticky="ew")
+        self.independent_arms_controls = {}
+        for section, description, arm_labels in arm_sections:
+            page = ttk.Frame(arm_form, padding=10)
+            page.columnconfigure(1, weight=1)
+            arm_form.add(page, text=section)
+            ttk.Label(page, text=description, wraplength=930).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 7))
+            for row, (label, name) in enumerate(arm_labels, 1):
+                ttk.Label(page, text=label).grid(row=row, column=0, sticky="w", pady=3, padx=(0, 16))
+                if name == "solver":
+                    control = ttk.Combobox(page, textvariable=self.independent_arms_variables[name], state="readonly", width=34,
+                                           values=independent_solver_choices(arms_defaults["factory"]))
+                    self.independent_solver_control = control
+                elif name == "resistance_pace_policy":
+                    control = ttk.Combobox(page, textvariable=self.independent_arms_variables[name], state="readonly", width=34,
+                                           values=("fixed", "capacity_feedback"))
+                elif name == "resistance_pace_initial_split_policy":
+                    control = ttk.Combobox(page, textvariable=self.independent_arms_variables[name], state="readonly", width=34,
+                                           values=("manual", "capacity_fatigability_after_first_cycle"))
+                elif name == "parametric_fatigue_weights":
+                    control = ttk.Combobox(page, textvariable=self.independent_arms_variables[name], state="readonly", width=34,
+                                           values=("false", "true"))
+                elif name == "muscle_weight_policy":
+                    control = ttk.Combobox(page, textvariable=self.independent_arms_variables[name], state="readonly", width=34,
+                                           values=("unit", "physio_u", "mechanical_sensitivity_squared_v1_experimental"))
+                elif name in ("right_solver_cpu", "left_solver_cpu"):
+                    control = tk.OptionMenu(page, self.independent_arms_variables[name], "Automatique")
+                    self._solver_cpu_menus = getattr(self, "_solver_cpu_menus", {})
+                    self._solver_cpu_menus["right" if name.startswith("right") else "left"] = control
+                    control.configure(width=52)
+                else:
+                    control = ttk.Entry(page, textvariable=self.independent_arms_variables[name], width=55)
+                control.grid(row=row, column=1, sticky="ew", pady=3)
+                self.independent_arms_controls[name] = control
+                if name == "output_root":
+                    ttk.Button(page, text="Parcourir…", command=lambda: self.browse_independent_arms("output_root")).grid(row=row, column=2, padx=(6, 0))
         self.independent_arms_validation = ttk.Label(arms, wraplength=980, style="Error.TLabel")
-        self.independent_arms_validation.grid(row=len(arm_labels)+1, column=0, columnspan=3, sticky="w", pady=(7, 3))
+        self.independent_arms_validation.grid(row=2, column=0, columnspan=3, sticky="w", pady=(7, 3))
         arm_buttons = ttk.Frame(arms)
-        arm_buttons.grid(row=len(arm_labels)+2, column=0, columnspan=3, sticky="w")
+        arm_buttons.grid(row=3, column=0, columnspan=3, sticky="w")
         self.preview_independent_arms_button = ttk.Button(arm_buttons, text="Prévisualiser les deux bras", command=self.preview_independent_arms)
-        self.preview_independent_arms_button.pack(side="left")
+        self.preview_independent_arms_button.grid(row=0, column=0, sticky="w", padx=4, pady=3)
         self.start_independent_arms_button = ttk.Button(arm_buttons, text="Lancer les deux bras", command=self.start_independent_arms)
-        self.start_independent_arms_button.pack(side="left", padx=6)
+        self.start_independent_arms_button.grid(row=0, column=1, sticky="w", padx=4, pady=3)
+        ttk.Button(arm_buttons, text="Actualiser les CPU", command=self.refresh_solver_cpu_menus).grid(row=0, column=2, sticky="w", padx=4, pady=3)
         self.preview_endurance_button = ttk.Button(arm_buttons, text="Prévisualiser endurance 10 min", command=self.preview_endurance)
-        self.preview_endurance_button.pack(side="left", padx=6)
+        self.preview_endurance_button.grid(row=1, column=0, sticky="w", padx=4, pady=3)
         self.start_endurance_button = ttk.Button(arm_buttons, text="Lancer endurance 10 min", command=self.start_endurance)
-        self.start_endurance_button.pack(side="left", padx=6)
+        self.start_endurance_button.grid(row=1, column=1, sticky="w", padx=4, pady=3)
         self.start_endurance_search_button = ttk.Button(arm_buttons, text="Chercher τ maximal", command=self.start_endurance_search)
-        self.start_endurance_search_button.pack(side="left", padx=6)
+        self.start_endurance_search_button.grid(row=1, column=2, sticky="w", padx=4, pady=3)
         self.apply_independent_adjustment_button = ttk.Button(arm_buttons, text="Reporter la proposition", command=self.apply_independent_adjustment, state="disabled")
-        self.apply_independent_adjustment_button.pack(side="left", padx=6)
-        ttk.Button(arm_buttons, text="Charger requête…", command=self.load_independent_arms).pack(side="left")
-        ttk.Button(arm_buttons, text="Enregistrer requête…", command=self.save_independent_arms).pack(side="left", padx=6)
-        campaign = ttk.LabelFrame(outer, text="Recherche bayésienne des solveurs et configurations", padding=10)
-        campaign.pack(fill="x", pady=(10, 0))
+        self.apply_independent_adjustment_button.grid(row=2, column=0, sticky="w", padx=4, pady=3)
+        ttk.Button(arm_buttons, text="Charger requête…", command=self.load_independent_arms).grid(row=2, column=1, sticky="w", padx=4, pady=3)
+        ttk.Button(arm_buttons, text="Enregistrer requête…", command=self.save_independent_arms).grid(row=2, column=2, sticky="w", padx=4, pady=3)
+        self.refresh_solver_cpu_menus()
+        campaign = ttk.Frame(self.form_notebook, padding=10)
+        self.form_notebook.add(campaign, text="BO solveurs")
         campaign.columnconfigure(1, weight=1)
         campaign_defaults = {
             "bo_solvers": "ipopt, madnlp, fatrop", "bo_calls": "16", "bo_initial": "6",
@@ -307,8 +443,8 @@ class SimulationApp:
         self.preview_campaign_button.pack(side="left")
         self.start_campaign_button = ttk.Button(campaign_buttons, text="Lancer la BO", command=self.start_campaign)
         self.start_campaign_button.pack(side="left", padx=7)
-        muscle_campaign = ttk.LabelFrame(outer, text="BO parallèle des poids musculaires (Optuna)", padding=10)
-        muscle_campaign.pack(fill="x", pady=(10, 0))
+        muscle_campaign = ttk.Frame(self.form_notebook, padding=10)
+        self.form_notebook.add(muscle_campaign, text="BO poids musculaires")
         muscle_campaign.columnconfigure(1, weight=1)
         muscle_defaults = {
             "muscle_bo_names": "Delt_ant, Delt_post, Biceps, Triceps",
@@ -349,6 +485,8 @@ class SimulationApp:
         self.preview_muscle_campaign_button.pack(side="left")
         self.start_muscle_campaign_button = ttk.Button(muscle_buttons, text="Lancer le BO musculaire", command=self.start_muscle_campaign)
         self.start_muscle_campaign_button.pack(side="left", padx=7)
+        section_selector.configure(values=tuple(self.form_notebook.tab(tab, "text") for tab in self.form_notebook.tabs()))
+        self.configuration_section.set(self.form_notebook.tab(self.form_notebook.select(), "text"))
         runtime = ttk.Frame(outer)
         runtime.pack(fill="x", pady=(12, 6))
         ttk.Label(runtime, text="Environnement du solveur").pack(side="left", padx=(0, 12))
@@ -373,16 +511,53 @@ class SimulationApp:
         self.command_text = ScrolledText(lower, height=7, wrap="word", font=("Monospace", 9))
         self.log_text = ScrolledText(lower, height=7, wrap="word", font=("Monospace", 9))
         self.rollout_text = ScrolledText(lower, height=7, wrap="none", font=("Monospace", 9))
+        self.live_text = ScrolledText(lower, height=7, wrap="word", font=("Sans", 10))
+        self.set_text(self.live_text, "Aucune simulation lancée dans cette session.")
+        history = ttk.Frame(lower, padding=6)
+        history.columnconfigure(0, weight=1)
+        history.rowconfigure(0, weight=1)
+        history_columns = ("started_at", "kind", "solver", "formulation", "cycles", "controls", "cpu", "status", "output_root")
+        self.campaign_history_table = ttk.Treeview(history, columns=history_columns, show="headings", height=10)
+        headings = {
+            "started_at": "Lancé", "kind": "Type", "solver": "Solveur", "formulation": "Formulation",
+            "cycles": "Cycles", "controls": "Contrôles", "cpu": "CPU", "status": "État", "output_root": "Dossier",
+        }
+        widths = {"started_at": 145, "kind": 145, "solver": 75, "formulation": 105, "cycles": 65,
+                  "controls": 90, "cpu": 105, "status": 90, "output_root": 360}
+        for column in history_columns:
+            self.campaign_history_table.heading(column, text=headings[column])
+            self.campaign_history_table.column(column, width=widths[column], anchor="w", stretch=column == "output_root")
+        history_scroll_y = ttk.Scrollbar(history, orient="vertical", command=self.campaign_history_table.yview)
+        history_scroll_x = ttk.Scrollbar(history, orient="horizontal", command=self.campaign_history_table.xview)
+        self.campaign_history_table.configure(yscrollcommand=history_scroll_y.set, xscrollcommand=history_scroll_x.set)
+        self.campaign_history_table.grid(row=0, column=0, sticky="nsew")
+        history_scroll_y.grid(row=0, column=1, sticky="ns")
+        history_scroll_x.grid(row=1, column=0, sticky="ew")
+        ttk.Button(history, text="Actualiser", command=self.refresh_campaign_history).grid(row=2, column=0, sticky="w", pady=(6, 0))
+        history_actions = ttk.Frame(history)
+        history_actions.grid(row=3, column=0, sticky="w", pady=(6, 0))
+        ttk.Button(history_actions, text="Détails de la campagne", command=self.show_campaign_details).pack(side="left")
+        ttk.Button(history_actions, text="Figures de la campagne sélectionnée", command=self.analyze_history).pack(side="left", padx=6)
+        analysis = ttk.Frame(lower, padding=8)
+        ttk.Label(analysis, text="Figures descriptives : temps de résolution, capacité/fatigue, travail et PW/forces lorsque les exports sont disponibles.\n"
+                  "Les figures n'effectuent pas de certification dynamique. Les échecs de résolution sont marqués en rouge.",
+                  wraplength=970).pack(anchor="w")
+        ttk.Button(analysis, text="Analyser la simulation courante", command=self.analyze_active_run).pack(anchor="w", pady=6)
+        ttk.Button(analysis, text="Analyser un dossier de résultats…", command=self.analyze_folder).pack(anchor="w")
+        self.analysis_status = tk.StringVar(value="Les images PNG seront enregistrées dans gui-analysis/ du dossier choisi.")
+        ttk.Label(analysis, textvariable=self.analysis_status, wraplength=970).pack(anchor="w", pady=6)
         lower.add(self.summary_text, text="Résumé scientifique")
+        lower.add(self.live_text, text="Suivi de simulation")
         lower.add(self.command_text, text="Commande et environnement")
         lower.add(self.log_text, text="Journal en direct")
         lower.add(self.rollout_text, text="Matrice des replays")
+        lower.add(history, text="Campagnes lancées")
+        lower.add(analysis, text="Figures des solutions")
         self.lower = lower
-        self.scientific_status = tk.StringVar(value="Statut scientifique : aucun résultat pour cette session.")
-        ttk.Label(outer, textvariable=self.scientific_status, wraplength=1040).pack(anchor="w", pady=(8, 0))
         for variable in self.variables.values():
             variable.trace_add("write", self.validate)
             variable.trace_add("write", self.validate_muscle_campaign)
+        self.variables["bilateral_reduced"].trace_add("write", self.sync_problem_type_from_main_form)
         for variable in self.campaign_variables.values():
             variable.trace_add("write", self.validate_campaign)
         for variable in self.muscle_campaign_variables.values():
@@ -398,6 +573,7 @@ class SimulationApp:
         self.validate_muscle_campaign()
         self.validate_rollout()
         self.validate_independent_arms()
+        self.refresh_campaign_history()
         window.after(100, self.poll)
 
     @staticmethod
@@ -410,6 +586,44 @@ class SimulationApp:
 
     def current_config(self):
         return config_from_form({key: variable.get() for key, variable in self.variables.items()}, self.config)
+
+    def selected_problem_type(self):
+        """Return the architecture identifier selected in the top-level menu."""
+        try:
+            return PROBLEM_TYPE_BY_LABEL[self.problem_type.get()]
+        except KeyError as error:
+            raise ValueError("Type de problème GUI inconnu.") from error
+
+    def update_problem_type_description(self):
+        problem_type = PROBLEM_TYPE_BY_LABEL.get(self.problem_type.get(), UNILATERAL)
+        self.problem_type_label.configure(text=PROBLEM_TYPE_DESCRIPTIONS[problem_type])
+
+    def select_problem_type(self, *_):
+        """Navigate without pretending that the three architectures are interchangeable."""
+        problem_type = self.selected_problem_type()
+        self.update_problem_type_description()
+        if problem_type == INDEPENDENT_ARMS:
+            if hasattr(self, "independent_arms_tab"):
+                self.form_notebook.select(self.independent_arms_tab)
+            return
+        # The main-form representations share the same request schema.  Only
+        # their explicit mechanical architecture flag changes here; no muscle
+        # weights, objective, seed, or independent-arm request is copied.
+        if hasattr(self, "variables"):
+            self.variables["bilateral_reduced"].set(problem_type == BILATERAL_COMBINED)
+            if problem_type == BILATERAL_COMBINED and self.variables["formulation"].get() == "isokinetic":
+                self.variables["formulation"].set("dynamic")
+            if hasattr(self, "main_problem_tab"):
+                self.form_notebook.select(self.main_problem_tab)
+
+    def sync_problem_type_from_main_form(self, *_):
+        """Keep the architecture menu honest when the advanced checkbox is edited."""
+        if self.selected_problem_type() == INDEPENDENT_ARMS:
+            return
+        selected = BILATERAL_COMBINED if self.variables["bilateral_reduced"].get() else UNILATERAL
+        label = PROBLEM_TYPE_LABELS[selected]
+        if self.problem_type.get() != label:
+            self.problem_type.set(label)
 
     def current_rollout(self):
         fields = self.rollout_variables
@@ -440,6 +654,13 @@ class SimulationApp:
             if raw not in {"true", "false"}:
                 raise ValueError(f"{name} doit être true ou false.")
             return raw == "true"
+        def solver_cpu(name):
+            raw = fields[name].get().strip()
+            if raw == "Automatique":
+                return None
+            if not raw.startswith("CPU "):
+                raise ValueError(f"{name} doit être 'Automatique' ou 'CPU N'.")
+            return int(raw[4:])
         return IndependentArmsGuiConfig(
             solver=fields["solver"].get().strip(), cycles=int(fields["cycles"].get()),
             cycles_per_window=int(fields["cycles_per_window"].get()),
@@ -450,25 +671,188 @@ class SimulationApp:
             right_equivalent_mean_torque_nm=optional_float("right_equivalent_mean_torque_nm"),
             left_equivalent_mean_torque_nm=optional_float("left_equivalent_mean_torque_nm"),
             resistance_pace_policy=fields["resistance_pace_policy"].get().strip(),
+            resistance_pace_initial_split_policy=fields["resistance_pace_initial_split_policy"].get().strip(),
             resistance_pace_update_every_cycles=int(fields["resistance_pace_update_every_cycles"].get()),
             resistance_pace_capacity_gain=float(fields["resistance_pace_capacity_gain"].get()),
             resistance_pace_smoothing=float(fields["resistance_pace_smoothing"].get()),
             resistance_pace_max_fraction_step=float(fields["resistance_pace_max_fraction_step"].get()),
             resistance_pace_minimum_arm_torque_nm=float(fields["resistance_pace_minimum_arm_torque_nm"].get()),
             parametric_fatigue_weights=boolean("parametric_fatigue_weights"),
+            muscle_weight_policy=fields["muscle_weight_policy"].get().strip(),
+            physio_update_every_cycles=int(fields["physio_update_every_cycles"].get()),
+            physio_update_smoothing=float(fields["physio_update_smoothing"].get()),
+            physio_update_max_log_step=float(fields["physio_update_max_log_step"].get()),
+            physio_update_deadband_log=float(fields["physio_update_deadband_log"].get()),
+            physio_update_min_relative_weight=float(fields["physio_update_min_relative_weight"].get()),
+            physio_update_max_relative_weight=float(fields["physio_update_max_relative_weight"].get()),
+            right_solver_cpu=solver_cpu("right_solver_cpu"),
+            left_solver_cpu=solver_cpu("left_solver_cpu"),
             factory=optional_text("factory"),
             right_runner_config=optional_text("right_runner_config"),
             left_runner_config=optional_text("left_runner_config"),
             output_root=fields["output_root"].get().strip(),
         ).validate()
 
+    def refresh_solver_cpu_menus(self):
+        """Refresh per-arm CPU menus and disable dedicated CPUs used elsewhere."""
+        menus = getattr(self, "_solver_cpu_menus", None)
+        if not menus:
+            return
+        reserved = reserved_cpu_ids()
+        selected = {}
+        for side in ("right", "left"):
+            raw = self.independent_arms_variables[f"{side}_solver_cpu"].get().strip()
+            selected[side] = None if raw == "Automatique" else int(raw.removeprefix("CPU "))
+        # A CPU selected for one arm is unavailable to the other arm immediately.
+        for side, widget in menus.items():
+            variable = self.independent_arms_variables[f"{side}_solver_cpu"]
+            other = selected["left" if side == "right" else "right"]
+            menu = self.window.nametowidget(widget["menu"])
+            menu.delete(0, "end")
+            menu.add_command(label="Automatique", command=self.tk._setit(variable, "Automatique", self._on_solver_cpu_change))
+            disabled = reserved | ({other} if other is not None else set())
+            for cpu in available_cpu_ids():
+                label = f"CPU {cpu}"
+                menu.add_command(label=label, command=self.tk._setit(variable, label, self._on_solver_cpu_change),
+                                 state="disabled" if cpu in disabled else "normal")
+            menu.configure(postcommand=self.refresh_solver_cpu_menus)
+
+    def _on_solver_cpu_change(self, _value):
+        self.refresh_solver_cpu_menus()
+        self.validate_independent_arms()
+
+    def record_campaign_launch(self, *, kind, solver, formulation, cycles, controls, cpu, output_root):
+        """Persist a concise launch receipt only after the child process exists."""
+        self.active_history_id = self.campaign_history.add(
+            kind=str(kind), solver=str(solver), formulation=str(formulation), cycles=str(cycles),
+            controls=str(controls), cpu=str(cpu), output_root=str(output_root),
+        )
+        self.refresh_campaign_history()
+        root = Path(output_root).expanduser()
+        if not root.is_absolute():
+            root = ROOT / root
+        self._live_artifacts = LiveArtifacts(root)
+        self._live_started_at = time.monotonic()
+        self._live_finished_at = None
+        self._next_live_update = 0
+
+    def refresh_campaign_history(self):
+        table = getattr(self, "campaign_history_table", None)
+        if table is None:
+            return
+        table.delete(*table.get_children())
+        for entry in reversed(self.campaign_history.entries()):
+            table.insert("", "end", iid=entry.get("id"), values=tuple(str(entry.get(column, "")) for column in table["columns"]))
+
+    def selected_campaign(self):
+        selected = self.campaign_history_table.selection()
+        return next((entry for entry in self.campaign_history.entries() if selected and entry.get("id") == selected[0]), None)
+
+    def show_campaign_details(self):
+        from tkinter import messagebox
+        entry = self.selected_campaign()
+        if entry is None:
+            messagebox.showinfo("Campagne", "Sélectionnez une campagne dans le tableau.", parent=self.window)
+            return
+        self.set_text(self.summary_text, json.dumps(entry, indent=2, ensure_ascii=False))
+        self.lower.select(self.summary_text)
+
+    def analyze_history(self):
+        entry = self.selected_campaign()
+        if entry is not None:
+            self.request_analysis(Path(entry["output_root"]))
+
+    def analyze_active_run(self):
+        if self.active_plan is not None and self.active_plan.result_json is not None:
+            self.request_analysis(self.active_plan.result_json.parent)
+        else:
+            self.analysis_status.set("Lancez une simulation ou choisissez un dossier de résultats.")
+
+    def analyze_folder(self):
+        from tkinter import filedialog
+        selected = filedialog.askdirectory(parent=self.window, title="Dossier de résultats de simulation")
+        if selected:
+            self.request_analysis(Path(selected))
+
+    def request_analysis(self, root):
+        if self._analysis_busy:
+            return
+        root = Path(root).expanduser()
+        if not root.is_absolute():
+            root = ROOT / root
+        self._analysis_busy = True
+        self.analysis_status.set("Génération des figures en cours…")
+        def work():
+            try:
+                self._analysis_results.put((generate_analysis_figures(root), None))
+            except Exception as error:
+                self._analysis_results.put(([], f"{type(error).__name__}: {error}"))
+        threading.Thread(target=work, name="gui-analysis", daemon=True).start()
+
+    def poll_analysis(self):
+        try:
+            paths, error = self._analysis_results.get_nowait()
+        except queue.Empty:
+            return
+        self._analysis_busy = False
+        if error:
+            self.analysis_status.set(error)
+            return
+        self.analysis_status.set("Figures enregistrées : " + ", ".join(str(path) for path in paths))
+        popup = self.tk.Toplevel(self.window)
+        popup.title("Analyse des solutions")
+        notebook = self.ttk.Notebook(popup)
+        notebook.pack(fill="both", expand=True)
+        popup._figure_images = []
+        for path in paths:
+            image = self.tk.PhotoImage(file=str(path))
+            factor = max(1, (image.width() + 999) // 1000, (image.height() + 649) // 650)
+            image = image.subsample(factor, factor)
+            popup._figure_images.append(image)
+            frame = self.ttk.Frame(notebook)
+            self.ttk.Label(frame, image=image).pack()
+            self.ttk.Label(frame, text=str(path), wraplength=1000).pack()
+            notebook.add(frame, text=path.stem)
+
+    def refresh_independent_arms_sections(self):
+        """Expose only the controls applicable to the selected two-arm policy."""
+        fields = self.independent_arms_variables
+        controls = self.independent_arms_controls
+        adaptive_weights = fields["muscle_weight_policy"].get().strip() != "unit"
+        if adaptive_weights and fields["parametric_fatigue_weights"].get() != "true":
+            # Physio-U rewrites numeric objective parameters between cycles;
+            # without this contract it would rebuild the compiled NLP.
+            fields["parametric_fatigue_weights"].set("true")
+        controls["parametric_fatigue_weights"].configure(state="disabled" if adaptive_weights else "readonly")
+        for name in (
+            "physio_update_every_cycles", "physio_update_smoothing", "physio_update_max_log_step",
+            "physio_update_deadband_log", "physio_update_min_relative_weight", "physio_update_max_relative_weight",
+        ):
+            controls[name].configure(state="normal" if adaptive_weights else "disabled")
+        capacity_feedback = fields["resistance_pace_policy"].get().strip() == "capacity_feedback"
+        for name in (
+            "resistance_pace_update_every_cycles", "resistance_pace_capacity_gain",
+            "resistance_pace_smoothing", "resistance_pace_max_fraction_step",
+            "resistance_pace_minimum_arm_torque_nm",
+        ):
+            controls[name].configure(state="normal" if capacity_feedback else "disabled")
+
     def validate_independent_arms(self, *_):
+        self.refresh_independent_arms_sections()
+        self.independent_solver_control.configure(values=independent_solver_choices(
+            self.independent_arms_variables["factory"].get().strip() or None))
         try:
             config = self.current_independent_arms()
+            occupied = reserved_cpu_ids()
+            selected = {cpu for cpu in (config.right_solver_cpu, config.left_solver_cpu) if cpu is not None}
+            conflict = sorted(selected & occupied)
+            if conflict:
+                raise ValueError(f"CPU déjà réservé par un processus actif : {', '.join(map(str, conflict))}.")
             right, left = config.target_work_j("right"), config.target_work_j("left")
             self.independent_arms_validation.configure(
                 text=(f"Deux problèmes isocinétiques indépendants · Wdroite={right:.6g} J/tour · "
                       f"Wgauche={left:.6g} J/tour · exécution indépendante. "
+                      f"Poids musculaires : {config.muscle_weight_policy}. "
                       "Le couple instantané est calculé par le coordinateur, non prescrit ici."),
                 style="Success.TLabel")
             valid = not self.process.running
@@ -477,7 +861,9 @@ class SimulationApp:
             valid = False
         self.preview_independent_arms_button.configure(state="normal" if valid else "disabled")
         self.start_independent_arms_button.configure(state="normal" if valid else "disabled")
-        endurance_valid = valid and config.solver == "ipopt" and config.cycles_per_window == 1 and config.resistance_pace_policy == "capacity_feedback"
+        endurance_valid = (valid and config.solver == "ipopt" and config.cycles_per_window == 1
+                           and config.resistance_pace_policy == "capacity_feedback"
+                           and config.muscle_weight_policy == "unit")
         self.preview_endurance_button.configure(state="normal" if endurance_valid else "disabled")
         self.start_endurance_button.configure(state="normal" if endurance_valid else "disabled")
         self.start_endurance_search_button.configure(state="normal" if endurance_valid else "disabled")
@@ -485,8 +871,10 @@ class SimulationApp:
     def current_endurance_campaign(self):
         """Translate the two-arm form into one certified 600-cycle candidate."""
         config = self.current_independent_arms()
-        if config.solver != "ipopt" or config.cycles_per_window != 1 or config.resistance_pace_policy != "capacity_feedback":
-            raise ValueError("L'endurance 10 min exige IPOPT, fenêtres RHO d'un cycle et retour capacité.")
+        if (config.solver != "ipopt" or config.cycles_per_window != 1
+                or config.resistance_pace_policy != "capacity_feedback"
+                or config.muscle_weight_policy != "unit"):
+            raise ValueError("L'endurance 10 min exige IPOPT, fenêtres RHO d'un cycle, retour capacité et poids unitaires ; Physio-U se lance actuellement via « Lancer les deux bras ».")
         runtime = config.to_runtime_dict()
         runtime["runtime_prefix"] = str(Path(self.prefix.get()).expanduser())
         total = runtime["right_equivalent_mean_torque_nm"] + runtime["left_equivalent_mean_torque_nm"]
@@ -542,6 +930,10 @@ class SimulationApp:
             prefix = Path(self.prefix.get()).expanduser()
             plan = LaunchPlan(tuple(command), ROOT, {}, "rho32", None)
             self.process.start(plan, runtime_helpers().base_environment(prefix, "rho32", 1, 1), path.with_suffix(".log"))
+            config = self.current_independent_arms()
+            self.record_campaign_launch(kind="Endurance bilatérale", solver="ipopt", formulation="isocinétique",
+                                        cycles="600", controls=config.stimulations_per_cycle, cpu="automatique",
+                                        output_root=campaign.output_root)
             self.active_plan, self.active_config, self.active_campaign = plan, None, campaign
             self.active_rollout, self.active_independent_arms = None, None
             self._completion_shown = False
@@ -569,6 +961,10 @@ class SimulationApp:
             command = (str(prefix / "bin/python"), "-m", "cocofest.simulation.bilateral_endurance_runner", "--campaign", str(path))
             plan = LaunchPlan(command, ROOT, {}, "rho32", None)
             self.process.start(plan, runtime_helpers().base_environment(prefix, "rho32", 1, 1), path.with_suffix(".log"))
+            config = self.current_independent_arms()
+            self.record_campaign_launch(kind="Recherche endurance", solver="ipopt", formulation="isocinétique",
+                                        cycles="≤600", controls=config.stimulations_per_cycle, cpu="automatique",
+                                        output_root=campaign.output_root)
             self.active_plan, self.active_config, self.active_campaign = plan, None, campaign
             self.active_rollout, self.active_independent_arms = None, None
             self._completion_shown = False
@@ -595,7 +991,11 @@ class SimulationApp:
             config = IndependentArmsGuiConfig.from_json(Path(selected).read_text(encoding="utf-8"))
             for name, variable in self.independent_arms_variables.items():
                 value = getattr(config, name)
-                variable.set("" if value is None else str(value))
+                if name in ("right_solver_cpu", "left_solver_cpu"):
+                    variable.set("Automatique" if value is None else f"CPU {value}")
+                else:
+                    variable.set("" if value is None else str(value))
+            self.refresh_solver_cpu_menus()
         except (ValueError, TypeError, OSError) as error:
             messagebox.showerror("Requête deux-bras illisible", str(error), parent=self.window)
 
@@ -648,6 +1048,11 @@ class SimulationApp:
             request.write_text(json.dumps(config.to_runtime_dict(), indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
             environment = runtime_helpers().base_environment(prefix, plan.suite, 1, 1)
             self.process.start(plan, environment, plan.result_json.parent / "gui-run.log")
+            self.record_campaign_launch(kind="Deux bras indépendants", solver=config.solver, formulation=config.formulation,
+                                        cycles=config.cycles, controls=config.stimulations_per_cycle,
+                                        cpu=(f"D:{config.right_solver_cpu} G:{config.left_solver_cpu}"
+                                             if config.right_solver_cpu is not None else "automatique"),
+                                        output_root=config.output_root)
             self.active_plan, self.active_config, self.active_campaign, self.active_rollout = plan, None, None, None
             self.active_independent_arms = config
             self._completion_shown = False
@@ -755,6 +1160,8 @@ class SimulationApp:
                 raise FileNotFoundError(f"Environnement absent : {prefix}")
             environment = runtime_helpers().base_environment(prefix, plan.suite, 1, 1)
             self.process.start(plan, environment, plan.result_json.parent / "gui-run.log")
+            self.record_campaign_launch(kind="Rejeu croisé", solver="sans NLP", formulation="propagation",
+                                        cycles=config.cycles, controls="—", cpu="automatique", output_root=config.output_root)
             self.active_plan, self.active_config, self.active_campaign, self.active_rollout = plan, None, None, config
             self.active_independent_arms = None
             self._completion_shown = False
@@ -869,6 +1276,10 @@ class SimulationApp:
             plan = LaunchPlan(tuple(command), ROOT, {}, "rho32", None)
             environment = runtime_helpers().base_environment(prefix, "rho32", 1, 1)
             self.process.start(plan, environment, config_path.with_suffix(".log"))
+            base = self.current_config()
+            self.record_campaign_launch(kind="BO solveur", solver=", ".join(campaign.solvers), formulation=base.formulation,
+                                        cycles=base.cycles, controls=base.stimulations_per_cycle, cpu="selon essai",
+                                        output_root=campaign.output_root)
             self.active_plan, self.active_config, self.active_campaign = plan, None, campaign
             self.active_rollout = None
             self.active_independent_arms = None
@@ -955,6 +1366,10 @@ class SimulationApp:
             plan = LaunchPlan(tuple(command), ROOT, {}, "rho32", None)
             environment = runtime_helpers().base_environment(prefix, "rho32", 1, 1)
             self.process.start(plan, environment, config_path.with_suffix(".log"))
+            base = self.current_config()
+            self.record_campaign_launch(kind="BO poids musculaires", solver=base.solver, formulation=base.formulation,
+                                        cycles=campaign.max_cycles, controls=base.stimulations_per_cycle,
+                                        cpu=f"{campaign.workers} workers", output_root=campaign.output_root)
             self.active_plan, self.active_config, self.active_campaign = plan, None, campaign
             self.active_rollout = None
             self.active_independent_arms = None
@@ -979,6 +1394,9 @@ class SimulationApp:
 
     def apply_config(self, config):
         self.config = config
+        # Loading a main-form JSON must leave the independent-arm page: that
+        # JSON has no independent-arm semantics or per-side target state.
+        self.problem_type.set(PROBLEM_TYPE_LABELS[main_problem_type(config)])
         for name, value in form_values(config).items():
             self.variables[name].set(value)
         self.detect_runtime()
@@ -1037,6 +1455,9 @@ class SimulationApp:
             environment = runtime_helpers().base_environment(prefix, plan.suite, config.threads, config.numeric_threads)
             environment.update(plan.environment_updates)
             self.process.start(plan, environment, plan.result_json.parent / "gui-run.log")
+            self.record_campaign_launch(kind=config.mode.upper(), solver=config.solver, formulation=config.formulation,
+                                        cycles=config.cycles, controls=config.stimulations_per_cycle,
+                                        cpu=f"{config.threads} thread(s)", output_root=plan.result_json.parent)
             self.active_plan, self.active_config, self.active_campaign = plan, config, None
             self.active_rollout = None
             self.active_independent_arms = None
@@ -1055,10 +1476,22 @@ class SimulationApp:
 
     def stop(self):
         self.process.stop()
+        self.campaign_history.set_status(self.active_history_id, "arrêt demandé")
+        self.refresh_campaign_history()
         self.process_status.set("Processus : arrêt demandé…")
         self.stop_button.configure(state="disabled")
 
     def poll(self):
+        self.poll_analysis()
+        if self._live_artifacts is not None and time.monotonic() >= self._next_live_update:
+            self._next_live_update = time.monotonic() + 1.0
+            if not self.process.running and self._live_finished_at is None:
+                self._live_finished_at = time.monotonic()
+            elapsed = (self._live_finished_at or time.monotonic()) - self._live_started_at
+            pid = getattr(self.process.process, "pid", "—")
+            state = "en cours" if self.process.running else "inactif"
+            self.set_text(self.live_text, f"Processus {state} · PID {pid} · temps écoulé {elapsed:.1f} s\n\n" +
+                          self._live_artifacts.update() + "\n\nLes métriques sont celles publiées par le moteur ; la durée écoulée inclut initialisation et compilation.")
         lines = self.process.drain()
         if lines:
             self.log_text.configure(state="normal")
@@ -1073,6 +1506,9 @@ class SimulationApp:
             self._completion_shown = True
             self.process_status.set(f"Processus : terminé, code {returncode}")
             self.stop_button.configure(state="disabled")
+            status = "processus terminé (validation à consulter)" if returncode == 0 else ("arrêtée" if self.process.stop_requested_at is not None else f"échec ({returncode})")
+            self.campaign_history.set_status(self.active_history_id, status)
+            self.refresh_campaign_history()
             try:
                 if self.active_campaign is not None:
                     summary = "Campagne terminée : consultez summary.json et le dossier trials de la campagne."
@@ -1107,10 +1543,21 @@ class SimulationApp:
 
     def close(self):
         # Closing this task's GUI also stops its child process tree.
-        self._closing = True
+        if self._closing:
+            return
         if self.process.running:
+            from tkinter import messagebox
+            if not messagebox.askyesno(
+                "Simulation en cours",
+                "Une simulation est en cours. Fermer la fenêtre arrêtera cette simulation.\n\n"
+                "Arrêter la simulation et fermer ?",
+                parent=self.window,
+            ):
+                return
+            self._closing = True
             self.stop()
         else:
+            self._closing = True
             self.window.destroy()
 
 

@@ -21,28 +21,29 @@ FORM_FIELDS = (
     FieldSpec("mode", "Stratégie", "Problème", "choice"),
     FieldSpec("solver", "Solveur", "Problème", "choice"),
     FieldSpec("mechanics", "Mécanique", "Problème", "choice"),
-    FieldSpec("bilateral_reduced", "Modèle réduit bilatéral (droite/gauche)", "Problème", "bool"),
+    FieldSpec("bilateral_reduced", "Deux bras combinés : manivelle mécanique unique", "Problème", "bool"),
     FieldSpec("formulation", "Dynamique (dynamic = cadence libre)", "Problème", "choice"),
     FieldSpec("cycles", "Cycles exécutés", "Problème"),
     FieldSpec("cycles_per_window", "Cycles par fenêtre RHO", "Problème"),
     FieldSpec("stimulations_per_cycle", "Contrôles / stimulations par cycle", "Problème"),
     FieldSpec("signed_crank_torque", "Couple signé (N.m)", "Problème"),
-    FieldSpec("pulse_width_max_step_us", "ΔPW entre contrôles successifs (µs, vide = aucun)", "Problème"),
-    FieldSpec("pulse_width_slew_weight", "Poids quadratique ΔPW intra-fenêtre (0 = désactivé)", "Problème"),
-    FieldSpec("pulse_width_slew_reference_us", "Référence de normalisation ΔPW (µs)", "Problème"),
+    FieldSpec("pulse_width_max_step_us", "ΔPW entre contrôles successifs (µs, vide = aucun)", "Contraintes avancées"),
+    FieldSpec("pulse_width_slew_formulation", "Formulation ΔPW (direct = sans états ajoutés)", "Contraintes avancées", "choice"),
+    FieldSpec("pulse_width_slew_weight", "Poids quadratique ΔPW intra-fenêtre (0 = désactivé)", "Contraintes avancées"),
+    FieldSpec("pulse_width_slew_reference_us", "Référence de normalisation ΔPW (µs)", "Contraintes avancées"),
     FieldSpec(
         "reduced_internal_crank_velocity_guard",
         "Guard vitesse interne réduite",
-        "Problème",
+        "Contraintes avancées",
         "choice",
     ),
     FieldSpec(
         "reduced_terminal_half_step_velocity_guard",
-        "Guard demi-pas terminal réduit (raccord RHO)",
-        "Problème",
+        "Cadence au demi-pas suivant (prédiction terminale RHO)",
+        "Contraintes avancées",
         "bool",
     ),
-    FieldSpec("terminal_q_slack", "Tolérance angle terminal (rad)", "Problème"),
+    FieldSpec("terminal_q_slack", "Tolérance angle terminal (rad)", "Contraintes avancées"),
     FieldSpec("integration", "Transcription / intégration", "Solveur", "choice"),
     FieldSpec("collocation_degree", "Degré Radau / IRK IPOPT", "Solveur"),
     FieldSpec("ipopt_enforce_start_constraints", "IPOPT : contraintes historiques au nœud initial", "Solveur", "bool"),
@@ -73,6 +74,7 @@ FORM_FIELDS = (
     FieldSpec("numeric_threads", "Threads bibliothèques numériques", "Exécution"),
     FieldSpec("output_root", "Dossier de sortie", "Exécution", "directory"),
     FieldSpec("acados_ipopt_cycle1_seed", "ACADOS : seed IPOPT exact du cycle 1", "Exécution", "file"),
+    FieldSpec("common_initial_solution", "Seed commun certifié (.npz, IPOPT / MadNLP)", "Exécution", "file"),
     FieldSpec("model_config", "Configuration musculaire JSON (optionnelle)", "Exécution", "file"),
     FieldSpec("weights_config", "Poids Physio / PACE et provenance (JSON)", "Exécution", "file"),
     FieldSpec("dry_run", "Prévisualisation seulement", "Exécution", "bool"),
@@ -147,14 +149,27 @@ def scientific_summary(config: SimulationConfig) -> str:
         if config.ipopt_ding_local_reduction else ""
     )
     sides = " · bilatéral" if config.bilateral_reduced else ""
+    guard = "actif" if CapabilityRegistry.effective_reduced_velocity_guard(config) else "inactif"
+    terminal_guard = (
+        "\nRaccord RHO : borne de cadence sur une prédiction Euler au demi-pas suivant ; "
+        "ce contrôle local ne certifie pas toutes les contraintes du cycle suivant."
+        if config.reduced_terminal_half_step_velocity_guard else ""
+    )
+    common_seed = (
+        f"\nComparaison : seed commun certifié {config.common_initial_solution}. "
+        "Il doit correspondre au modèle, à la transcription, aux contrôles et aux contraintes ; "
+        "sa provenance et sa compatibilité sont revérifiées par le moteur."
+        if config.common_initial_solution and config.solver != "acados" else ""
+    )
     return (f"{config.mode.upper()} · {config.solver.upper()} · mécanique {config.mechanics}{sides} · {dynamics}\n"
             f"{config.cycles} cycles exécutés · fenêtre de {window} cycle(s) · "
             f"{config.stimulations_per_cycle} contrôles par cycle\n"
             f"Couple signé {config.signed_crank_torque:g} N.m (positif = résistance si ω < 0)\n"
             f"{slew} ; contrôles successifs, y compris le raccord entre RHO\n"
+            f"Formulation ΔPW : {config.pulse_width_slew_formulation} ; guard vitesse interne {guard}\n"
             f"Coût ΔPW intra-fenêtre : poids {config.pulse_width_slew_weight:g}, référence {config.pulse_width_slew_reference_us:g} µs ; raccord RHO seulement borné\n"
             "ACADOS : seed IPOPT du cycle 1 obligatoire ; provenance et compatibilité revérifiées par le moteur."
-            + reduction + ipopt_reduction)
+            + terminal_guard + reduction + ipopt_reduction + common_seed)
 
 
 def result_summary(payload, requested_cycles: int) -> str:

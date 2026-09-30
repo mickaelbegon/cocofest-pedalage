@@ -37,7 +37,7 @@ _GROUPS = {
                 "isokinetic_omega energy_equivalent_torque load_torque_min load_torque_max weights_config model_config",
     "transcription": "mode cycles_per_window integration collocation_degree ipopt_enforce_start_constraints "
                      "acados_sim_stages acados_sim_steps acados_ding_local_reduction ipopt_ding_local_reduction "
-                     "pulse_width_max_step_us pulse_width_slew_weight pulse_width_slew_reference_us "
+                     "pulse_width_max_step_us pulse_width_slew_formulation pulse_width_slew_weight pulse_width_slew_reference_us "
                      "reduced_internal_crank_velocity_guard reduced_terminal_half_step_velocity_guard "
                      "terminal_q_slack",
     "solver": "solver ipopt_linear_solver madnlp_linear_solver acados_qp_solver compile_evaluators "

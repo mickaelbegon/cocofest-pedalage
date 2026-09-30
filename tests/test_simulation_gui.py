@@ -18,9 +18,16 @@ from cocofest.simulation.gui_model import (
 )
 from cocofest.simulation.bayesian_model import BayesianCampaignConfig, campaign_summary
 from cocofest.simulation.bayesian_runner import FAILURE_PENALTY, _metric
-from cocofest.simulation.gui import muscle_weight_campaign, muscle_weight_search_space
+from cocofest.simulation.gui import has_positive_wraplength, muscle_weight_campaign, muscle_weight_search_space
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize(("value", "expected"), [
+    ("", False), (None, False), ("not-a-number", False), (0, False), ("120", True),
+])
+def test_has_positive_wraplength_accepts_labels_without_a_wraplength(value, expected):
+    assert has_positive_wraplength(value) is expected
 
 
 def test_form_roundtrip_preserves_all_configuration_fields():
@@ -29,6 +36,21 @@ def test_form_roundtrip_preserves_all_configuration_fields():
     assert config_from_form(form_values(config), config) == config
     assert set(form_values(config)) == {spec.name for spec in FORM_FIELDS}
     assert config_from_form({"cycles": "17"}, config) == replace(config, cycles=17)
+
+
+def test_common_certified_seed_is_a_file_field_and_reaches_standard_launch(tmp_path):
+    field = next(spec for spec in FORM_FIELDS if spec.name == "common_initial_solution")
+    assert field.kind == "file"
+    config = config_from_form({"common_initial_solution": "seeds/common cycle 1.npz"})
+    assert form_values(config)["common_initial_solution"] == "seeds/common cycle 1.npz"
+    plan = build_launch_plan(config, tmp_path / "env", tmp_path)
+    assert plan.environment_updates["BENCHMARK_COMMON_INITIAL_SOLUTION"] == str(
+        tmp_path / "seeds/common cycle 1.npz"
+    )
+    summary = scientific_summary(config)
+    assert "seed commun certifié" in summary
+    assert "transcription" in summary and "compatibilité" in summary
+    assert config_from_form({"common_initial_solution": ""}, config).common_initial_solution is None
 
 
 def test_bayesian_campaign_is_json_safe_and_certifies_result_before_scoring(tmp_path):
@@ -64,21 +86,20 @@ def test_gui_muscle_weight_campaign_has_complete_named_log_domains(tmp_path):
     base = SimulationConfig(mode="rho-physio", solver="ipopt", model_config=str(model), weights_config=str(weights))
     campaign = muscle_weight_campaign(
         base, output_root=tmp_path / "bo", study_name="gui-muscles", muscle_names="Delt_ant, Triceps",
-        scale_min="0.05", scale_max="20", trials=12, workers=3, startup_trials=4,
+        scale_min="0.25", scale_max="4", trials=12, workers=3, startup_trials=4,
         seed=42, max_cycles=500, timeout_s=1200,
     )
     assert campaign.study_kind == "controller"
     assert campaign.metric == "continuous_endurance"
     assert campaign.search_space == {
-        "muscle_weight__Delt_ant": {"type": "float", "low": .05, "high": 20., "log": True},
-        "muscle_weight__Triceps": {"type": "float", "low": .05, "high": 20., "log": True},
+        "muscle_weight_coordinate__Triceps": {"type": "float", "low": -1., "high": 1.},
     }
     with pytest.raises(ValueError, match="une seule fois"):
         muscle_weight_search_space("Delt_ant, Delt_ant", .05, 20)
-    with pytest.raises(ValueError, match="exactement un poids"):
+    with pytest.raises(ValueError, match="ordre déclaré"):
         muscle_weight_campaign(
             base, output_root=tmp_path / "bo2", study_name="bad", muscle_names="Delt_ant",
-            scale_min=.05, scale_max=20, trials=12, workers=3, startup_trials=4,
+            scale_min=.25, scale_max=4, trials=12, workers=3, startup_trials=4,
             seed=42, max_cycles=500, timeout_s=1200,
         )
 

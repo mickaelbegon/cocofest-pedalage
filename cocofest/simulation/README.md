@@ -68,6 +68,18 @@ Le Python qui ouvre la fenêtre doit disposer de Tkinter. Les calculs sont
 exécutés avec le Python de `--prefix`. Ce lancement n'effectue aucun calcul
 avant de cliquer sur le bouton correspondant.
 
+Dans l'onglet **Deux bras indépendants**, les menus **CPU solveur** permettent
+d'épingler séparément les bras droit et gauche. Le menu désactive les CPU déjà
+réservés par un processus Linux avec une affinité mono-cœur ; **Automatique**
+laisse le système choisir. Cliquer **Actualiser les CPU** avant le lancement
+si une autre campagne vient de démarrer ou de terminer.
+
+L'onglet **Campagnes lancées** conserve également les lancements effectués depuis
+le GUI : date, type, solveur, formulation, nombre de cycles et contrôles,
+affinité CPU, état et dossier de sortie. Son index local est
+`gui-results/campaign-history.json`; les fichiers de résultats de chaque
+campagne restent la source scientifique de référence.
+
 ## Deux bras indépendants, cadence imposée
 
 L'onglet **Deux bras indépendants** crée deux OCP unilatéraux distincts,

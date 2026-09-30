@@ -31,7 +31,9 @@ def _new_json(path: Path, document: dict) -> None:
 
 
 def prepare(*, source_manifest: Path, run_directory: Path, slow_update_cycles: int,
-            projection_budget_fraction: float, worker_cpu_offset: int) -> Path:
+            projection_budget_fraction: float, worker_cpu_offset: int,
+            projection_allocation_objective: str = "weighted_recruitment_v1",
+            projection_horizon_cycles: int = 300) -> Path:
     source_manifest = source_manifest.expanduser().resolve(strict=True)
     run_directory = run_directory.expanduser().resolve()
     if run_directory.exists():
@@ -42,9 +44,24 @@ def prepare(*, source_manifest: Path, run_directory: Path, slow_update_cycles: i
         raise ValueError("projection_budget_fraction must lie in (0, 1]")
     if worker_cpu_offset < 4:
         raise ValueError("worker_cpu_offset must not overlap the four fast RHO CPU ids 0..3")
+    if projection_horizon_cycles < 1:
+        raise ValueError("projection_horizon_cycles must be positive")
+    if projection_allocation_objective not in {
+            "weighted_recruitment_v1", "predicted_ding_fatigue_v1"}:
+        raise ValueError("Unknown projection allocation objective")
     source = json.loads(source_manifest.read_text(encoding="utf-8"))
-    if source.get("cycles") != 3000 or source.get("resistance_nm") != .15:
-        raise ValueError("This matched experiment requires the 3000-cycle, 0.15-Nm source campaign")
+    resistance_nm = source.get("resistance_nm")
+    cycles = source.get("cycles")
+    if (
+        not isinstance(resistance_nm, (int, float))
+        or not math.isfinite(resistance_nm)
+        or resistance_nm <= 0
+        or not isinstance(cycles, int)
+        or not 1 <= cycles <= 3000
+    ):
+        raise ValueError(
+            "Source manifest must declare a positive finite resistance_nm and cycles in 1..3000"
+        )
     models = source.get("models")
     if not isinstance(models, list) or len(models) != 4:
         raise ValueError("Source manifest must define exactly four models")
@@ -62,38 +79,45 @@ def prepare(*, source_manifest: Path, run_directory: Path, slow_update_cycles: i
         _new_json(weights, {
             "initial_weight_basis": (
                 "uniform_unit_prior; matched RHO baseline; no_FHO_data; "
-                "PACE predictive rollout H=300; experimental comparison"
+                f"PACE predictive rollout H={projection_horizon_cycles}; experimental comparison"
             ),
             "initial_weights": {name: 1.0 for name in ("Delt_ant", "Delt_post", "Biceps", "Triceps")},
             "policy": {
                 # The fast OCP is still one RHO per cycle.  This cadence only
                 # governs independent supervisory proposals: 60 x 0.9 = 54 s
                 # is deliberately large enough for the measured H=300 batch.
-                "update_every_cycles": slow_update_cycles, "max_cycles": 3000,
+                "update_every_cycles": slow_update_cycles, "max_cycles": cycles,
                 "min_relative_weight": .25, "max_relative_weight": 4.0,
                 "max_log_step": math.log(1.1), "adaptation_strategy": "predictive_moment",
-                "projection_horizon_cycles": 300, "projection_substeps": 16,
+                "projection_horizon_cycles": projection_horizon_cycles, "projection_substeps": 16,
                 "projection_budget_seconds": slow_update_cycles * projection_budget_fraction,
                 "projection_budget_fraction": projection_budget_fraction,
                 "projection_async": True, "projection_worker_cpu_ids": [worker_cpu_offset + index],
                 "projection_fatigue_guard": True,
+                # Experimental fatigue-aligned QP: never selected implicitly.
+                "projection_allocation_objective": projection_allocation_objective,
+                "projection_fatigue_reference_regularization": 1e-12,
             },
         })
         prepared = {**model, "cpu_id": index, "weights_config": str(weights)}
         prepared_models.append(prepared)
         arms.append({"id": f"{model_id}/rho-pace-unit-h300", "model_id": model_id,
                      "condition": "rho-pace",
-                     "label": f"RHO-PACE, unit prior, H=300, K={slow_update_cycles}",
+                     "label": (f"RHO-PACE, unit prior, H={projection_horizon_cycles}, K={slow_update_cycles}, "
+                               f"QP={projection_allocation_objective}"),
                      "result_path": str(directory / "result.json"),
                      "weights_journal_path": str(directory / "weights.jsonl"),
                      "configuration_audit_path": str(directory / "configuration-audit.json"),
                      "checkpoint_directory": str(directory / "checkpoints"), "source": "new"})
-    manifest = {"schema_version": 1, "campaign_id": run_directory.name, "resistance_nm": .15,
-                "cycles": 3000, "models": prepared_models, "arms": arms,
-                "protocol": {"only_new_arms": "RHO-PACE unit prior H300", "same_seed": True,
+    manifest = {"schema_version": 1, "campaign_id": run_directory.name,
+                "resistance_nm": float(resistance_nm), "cycles": cycles,
+                "models": prepared_models, "arms": arms,
+                "protocol": {"only_new_arms": "RHO-PACE unit prior", "same_seed": True,
                              "same_ding_parameters": True, "same_solver": "IPOPT/MA57",
                              "no_FHO_data": True, "slow_update_cycles": slow_update_cycles,
+                             "projection_horizon_cycles": projection_horizon_cycles,
                              "projection_budget_fraction": projection_budget_fraction,
+                             "projection_allocation_objective": projection_allocation_objective,
                              "fast_rho_cpu_ids": [0, 1, 2, 3],
                              "projection_worker_cpu_ids": list(range(worker_cpu_offset, worker_cpu_offset + 4))}}
     path = run_directory / "manifest.json"
@@ -109,7 +133,8 @@ def _run_model(model: dict, *, manifest: dict, python: Path, profile: Path, hsl_
     env = os.environ.copy()
     env.update({"MPLBACKEND": "Agg", "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1",
                 "MKL_NUM_THREADS": "1", "IPOPT_HSL_LIBRARY": str(hsl_library)})
-    args = _base_benchmark_args(profile=profile, resistance_nm=.15, cycles=3000,
+    args = _base_benchmark_args(profile=profile, resistance_nm=manifest["resistance_nm"],
+                                cycles=manifest["cycles"],
                                 hsl_library=hsl_library, output=result, seed=Path(model["seed"]))
     command = ["taskset", "--cpu-list", str(model["cpu_id"]), str(python),
                "scripts/run_configured_cycling_benchmark.py", "--model-config", model["model_config"],
@@ -131,6 +156,10 @@ def main(argv=None) -> None:
     parser.add_argument("--slow-update-cycles", type=int, default=60)
     parser.add_argument("--projection-budget-fraction", type=float, default=.9)
     parser.add_argument("--worker-cpu-offset", type=int, default=4)
+    parser.add_argument("--projection-allocation-objective",
+                        choices=("weighted_recruitment_v1", "predicted_ding_fatigue_v1"),
+                        default="weighted_recruitment_v1")
+    parser.add_argument("--projection-horizon-cycles", type=int, default=300)
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args(argv)
@@ -144,6 +173,8 @@ def main(argv=None) -> None:
             slow_update_cycles=args.slow_update_cycles,
             projection_budget_fraction=args.projection_budget_fraction,
             worker_cpu_offset=args.worker_cpu_offset,
+            projection_allocation_objective=args.projection_allocation_objective,
+            projection_horizon_cycles=args.projection_horizon_cycles,
         )
     print(f"Campaign: {manifest_path}", flush=True)
     if args.prepare_only:
