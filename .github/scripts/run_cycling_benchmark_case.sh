@@ -170,7 +170,9 @@ rho_pulse_width_extrapolation_factor="${RHO_PULSE_WIDTH_EXTRAPOLATION_FACTOR:-1.
 parametric_kkt_predictor="${PARAMETRIC_KKT_PREDICTOR:-false}"
 parametric_kkt_dual_mode="${PARAMETRIC_KKT_DUAL_MODE:-reset}"
 terminal_wheel_qdot_bound_margin="${BENCHMARK_TERMINAL_WHEEL_QDOT_BOUND_MARGIN:-}"
+benchmark_q_slack="${BENCHMARK_Q_SLACK:-0.002}"
 common_initial_solution="${BENCHMARK_COMMON_INITIAL_SOLUTION:-$workspace/benchmark-seed/common-reduced.npz}"
+use_common_initial_solution="${BENCHMARK_USE_COMMON_INITIAL_SOLUTION:-true}"
 
 if ! [[ "$collocation_degree" =~ ^[2-9]$ ]]; then
   echo "COLLOCATION_DEGREE must be an integer between 2 and 9, got '$collocation_degree'." >&2
@@ -223,6 +225,10 @@ esac
 case "$ipopt_ding_local_reduction" in
   true|false) ;;
   *) echo "BENCHMARK_IPOPT_DING_LOCAL_REDUCTION must be true or false." >&2; exit 2 ;;
+esac
+case "$use_common_initial_solution" in
+  true|false) ;;
+  *) echo "BENCHMARK_USE_COMMON_INITIAL_SOLUTION must be true or false." >&2; exit 2 ;;
 esac
 if [[ "$ipopt_ding_local_reduction" == "true" ]]; then
   if [[ "$solver" != "ipopt" || "$mechanics" != "reduced" || "$benchmark_formulation" != "dynamic" || "$ode_solver" != "collocation" || "$collocation_degree" != "5" || "$compile_mode" != "false" || "$stimulations_per_cycle" != "30" || "${BENCHMARK_CYCLES_PER_WINDOW:-}" != "1" ]]; then
@@ -475,8 +481,10 @@ if [[ "$benchmark_formulation" == "dynamic" ]]; then
     --standard-warmup-seed "$workspace/.github/benchmark-seeds/legacy-resistive-0p22-warmup.npz"
     --legacy-standard-warmup-seed-signed-torque 0.22
     --standard-warmup-seed-continuation
-    --common-initial-solution "$common_initial_solution"
   )
+  if [[ "$use_common_initial_solution" == "true" ]]; then
+    seed_options+=(--common-initial-solution "$common_initial_solution")
+  fi
 fi
 set +e
 set -o pipefail
@@ -518,7 +526,7 @@ fi
   --reduced-cycling-profile "$workspace/benchmark-seed/reduced-cycling-fourier12.npz" \
   --state-scaling full \
   --first-node-wheel-q-slack 0 \
-  --terminal-wheel-q-slack "$BENCHMARK_Q_SLACK" \
+  --terminal-wheel-q-slack "$benchmark_q_slack" \
   --formulation "$benchmark_formulation" \
   --energy-equivalent-torque "$energy_equivalent_torque" \
   --isokinetic-omega "$isokinetic_omega" \

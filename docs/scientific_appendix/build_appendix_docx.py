@@ -52,7 +52,7 @@ subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
 paragraph(doc, "This appendix explains the two main model reductions used for FES cycling: projection of the constrained multibody model onto the crank manifold, and local reconstruction of linear Ding states. It distinguishes an exact identity of a selected discrete transcription from continuous-model equivalence and from observed solver speed. Measurement-corrected NMPC remains necessary for use with a participant.")
 
 paragraph(doc, "1. Historical baseline and notation", "Heading 1")
-paragraph(doc, "The historical reference attributed to Kevin is commit e9a211ed2eb1af30683a324159a6fcd6e899fc05, dated 21 November 2025. It already includes RHO NMPC with primal warm start, IPOPT with MA57 on Linux, degree-3 Radau collocation, a fatigable Ding model, and force-length, force-velocity, and passive-force relationships. The main configuration is 30 Hz, a two-cycle window, a one-cycle shift, and five requested cycles. These are baseline elements, not later innovations.")
+paragraph(doc, "The historical reference is the FES hand-cycling formulation described by Co et al. [7]. It already includes RHO NMPC with primal warm start, IPOPT with MA57 on Linux, degree-3 Radau collocation, a fatigable Ding model, and force-length, force-velocity, and passive-force relationships. The main configuration is 30 Hz, a two-cycle window, a one-cycle shift, and five requested cycles. These are baseline elements, not later innovations.")
 paragraph(doc, "For M muscles, the full state contains five Ding states per muscle, x = (Cn, F, A, Tau1, Km), and the mechanical generalized coordinates q and qdot. The physical crank coordinate is theta and omega = theta-dot. Pulse width is denoted u.")
 
 paragraph(doc, "2. Starting point The Ding force fatigue system", "Heading 1")
@@ -115,7 +115,94 @@ equation(doc, "εω = maxₜ max(0, ωmin − ω(t), ω(t) − ωmax)")
 paragraph(doc, "The controlled pair had DOP853 costs of 0.01295477 for IPOPT and 0.01296194 for Acados, but both had small between-node excursions. With a common tightened fast margin, costs were 0.01383435 and 0.01384597 (Acados +0.084 percent), with excursions 0.00515 and 0.00772 rad/s. Strict ranking requires zero excursion; similar small excursions support only a qualified numerical comparison.")
 paragraph(doc, "Every ablation should report build and compilation time, hot-solve time, wall time, iterations, valid-cycle fraction, common DOP853 cost, epsilon-omega, phase error, pulse-width bounds, KKT dimensions/nonzeros, and control distance. RHO-FHO tests require equal horizons and separate per-cycle and total times. Individual speedup factors must not be multiplied.")
 
-paragraph(doc, "6. References", "Heading 1")
+paragraph(doc, "6. Cumulative 30 Hz ablation and frequency campaign", "Heading 1")
+paragraph(doc, "The following cumulative IPOPT MA57 ablation uses 100 one-cycle RHO windows, reduced dynamic mechanics, Radau IIA degree five, and 30 uniformly spaced stimulations per crank revolution. A result is validated only if every window converges, has primal feasibility below 1e-5, and passes the mechanical audit. Cold construction, compilation, and audit time are excluded from the hot percentiles, which describe cycles 2 to 100.")
+
+def table(doc, headers, rows, widths=None):
+    value = doc.add_table(rows=1, cols=len(headers)); value.alignment = WD_TABLE_ALIGNMENT.CENTER
+    value.style = "Table Grid"
+    for j, header in enumerate(headers):
+        cell = value.rows[0].cells[j]; cell.text = header; shade(cell, "1F4E78"); border(cell)
+        for run in cell.paragraphs[0].runs:
+            run.font.color.rgb = RGBColor(255, 255, 255); run.font.bold = True; run.font.size = Pt(8)
+    for i, row in enumerate(rows):
+        cells = value.add_row().cells
+        for j, item in enumerate(row):
+            cells[j].text = str(item); border(cells[j]); cells[j].vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            if i % 2: shade(cells[j], "EAF2F8")
+            for p in cells[j].paragraphs:
+                p.paragraph_format.space_after = Pt(1); p.paragraph_format.line_spacing = 1.0
+                for run in p.runs: run.font.size = Pt(8)
+        if widths:
+            for j, width in enumerate(widths): cells[j].width = Inches(width)
+    paragraph(doc, "")
+    return value
+
+table(doc,
+    ["Case", "Incremental change", "Validated", "Median s", "P90 s", "Interpretation"],
+    [
+        ["K3", "Reduced mechanics", "100/100", "5.943", "6.918", "MX graph remains expensive"],
+        ["K4", "Periodic-node calcium", "100/100", "5.740", "6.584", "Small pre-compilation effect"],
+        ["K5", "SX graph", "100/100", "0.678", "0.798", "Largest observed acceleration"],
+        ["K6", "Compiled exact Hessian", "100/100", "0.449", "0.521", "Fastest valid 30 Hz case"],
+        ["K7", "Compact RHO output", "100/100", "0.465", "0.563", "Small output-retention cost"],
+        ["K8", "Hard 100 us delta PW bound", "100/100", "0.920", "1.151", "Regularity constraint costs time"],
+        ["K9", "Delta PW penalty, weight 0.01", "100/100", "0.789", "0.892", "Best regularized case"],
+    ], [0.42, 1.2, 0.55, 0.52, 0.48, 2.85])
+
+paragraph(doc, "SX is the largest timing change in this implementation and the compiled Hessian is beneficial after symbolic reduction. Speedup factors must not be multiplied because each row changes the symbolic graph and constrained NLP. K1 and K2 full-mechanics runs solved numerically but failed absolute crank-progress validation; their 29.739 s and 27.562 s medians are not solver comparisons. K0 degree-three Radau was intentionally excluded at 30 Hz by the independent integration gate.")
+
+paragraph(doc, "6.1 Frequency and periodic calcium", "Heading 2")
+paragraph(doc, "For a one-second cycle with Ns evenly spaced pulses, the periodic-node model uses h = 1/Ns and recomputes decay, post-pulse amplitude, and the periodic calcium fixed point at each frequency.")
+equation(doc, "d = exp(−h/τc),     Cn* = d H0(h)(h/τc)/(1−d)")
+paragraph(doc, "The frequency runs are therefore fixed-frequency periodic-calcium experiments, not reuses of a 30 Hz calcium trace. They represent the steady periodic regime after warm-up. A true change in frequency requires phase-resampling controls and initialising calcium at the fixed point for the new interval, or explicitly simulating the transition.")
+
+table(doc,
+    ["Frequency and case", "Solver", "Validated", "Median s", "P90 s", "Status"],
+    [
+        ["30 Hz K5", "MadNLP 0.10.1 MA57", "100/100", "0.925", "1.193", "Native valid comparator"],
+        ["33 Hz K7", "IPOPT MA57", "100/100", "0.558", "0.681", "Valid, below one second"],
+        ["35 Hz K5", "IPOPT MA57", "100/100", "0.875", "1.451", "Valid, tail above one second"],
+        ["35 Hz K5", "MadNLP 0.10.1 MA57", "100/100", "1.148", "1.399", "Valid, not real-time"],
+        ["40 Hz K5", "IPOPT MA57", "100/100", "1.043", "1.319", "Valid, median above one second"],
+        ["40 Hz K5", "MadNLP 0.10.1 MA57", "0/100", "--", "--", "Native continuity failure"],
+        ["50 Hz K10", "IPOPT MA57", "100/100", "1.488", "1.716", "Robustness point, not real-time"],
+    ], [0.88, 1.3, 0.55, 0.52, 0.48, 2.3])
+
+paragraph(doc, "The 33 Hz K7 result is the conservative high-frequency reference: it passes the mechanical audit and remains below one second at P90. The 50 Hz K10 result is robust but outside a one-second control budget. The original IPOPT MUMPS protocol did not produce a native valid 100-cycle trajectory, so no MA57 versus MUMPS speed ratio is reported. Acados remains diagnostic because of a between-node velocity excursion. Its local Ding map checks are near machine precision, but its 76-cycle stopping point does not support a 100-cycle performance claim.")
+
+paragraph(doc, "6.2 Decision efficient validation policy", "Heading 2")
+paragraph(doc, "Rather than test every solver, frequency, and graph option, use IPOPT MA57 as the certified frequency reference. Advance frequency only after feasibility passes. Test an independent solver at 30 Hz, at the last IPOPT point whose P90 is below one second, and at the first point beyond this threshold. Test MUMPS only as an IPOPT linear-solver A/B, and retain Acados only after common DOP853 replay passes. Final comparisons must report DOP853 objective, speed excursion, phase or work error, and pulse-width feasibility separately from native solver timings.")
+
+paragraph(doc, "6.3 Terminal half-step guard at the RHO seam", "Heading 2")
+paragraph(doc, "In free-cadence reduced mechanics, the terminal state of a RHO window is the fixed incoming state of the next window. The optional seam guard reuses the reduced internal cadence predictor at the terminal node, before the next window can change a control. With h one shooting interval and fomega the reduced angular acceleration, it constrains the Euler half-step prediction to the same speed interval as the internal guard.")
+equation(doc, "ωhalf = ωT + (h/2) fω(θT, ωT, FT, τext)")
+paragraph(doc, "The guard is available only with dynamic reduced mechanics and an active internal reduced-speed guard. It adds no decision variable and does not trigger a new NLP compilation. It is a local, differentiable Euler prediction—not a DOP853 replay and not a certificate for every constraint over the next cycle.")
+table(doc,
+    ["Terminal seam guard", "Certified", "Hot median / P90 s", "Validated loop wall s", "Interpretation"],
+    [
+        ["Off", "100/100", "0.650 / 0.898", "81.172", "Reference internal guard only"],
+        ["Euler half-step on", "100/100", "0.680 / 0.871", "80.961", "Timing-neutral within this small A/B"],
+    ], [0.8, 0.6, 1.0, 1.0, 2.0])
+paragraph(doc, "This matched IPOPT/MA57/Radau-5 100-window reduced-dynamics A/B shows that the local seam constraint did not remove the observed one-second-scale operation. It does not prove a continuous-time or clinical safety gain. A separate diagnostic found an Euler prediction at 0.9h more conservative than the continuous minimum speed; extra Euler samples or a tightened margin are therefore not presented as certificates. The acceptance test remains a dense DOP853 replay spanning the seam and next applied cycle.")
+
+paragraph(doc, "6.4 Two independent arms and adaptive muscle weights", "Heading 2")
+paragraph(doc, "Two independent unilateral isokinetic OCPs are used to allocate a prescribed bilateral work budget, not to represent a coupled two-arm crank. Each arm has four Ding muscles, its own state history and pulse widths. A process-isolated coordinator alone enforces the work identity after certification:")
+equation(doc, "WR(k) + WL(k) = 2π τbar,total")
+paragraph(doc, "No state from one arm enters the other arm's compiled NLP. At cold start the manual split is the declared pair of equivalent mean torques. A capacity–fatigability alternative waits for one certified common cycle. From each maximum-PW isokinetic envelope, csm is a positive work opportunity and dsm the exact prescribed-force Ding capacity-decrement ratio. With Cs = sum(csm), qsm = csm/Cs, Ds = sum(qsm dsm), and Es = Wref/Ds, the initial right share is pR = ER/(ER + EL), clipped only by a declared minimum arm torque. Cs is an opportunity measure, not a feasibility certificate.")
+paragraph(doc, "After both arms certify a block boundary, the causal work-split reference uses pR-star = rR-to-the-gain divided by (rR-to-the-gain + rL-to-the-gain), then applies smoothing, a maximum fraction step, and the minimum arm torque. It is work-conserving and updates only every K certified cycles (K=10 by default), but it does not predict the endurance optimum.")
+paragraph(doc, "Each unilateral cost is sum over muscles of wm times (1 − Am/Arest,m) squared. Weight vectors have geometric mean one, relative bounds, and bounded log updates; numeric parameter binding preserves the single compiled NLP. The explicit scientific conditions are:")
+table(doc,
+    ["Policy", "Cold start", "Certified slow update", "Role"],
+    [
+        ["Unit", "wm = 1", "None", "Neutral reference"],
+        ["Physio-U", "Unit; no FHO/BO", "Mechanical Shapley credit × state-conditioned Ding force challenge", "Physiological hypothesis"],
+        ["Mechanical-sensitivity-squared v1", "Unit; first update waits for live envelope", "wm target proportional to bm squared", "Mechanics-only ablation"],
+        ["Capacity feedback", "Unit", "Inverse local capacity-ratio feedback", "Causal reference"],
+    ], [1.1, 1.45, 2.1, 1.35])
+paragraph(doc, "For the mechanics-only condition, bm is normalized mechanical Shapley work credit. It intentionally does not multiply alpha-A or a fatigue decrement: Ding fatigue is already propagated in A and the objective already squares normalized fatigue. Physio-U remains distinct because it does use the state-conditioned force challenge. Missing, invalid, zero-credit, out-of-domain, or uncertified envelopes hold the incumbent weights. At due boundaries, the live envelope uses the full local Ding state (Cn, F, A, Tau1, Km), pulse-width limits, reduced isokinetic geometry, and certified terminal work; the target is projected, smoothed, and log-step capped before the numeric parameter update.")
+
+paragraph(doc, "7. References", "Heading 1")
 for reference in [
     "[1] Ding J, Wexler AS, Binder-Macleod SA. A predictive model of fatigue in human skeletal muscles. Journal of Applied Physiology. 2000;89(4):1322-1332. doi:10.1152/jappl.2000.89.4.1322.",
     "[2] Ding J, Wexler AS, Binder-Macleod SA. A mathematical model that predicts the force-frequency relationship of human skeletal muscle. Muscle & Nerve. 2002;26(4):477-485. doi:10.1002/mus.10198.",
@@ -123,6 +210,7 @@ for reference in [
     "[4] Hairer E, Wanner G. Solving Ordinary Differential Equations II: Stiff and Differential-Algebraic Problems. 2nd ed. Springer; 1996. doi:10.1007/978-3-642-05221-7.",
     "[5] Hairer E, Wanner G. Stiff differential equations solved by Radau methods. Journal of Computational and Applied Mathematics. 1999;111(1-2):93-111. doi:10.1016/S0377-0427(99)00134-X.",
     "[6] De Groote F, Kinney AL, Rao AV, Fregly BJ. Evaluation of direct collocation optimal control problem formulations for solving the muscle redundancy problem. Annals of Biomedical Engineering. 2016;44(10):2922-2936. doi:10.1007/s10439-016-1591-9.",
+    "[7] Co K, Puchaud P, Moissenet F, Begon M. Maximizing Task Endurance through Muscle Fatigue Minimization with Consideration of Muscle Fatigability and Task Contribution: an in-Silico FES Study of Handcycling. Manuscript. 2026.",
 ]:
     paragraph(doc, reference)
 
