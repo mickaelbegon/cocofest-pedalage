@@ -17,6 +17,11 @@ from .optimization.muscle_reserve import (
 
 class CustomObjective:
     @staticmethod
+    def minimize_terminal_task_reserve(controller: PenaltyController, binding):
+        """Experimental smooth shortage of the locally witnessed task reserve."""
+        return binding.objective(controller)
+
+    @staticmethod
     def minimize_terminal_projected_mechanical_reserve(controller: PenaltyController, binding):
         """Signed projected reserve proxy from the candidate terminal slow states."""
         from casadi import horzcat
