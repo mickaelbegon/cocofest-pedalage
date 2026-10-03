@@ -241,26 +241,58 @@ def _apply_pace_rt_decision(ocp, pace, decision, *, certified, current_cycle,
             "weights_unchanged": list(pace.weights)}
 
 
-def _observe_pace_rt_terminal(ocp, states, models, *, completed_cycles):
-    """Audit the terminal point against the active PACE-RT local domain.
+def _observe_local_terminal_value(ocp, states, *, completed_cycles):
+    """Audit a solved endpoint against its active local terminal-value domain.
 
     The domain is deliberately an audit/hold guard, never a hard RHO
-    constraint.  A compact local model may be useful inside its announced
-    box, but it must not remain active for another RHO after the solved state
-    has left that box.  The caller can retain a freshly arrived replacement
-    decision, which is centred on a new predicted terminal state.
+    constraint.  Both modes use the same numerical parameter channel, but
+    retain separate audit keys so a costate is never reported as PACE-RT.
     """
     import numpy as np
     from cocofest.optimization.pace_rt_ocp import PaceRtObjectiveBinding
+    from cocofest.optimization.terminal_costate_ocp import TerminalCostateObjectiveBinding
 
     binding = getattr(ocp, "task_reserve_binding", None)
-    if not isinstance(binding, PaceRtObjectiveBinding):
+    if isinstance(binding, PaceRtObjectiveBinding):
+        key = "pace_rt_terminal"
+    elif isinstance(binding, TerminalCostateObjectiveBinding):
+        key = "terminal_costate"
+    else:
         return None
-    coordinates = [
-        float(np.asarray(states[f"A_{model.muscle_name}"], dtype=float).reshape(-1)[-1]) / model.a_scale
-        for model in models
-    ]
-    return binding.validate_terminal_point(coordinates, completed_cycles=int(completed_cycles))
+    coordinates = []
+    for coordinate in binding.coordinates:
+        values = np.asarray(states[coordinate.state_key], dtype=float)
+        if values.ndim == 1:
+            if coordinate.index != 0:
+                raise ValueError("Terminal coordinate index is outside the solved state.")
+            state = values[-1]
+        else:
+            state = values[coordinate.index, -1]
+        coordinates.append(float((state - coordinate.offset) / coordinate.scale))
+    return key, binding.validate_terminal_point(coordinates, completed_cycles=int(completed_cycles))
+
+
+def _guard_untrusted_terminal_value(ocp, audit, *, completed_cycles, incoming_pace_rt=False):
+    """Remove an extrapolated local cost before preparing the next RHO."""
+    from cocofest.optimization.pace_rt_ocp import PaceRtObjectiveBinding
+    from cocofest.optimization.terminal_costate_ocp import TerminalCostateObjectiveBinding
+
+    binding = getattr(ocp, "task_reserve_binding", None)
+    if isinstance(binding, PaceRtObjectiveBinding):
+        if incoming_pace_rt:
+            return None
+        mode = "pace_rt"
+    elif isinstance(binding, TerminalCostateObjectiveBinding):
+        mode = "terminal_costate"
+    else:
+        return None
+    if not isinstance(audit, dict) or not audit.get("active") or audit.get("terminal_trust_validated") is True:
+        return None
+    receipt = binding.deactivate(ocp)
+    return {"status": "deactivated", "kind": "terminal_trust_guard", "mode": mode,
+            "source_cycle": binding.source_completed_cycles,
+            "observed_cycle": completed_cycles, "terminal_audit": audit,
+            "parameter_update": receipt, "compiled_nlp_reused": True}
 
 
 def _reserve_update_due(*, certified: bool, has_solution: bool, physical_cycle: int) -> bool:
@@ -1048,6 +1080,18 @@ def _driver_arguments(payload, side):
         if payload.get("experimental_pace_vr", {}).get("application_mode")
         == "terminal_reserve_target_experimental" else None
     )
+    terminal_costate = payload.get("experimental_terminal_costate")
+    if terminal_costate is not None:
+        if (not isinstance(terminal_costate, dict)
+                or set(terminal_costate) - {"maximum_age_cycles"}
+                or type(terminal_costate.get("maximum_age_cycles", 20)) is not int
+                or terminal_costate.get("maximum_age_cycles", 20) < 0):
+            raise ValueError("experimental_terminal_costate accepts only a nonnegative maximum_age_cycles.")
+        if args.experimental_pace_rt_config is not None:
+            raise ValueError("Terminal costate and PACE-RT share the same numerical parameter channel.")
+        # This creates an inactive graph only. No costate is published until a
+        # separately validated slow model explicitly supplies numeric values.
+        args.experimental_terminal_costate_config = dict(terminal_costate)
     if args.solver != "ipopt" or args.formulation != "isokinetic" or args.cycles_per_window != 1:
         raise ValueError("The bilateral process runner requires IPOPT, isokinetic, one-cycle RHO windows")
     if (args.nlp_ipopt_recovery_ma57_tuned or args.ipopt_failed_rho_pw_micro_retry) and not args.retry_failed_rho_without_advance:
@@ -1168,6 +1212,7 @@ def _arm_worker(connection, side, payload, output_root):
             if reserve_priority and getattr(nmpc, "fatigue_weight_binding", None) is None:
                 raise ValueError("PACE-RT reserve priority requires compiled fatigue weights")
             vr_events = []
+            terminal_costate_events = []
             reserve_binding = getattr(nmpc, "mechanical_reserve_binding", None)
             reserve_events = []
             if reserve_binding is not None:
@@ -1302,10 +1347,11 @@ def _arm_worker(connection, side, payload, output_root):
                     # model shapes the RHO objective but is not a physical
                     # feasibility constraint; only the solved endpoint tells
                     # us whether its announced trust region was respected.
-                    terminal_audit = _observe_pace_rt_terminal(
-                        ocp, states, models, completed_cycles=physical_completed)
-                    if terminal_audit is not None:
-                        metrics["pace_rt_terminal"] = terminal_audit
+                    terminal_observation = _observe_local_terminal_value(
+                        ocp, states, completed_cycles=physical_completed)
+                    if terminal_observation is not None:
+                        audit_key, terminal_audit = terminal_observation
+                        metrics[audit_key] = terminal_audit
                 if (solution is not None and physical_completed == 1
                         and payload.get("resistance_pace", {}).get("initial_split_policy")
                         == "capacity_fatigability_after_first_cycle"):
@@ -1386,38 +1432,32 @@ def _arm_worker(connection, side, payload, output_root):
                     return False
                 if command.get("kind") != "prepare" or command.get("completed_cycles") != physical_completed:
                     raise RuntimeError("Invalid coordinator prepare command")
-                terminal_audit = metrics.get("pace_rt_terminal")
+                binding = getattr(ocp, "task_reserve_binding", None)
+                from cocofest.optimization.terminal_costate_ocp import TerminalCostateObjectiveBinding
+                audit_key = ("terminal_costate" if isinstance(binding, TerminalCostateObjectiveBinding)
+                             else "pace_rt_terminal")
+                terminal_audit = metrics.get(audit_key)
                 incoming_decision = command.get("pace_vr_decision")
                 incoming_pace_rt = bool(
                     isinstance(incoming_decision, dict)
                     and incoming_decision.get("application_mode")
                     == "terminal_reserve_target_experimental"
                 )
-                if (isinstance(terminal_audit, dict) and terminal_audit.get("active")
-                        and terminal_audit.get("terminal_trust_validated") is not True
-                        and not incoming_pace_rt):
-                    # Holding the previous PACE-RT parameters after an
-                    # extrapolated endpoint would make the next RHO depend on
-                    # an unsupported local model.  This numeric deactivation
-                    # keeps the compiled NLP intact and leaves its fatigue
-                    # objective available.  A freshly accepted PACE-RT fit is
-                    # allowed to replace the old one below.
-                    from cocofest.optimization.pace_rt_ocp import PaceRtObjectiveBinding
-                    binding = getattr(ocp, "task_reserve_binding", None)
-                    if isinstance(binding, PaceRtObjectiveBinding):
-                        receipt = binding.deactivate(ocp)
-                        guard_event = {
-                            "status": "deactivated", "kind": "terminal_trust_guard",
-                            "source_cycle": binding.source_completed_cycles,
-                            "observed_cycle": physical_completed,
-                            "terminal_audit": terminal_audit,
-                            "parameter_update": receipt,
-                            "compiled_nlp_reused": True,
-                        }
-                        vr_events.append(guard_event)
-                        metrics["pace_rt_terminal"]["action"] = "deactivated_before_next_rho"
-                        with (root / "pace_vr.jsonl").open("a", encoding="utf-8") as journal:
-                            journal.write(json.dumps(guard_event, allow_nan=False) + "\n")
+                guard_event = _guard_untrusted_terminal_value(
+                    ocp, terminal_audit, completed_cycles=physical_completed,
+                    incoming_pace_rt=incoming_pace_rt)
+                if guard_event is not None:
+                    # A solved endpoint outside its local box may remain a
+                    # certified physical cycle, but cannot transport that
+                    # unsupported local value into the next RHO.
+                    if guard_event["mode"] == "pace_rt":
+                        events, journal_name = vr_events, "pace_vr.jsonl"
+                    else:
+                        events, journal_name = terminal_costate_events, "terminal_costate.jsonl"
+                    events.append(guard_event)
+                    metrics[audit_key]["action"] = "deactivated_before_next_rho"
+                    with (root / journal_name).open("a", encoding="utf-8") as journal:
+                        journal.write(json.dumps(guard_event, allow_nan=False) + "\n")
                 started = time.perf_counter()
                 torque = float(command["equivalent_mean_torque_nm"])
                 fatigue_weight_binding = getattr(ocp, "fatigue_weight_binding", None)
@@ -1615,6 +1655,7 @@ def _arm_worker(connection, side, payload, output_root):
                           if getattr(nmpc, "max_pw_work_binding", None) is not None else None),
                       "mechanical_reserve_events": reserve_events,
                       "pace_vr_events": vr_events,
+                      "terminal_costate_events": terminal_costate_events,
                       "timing_s": _timing_summary(item["solver_time_s"] for item in records),
                       "warm_timing_s": _timing_summary(item["solver_time_s"] for item in records[2:])}
             (root / "result.json").write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")

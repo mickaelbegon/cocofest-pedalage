@@ -20973,6 +20973,40 @@ def solve_case(
     # asynchronous supervisor may only update its numerical parameter vector.
     task_reserve_binding = (getattr(args, "experimental_task_reserve_binding", None)
                             or getattr(args, "experimental_task_load_margin_binding", None))
+    terminal_costate = getattr(args, "experimental_terminal_costate_config", None)
+    if terminal_costate is not None:
+        if task_reserve_binding is not None or getattr(args, "experimental_pace_rt_config", None) is not None:
+            raise ValueError("Terminal costate and PACE-RT/task-reserve bindings share one parameter channel.")
+        if not isinstance(terminal_costate, dict):
+            raise ValueError("experimental_terminal_costate_config must be a mapping.")
+        if set(terminal_costate) - {"maximum_age_cycles"}:
+            raise ValueError("Unknown experimental_terminal_costate_config option.")
+        if isokinetic_config is None:
+            raise ValueError("Terminal costate requires the one-cycle isokinetic work task.")
+        from cocofest.optimization.task_reserve_ocp import TaskReserveStateCoordinate
+        from cocofest.optimization.terminal_costate_ocp import TerminalCostateObjectiveBinding
+
+        coordinates = tuple(TaskReserveStateCoordinate(
+            f"A_{muscle.muscle_name}", scale=float(muscle.a_scale)
+        ) for muscle in muscle_models)
+        context = {
+            "coordinate_layout": [
+                {"state_key": item.state_key, "index": item.index,
+                 "scale": item.scale, "offset": item.offset}
+                for item in coordinates
+            ],
+            "cycle_period_s": float(cycle_duration), "cycle_len": int(args.stimulations_per_cycle),
+            "formulation": args.formulation, "mechanical_formulation": args.mechanical_formulation,
+            "nominal_work_j": float(isokinetic_config.energy_target_j),
+            "terminal_half_step_guard": bool(args.reduced_terminal_half_step_velocity_guard),
+        }
+        task_reserve_binding = TerminalCostateObjectiveBinding(
+            coordinates, task_context=context,
+            model_sha256=hashlib.sha256(Path(model_path).read_bytes()).hexdigest(),
+            maximum_age_cycles=terminal_costate.get("maximum_age_cycles", 20),
+        )
+        args.experimental_task_reserve_binding = task_reserve_binding
+        args.experimental_task_reserve_model_path = str(model_path)
     if task_reserve_binding is None:
         pace_rt = getattr(args, "experimental_pace_rt_config", None)
         if pace_rt is not None:
