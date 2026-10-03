@@ -1014,6 +1014,11 @@ def _driver_arguments(payload, side):
             argv.extend(("--fatigue-weight-values", *[str(float(value)) for value in fatigue_values]))
     elif payload.get("fatigue_weight_values") is not None:
         raise ValueError("fatigue_weight_values requires parametric_fatigue_weights=true.")
+    if float(payload.get("experimental_max_pw_work_weight", 0.)) > 0:
+        argv.extend(("--experimental-max-pw-work-weight", str(payload["experimental_max_pw_work_weight"]),
+                     "--experimental-max-pw-work-substeps", str(payload.get("experimental_max_pw_work_substeps", 16)),
+                     "--experimental-max-pw-work-policy", payload.get("experimental_max_pw_work_policy", "all_intervals_pw_max"),
+                     "--experimental-max-pw-work-gradient-filter", payload.get("experimental_max_pw_work_gradient_filter", "full")))
     if float(payload.get("experimental_mechanical_reserve_weight", 0.0)) > 0.0:
         argv.extend(("--experimental-mechanical-reserve-weight",
                      str(payload["experimental_mechanical_reserve_weight"])))
@@ -1267,6 +1272,13 @@ def _arm_worker(connection, side, payload, output_root):
                             "attainable_work_certified": False,
                         }
                         metrics["mechanical_reserve_gradient_audit"] = reserve_binding.sensitivity_audit(slow)
+                    if getattr(ocp, "max_pw_work_binding", None) is not None:
+                        from cocofest.optimization.max_pw_work_capacity_ocp import max_pw_work_boundary
+                        capacity_audit = max_pw_work_boundary(ocp, solution, certified=metrics["certified"])
+                        metrics["max_pw_work_capacity"] = capacity_audit
+                        if not capacity_audit["accepted"]:
+                            metrics["certified"] = metrics["success"] = False
+                            metrics["hold_reason"] = capacity_audit.get("reason", "capacity_domain_invalid")
                     metrics["attempt_in_physical_rho"] = int(getattr(solution, "_cocofest_attempt_in_physical_rho", 1))
                     if hasattr(solution, "_cocofest_frozen_retry"):
                         metrics["retry_preparation"] = solution._cocofest_frozen_retry
@@ -1599,6 +1611,8 @@ def _arm_worker(connection, side, payload, output_root):
                           else None
                       ),
                       "mechanical_reserve_binding": reserve_binding.summary() if reserve_binding is not None else None,
+                      "max_pw_work_binding": (nmpc.max_pw_work_binding.summary()
+                          if getattr(nmpc, "max_pw_work_binding", None) is not None else None),
                       "mechanical_reserve_events": reserve_events,
                       "pace_vr_events": vr_events,
                       "timing_s": _timing_summary(item["solver_time_s"] for item in records),

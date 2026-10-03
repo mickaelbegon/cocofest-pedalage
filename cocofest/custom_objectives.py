@@ -27,6 +27,18 @@ class CustomObjective:
         return binding.target_constraint(controller)
 
     @staticmethod
+    def minimize_terminal_max_pw_work_capacity(controller: PenaltyController, binding):
+        """Negative max-PW positive-work opportunity from terminal Ding states."""
+        names = CustomObjective._muscle_names(controller)
+        binding.validate_muscle_names(names)
+        from casadi import vertcat
+        state = vertcat(*[
+            controller.states[f"{key}_{name}"].cx
+            for name in names for key in ("Cn", "F", "A", "Tau1", "Km")
+        ])
+        return binding.objective(state, controller)
+
+    @staticmethod
     def minimize_terminal_projected_mechanical_reserve(controller: PenaltyController, binding):
         """Signed projected reserve proxy from the candidate terminal slow states."""
         from casadi import horzcat

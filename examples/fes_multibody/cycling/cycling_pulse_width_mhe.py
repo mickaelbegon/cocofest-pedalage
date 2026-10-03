@@ -379,6 +379,20 @@ class MyCyclicNMPC(FesNmpcMsk):
             )
         return summaries
 
+    def advance_window(self, sol, steps=0, **advance_options):
+        binding = getattr(self, "max_pw_work_binding", None)
+        if binding is not None:
+            states = sol.decision_states(to_merge=SolutionMerge.NODES)
+            terminal = [float(np.asarray(states[f"{key}_{name}"]).reshape(-1)[-1])
+                        for name in binding.muscle_names for key in ("Cn", "F", "A", "Tau1", "Km")]
+            audit = binding.validate_terminal_point(terminal)
+            self.last_max_pw_work_pretransfer_audit = audit
+            if not audit["valid"]:
+                # The normal callback reports the stopped attempt to the
+                # supervisor; preserve the last accepted physical bounds.
+                return
+        return super().advance_window(sol, steps, **advance_options)
+
     def advance_window_bounds_states(self, sol, n_cycles_simultaneous=None, **extra):
         if self.before_window_advance is not None:
             self.before_window_advance(self, sol)
@@ -1295,6 +1309,7 @@ def prepare_nmpc(
     muscle_horizon_binding = None
     fatigue_weight_binding = simulation_conditions.get("fatigue_weight_binding")
     task_reserve_binding = simulation_conditions.get("task_reserve_binding")
+    max_pw_work_binding = simulation_conditions.get("max_pw_work_binding")
     mechanical_reserve_binding = simulation_conditions.get("mechanical_reserve_binding")
     control_regularization_weight = simulation_conditions.get(
         "control_regularization_weight", 0.0
@@ -1686,6 +1701,37 @@ def prepare_nmpc(
             raise ValueError("Experimental projected reserve requires SX isokinetic one-cycle RHO.")
         if not np.isclose(sum(mechanical_reserve_binding.durations), cycle_duration, rtol=1e-9):
             raise ValueError("Projected reserve durations must span one physical cycle.")
+    max_pw_work_options = simulation_conditions.get("max_pw_work_options")
+    if max_pw_work_options is not None:
+        if max_pw_work_binding is not None:
+            raise ValueError("Provide either max_pw_work_options or max_pw_work_binding")
+        if isokinetic_config is None or mechanical_formulation != "reduced":
+            raise ValueError("Max-PW capacity requires reduced isokinetic mechanics")
+        from cocofest.optimization.max_pw_work_capacity_ocp import build_isokinetic_max_pw_work_binding
+        maxima = []
+        for muscle in model.muscles_dynamics_model:
+            key = f"last_pulse_width_{muscle.muscle_name}"
+            if key not in u_bounds.keys():
+                raise ValueError("Max-PW capacity pilot requires direct pulse-width controls")
+            upper = np.asarray(u_bounds[key].max, float).reshape(-1)
+            if not np.all(upper == upper[0]):
+                raise ValueError("Max-PW capacity pilot requires a uniform upper PW bound per muscle")
+            maxima.append(float(upper[0]))
+        max_pw_work_binding = build_isokinetic_max_pw_work_binding(
+            model, interval_count=cycle_len, omega=isokinetic_config.omega_target_rad_s,
+            reference_work_j=isokinetic_config.energy_target_j, pulse_width_maxima=maxima,
+            **max_pw_work_options)
+    if max_pw_work_binding is not None:
+        from cocofest.optimization.max_pw_work_capacity_ocp import MaxPwWorkCapacityBinding
+        if not isinstance(max_pw_work_binding, MaxPwWorkCapacityBinding):
+            raise TypeError("max_pw_work_binding must be a MaxPwWorkCapacityBinding")
+        if not use_sx or isokinetic_config is None or mechanical_formulation != "reduced" or n_cycles_simultaneous != 1:
+            raise ValueError("Max-PW capacity requires SX reduced isokinetic one-cycle RHO")
+        max_pw_work_binding.validate_muscle_names([m.muscle_name for m in model.muscles_dynamics_model])
+        layout = max_pw_work_binding.layout
+        if layout is None or layout.interval_count != cycle_len or not np.isclose(
+                sum(max_pw_work_binding.profile[layout.slices()["duration"]]), cycle_duration):
+            raise ValueError("Max-PW capacity profile must span the RHO cycle and stimulation grid")
     if task_reserve_binding is not None:
         if not isinstance(task_reserve_binding, TaskReserveObjectiveBinding):
             raise TypeError("task_reserve_binding must be a TaskReserveObjectiveBinding.")
@@ -1841,6 +1887,7 @@ def prepare_nmpc(
         muscle_horizon_binding=muscle_horizon_binding,
         fatigue_weight_binding=fatigue_weight_binding,
         task_reserve_binding=task_reserve_binding,
+        max_pw_work_binding=max_pw_work_binding,
         mechanical_reserve_binding=mechanical_reserve_binding,
         control_regularization_weight=control_regularization_weight,
         control_regularization_target=control_regularization_target,
@@ -1908,19 +1955,26 @@ def prepare_nmpc(
         nmpc_options["ordering_strategy"] = mhe_info["ordering_strategy"]
     parameter_bindings = tuple(
         binding for binding in (rollout_binding, muscle_horizon_binding, fatigue_weight_binding,
-                                mechanical_reserve_binding, task_reserve_binding)
+                                mechanical_reserve_binding, task_reserve_binding,
+                                max_pw_work_binding)
         if binding is not None
     )
     task_reserve_with_fatigue = (
         task_reserve_binding is not None and fatigue_weight_binding is not None
         and len(parameter_bindings) == 2
     )
-    if len(parameter_bindings) > 1 and not task_reserve_with_fatigue:
+    max_pw_with_fatigue = (max_pw_work_binding is not None and fatigue_weight_binding is not None
+                          and len(parameter_bindings) == 2)
+    if len(parameter_bindings) > 1 and not (task_reserve_with_fatigue or max_pw_with_fatigue):
         raise ValueError(
             "Only one fixed-parameter binding is supported per NMPC, except for the explicit "
             "experimental task-reserve + fatigue-weight pair; other parameter-list merges are unvalidated."
         )
-    if task_reserve_binding is not None:
+    if max_pw_work_binding is not None:
+        from cocofest.optimization.max_pw_work_capacity_ocp import max_pw_work_parameter_options
+        nmpc_options.update(max_pw_work_parameter_options(
+            max_pw_work_binding, fatigue_weight_binding=fatigue_weight_binding, use_sx=use_sx))
+    elif task_reserve_binding is not None:
         nmpc_options.update(task_reserve_parameter_options(
             task_reserve_binding, fatigue_weight_binding=fatigue_weight_binding, use_sx=use_sx,
         ))
@@ -1948,6 +2002,9 @@ def prepare_nmpc(
     if task_reserve_binding is not None:
         task_reserve_binding.attach(nmpc)
         nmpc.task_reserve_binding = task_reserve_binding
+    if max_pw_work_binding is not None:
+        max_pw_work_binding.attach(nmpc)
+        nmpc.max_pw_work_binding = max_pw_work_binding
     nmpc.isokinetic_config = isokinetic_config
     if isokinetic_config is not None:
         nmpc._isokinetic_energy_seed_fraction = (
@@ -3340,6 +3397,7 @@ def set_objective_functions(
     fatigue_weight_binding=None,
     mechanical_reserve_binding=None,
     task_reserve_binding=None,
+    max_pw_work_binding=None,
 ):
     try:
         terminal_reserve_weight = float(terminal_reserve_weight)
@@ -3358,6 +3416,10 @@ def set_objective_functions(
         raise ValueError("terminal_reserve_temperature must be finite and positive.")
 
     objective_functions = ObjectiveList()
+    if max_pw_work_binding is not None:
+        objective_functions.add(CustomObjective.minimize_terminal_max_pw_work_capacity,
+                                custom_type=ObjectiveFcn.Mayer, node=Node.END,
+                                weight=1.0, quadratic=False, binding=max_pw_work_binding)
     if task_reserve_binding is not None:
         objective_functions.add(
             CustomObjective.minimize_terminal_task_reserve,

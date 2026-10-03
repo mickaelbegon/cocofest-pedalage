@@ -795,6 +795,30 @@ def validate_experimental_mechanical_reserve_options(args: argparse.Namespace) -
     return True
 
 
+def validate_max_pw_work_options(args):
+    weight = float(getattr(args, "experimental_max_pw_work_weight", 0.))
+    if not np.isfinite(weight) or weight < 0:
+        raise ValueError("--experimental-max-pw-work-weight must be finite and nonnegative")
+    if not weight:
+        return False
+    if (args.solver != "ipopt" or not args.use_sx or args.cycles_per_window != 1
+            or args.mechanical_formulation != "reduced" or args.formulation != "isokinetic"
+            or args.model_formulation != "periodic_node"):
+        raise ValueError("Max-PW capacity requires IPOPT SX reduced isokinetic periodic_node one-cycle RHO")
+    if (args.ode_solver != "collocation" or args.collocation_method != "radau"
+            or args.collocation_degree != 5 or args.ipopt_linear_solver != "ma57"):
+        raise ValueError("Max-PW capacity pilot requires Radau-5 and IPOPT MA57")
+    if (args.experimental_mechanical_reserve_weight > 0
+            or args._endurance_rollout_options is not None or args._muscle_horizon_options is not None
+            or getattr(args, "parametric_control_weights", False)):
+        raise ValueError("Max-PW capacity supports only the fatigue parameter binding alongside it")
+    if args.experimental_max_pw_work_substeps < 1:
+        raise ValueError("Max-PW integration substeps must be positive")
+    if args.energy_equivalent_torque <= 0:
+        raise ValueError("Max-PW capacity requires positive reference work")
+    return True
+
+
 def should_run_standard_ipopt_warmup(
     args: argparse.Namespace,
     *,
@@ -1320,6 +1344,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=DEFAULT_SMOOTH_MIN_TEMPERATURE,
         help="Dimensionless smooth-min temperature for the terminal reserve proxy.",
     )
+    parser.add_argument("--experimental-max-pw-work-weight", type=float, default=0.,
+                        help="Experimental normalized terminal positive-work capacity multiplier (direct scale).")
+    parser.add_argument("--experimental-max-pw-work-substeps", type=int, default=16)
+    parser.add_argument("--experimental-max-pw-work-policy", default="all_intervals_pw_max",
+                        choices=("all_intervals_pw_max", "selected_propulsive_intervals"))
+    parser.add_argument("--experimental-max-pw-work-gradient-filter", default="full",
+                        choices=("full", "slow_fatigue_states"),
+                        help="Retain all capacity sensitivities or only Ding A, Tau1, Km per muscle.")
     parser.add_argument(
         "--experimental-mechanical-reserve-weight", type=float, default=0.0,
         help="Experimental projected mechanical margin proxy. Zero omits the cost and all reserve parameters.",
@@ -19591,6 +19623,8 @@ def solve_case(
     args._muscle_horizon_options = resolve_muscle_horizon_options(args)
     if validate_experimental_mechanical_reserve_options(args):
         args.compact_rho_output = True
+    if validate_max_pw_work_options(args):
+        args.compact_rho_output = True
     if (
         args._endurance_rollout_options is not None
         and args._muscle_horizon_options is not None
@@ -21068,6 +21102,12 @@ def solve_case(
            if fatigue_weight_binding is not None else {}),
         **({"mechanical_reserve_binding": mechanical_reserve_binding}
            if mechanical_reserve_binding is not None else {}),
+        **({"max_pw_work_options": {
+            "weight": args.experimental_max_pw_work_weight,
+            "integration_substeps": args.experimental_max_pw_work_substeps,
+            "stimulation_policy": args.experimental_max_pw_work_policy,
+            "gradient_filter": args.experimental_max_pw_work_gradient_filter,
+        }} if getattr(args, "experimental_max_pw_work_weight", 0.) > 0 else {}),
         "terminal_reserve_weight": args.terminal_reserve_weight,
         "terminal_reserve_temperature": args.terminal_reserve_temperature,
         **({"endurance_rollout_options": args._endurance_rollout_options}
@@ -24904,6 +24944,15 @@ def solve_case(
         update_start = perf_counter()
         rho_iteration_start_times.append(update_start)
         try:
+            if getattr(_nmpc, "max_pw_work_binding", None) is not None and _sol is not None:
+                from cocofest.optimization.max_pw_work_capacity_ocp import max_pw_work_boundary
+                feasibility = _solution_feasibility_summary(_sol, _window_feasibility_tolerance(args))
+                audit = max_pw_work_boundary(_nmpc, _sol,
+                    certified=_rho_solution_is_certified(_sol.status, feasibility))
+                _nmpc.last_max_pw_work_audit = audit
+                if not audit["accepted"]:
+                    print(f"max_pw_work_hold: {audit}", flush=True)
+                    return False
             return untimed_update_functions(_nmpc, cycle_idx, _sol)
         finally:
             orchestration_timing_samples["update_functions"].append(
