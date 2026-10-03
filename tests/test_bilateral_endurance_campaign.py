@@ -47,6 +47,17 @@ def test_candidate_payload_keeps_base_pace_safety_limits(tmp_path):
     assert payload["resistance_pace"]["minimum_arm_equivalent_mean_torque_nm"] == .02
 
 
+def test_candidate_payload_can_hold_a_strict_half_half_work_split(tmp_path):
+    protocol = BilateralEnduranceCampaignConfig(
+        **{**config(tmp_path).to_dict(), "resistance_capacity_feedback": False}).validate()
+    half_half = BilateralEnduranceCandidate(.4, .5, candidate().right_weights, candidate().left_weights)
+    payload = protocol.payload_for(half_half, 30)
+    assert payload["resistance_pace"]["capacity_feedback"] is False
+    assert payload["resistance_pace"]["initial_right_fraction"] == pytest.approx(.5)
+    assert payload["right_equivalent_mean_torque_nm"] == pytest.approx(.2)
+    assert payload["left_equivalent_mean_torque_nm"] == pytest.approx(.2)
+
+
 def test_campaign_rejects_non_certification_protocol(tmp_path):
     with pytest.raises(ValueError, match="solver"):
         BilateralEnduranceCampaignConfig(

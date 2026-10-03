@@ -93,6 +93,7 @@ class BilateralEnduranceCampaignConfig:
     update_every_cycles: int = 10
     initial_weight_basis: str = "uniform independent-arm baseline; no FHO data"
     adaptation_enabled: bool = False
+    resistance_capacity_feedback: bool = True
 
     def __post_init__(self):
         if isinstance(self.fidelities, list):
@@ -125,6 +126,8 @@ class BilateralEnduranceCampaignConfig:
             raise ValueError("initial_weight_basis is required for provenance.")
         if type(self.adaptation_enabled) is not bool:
             raise ValueError("adaptation_enabled must be boolean.")
+        if type(self.resistance_capacity_feedback) is not bool:
+            raise ValueError("resistance_capacity_feedback must be boolean.")
         return self
 
     def to_dict(self) -> dict[str, Any]:
@@ -155,7 +158,9 @@ class BilateralEnduranceCampaignConfig:
         resistance_pace.update({
             "total_equivalent_mean_torque_nm": total,
             "initial_right_fraction": fraction,
-            "capacity_feedback": True,
+            # A BO reference can deliberately fix a 50--50 task split.  Do
+            # not silently turn that ablation into the causal D/G allocator.
+            "capacity_feedback": self.resistance_capacity_feedback,
             "update_every_cycles": self.update_every_cycles,
         })
         muscle_pace.update({
