@@ -45,6 +45,7 @@ class IsokineticCyclingConfig:
     load_torque_min_nm: float = -3.0
     load_torque_max_nm: float = 3.0
     number_of_turns: int = 1
+    enforce_work_per_cycle: bool = False
 
     def __post_init__(self):
         omega = _finite_scalar(self.omega_target_rad_s, "omega_target_rad_s")
@@ -86,6 +87,8 @@ class IsokineticCyclingConfig:
             raise ValueError("number_of_turns must be a strictly positive integer.")
         if self.number_of_turns <= 0:
             raise ValueError("number_of_turns must be a strictly positive integer.")
+        if not isinstance(self.enforce_work_per_cycle, (bool, np.bool_)):
+            raise ValueError("enforce_work_per_cycle must be a boolean.")
 
         object.__setattr__(self, "omega_target_rad_s", omega)
         object.__setattr__(
@@ -94,12 +97,21 @@ class IsokineticCyclingConfig:
         object.__setattr__(self, "load_torque_min_nm", torque_min)
         object.__setattr__(self, "load_torque_max_nm", torque_max)
         object.__setattr__(self, "number_of_turns", int(self.number_of_turns))
+        object.__setattr__(
+            self, "enforce_work_per_cycle", bool(self.enforce_work_per_cycle)
+        )
 
     @property
     def energy_target_j(self) -> float:
         """Net work requested over the complete RHO window."""
 
         return self.energy_equivalent_torque_nm * TWO_PI * self.number_of_turns
+
+    @property
+    def per_cycle_energy_target_j(self) -> float:
+        """Net work required over one crank turn."""
+
+        return self.energy_equivalent_torque_nm * TWO_PI
 
     @property
     def angle_change_rad(self) -> float:

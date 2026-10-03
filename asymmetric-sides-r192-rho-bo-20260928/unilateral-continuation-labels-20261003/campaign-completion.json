@@ -1,0 +1,1877 @@
+{
+  "completed": true,
+  "jobs": [
+    {
+      "continuation_cycles": 48,
+      "cpu": 12,
+      "exact_label_allowed": true,
+      "job_id": "left-c120-unit-d1",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-unit-d1",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "12"
+          ],
+          "phase": "intervention",
+          "pid": 8,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-unit-d1",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "12"
+          ],
+          "phase": "continuation",
+          "pid": 23,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        12
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-unit-d1/continuation/result.json",
+      "result_sha256": "a7f96c5d469f89eac524a3b2c4a9fa20f0e3ac967185fa8a3a2d1f97d1db6ca3",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 46,
+      "cpu": 13,
+      "exact_label_allowed": true,
+      "job_id": "left-c120-unit-d3",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-unit-d3",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "13"
+          ],
+          "phase": "intervention",
+          "pid": 9,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-unit-d3",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "13"
+          ],
+          "phase": "continuation",
+          "pid": 26,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        13
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-unit-d3/continuation/result.json",
+      "result_sha256": "114064b4a4c3de15980100a3ce1f12a925692525c2ea92c9d1a181c9df1b8ceb",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 28,
+      "cpu": 14,
+      "exact_label_allowed": true,
+      "job_id": "left-c140-unit-d1",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-unit-d1",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "14"
+          ],
+          "phase": "intervention",
+          "pid": 7,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-unit-d1",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "14"
+          ],
+          "phase": "continuation",
+          "pid": 24,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        14
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-unit-d1/continuation/result.json",
+      "result_sha256": "fe45b5d65575773dd40cd0fa4c6c9c016191adaf0d2e2dccbb57e3b4e8b2ff32",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 26,
+      "cpu": 15,
+      "exact_label_allowed": true,
+      "job_id": "left-c140-unit-d3",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-unit-d3",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "15"
+          ],
+          "phase": "intervention",
+          "pid": 10,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-unit-d3",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "15"
+          ],
+          "phase": "continuation",
+          "pid": 25,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        15
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-unit-d3/continuation/result.json",
+      "result_sha256": "f503eff851e2e6a0fd140ebb79cf1c9fae412c0a2b491f36931dc0d01576c2bf",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 48,
+      "cpu": 12,
+      "exact_label_allowed": true,
+      "job_id": "left-c120-contrast-1-plus-d1",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-contrast-1-plus-d1",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "12"
+          ],
+          "phase": "intervention",
+          "pid": 231,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-contrast-1-plus-d1",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "12"
+          ],
+          "phase": "continuation",
+          "pid": 236,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        12
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-contrast-1-plus-d1/continuation/result.json",
+      "result_sha256": "0da89236bb88db7b788d595338fe30d77da889c7f969f98314598d5088210de1",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 48,
+      "cpu": 12,
+      "exact_label_allowed": true,
+      "job_id": "left-c120-contrast-2-plus-d1",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-contrast-2-plus-d1",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "12"
+          ],
+          "phase": "intervention",
+          "pid": 329,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-contrast-2-plus-d1",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "12"
+          ],
+          "phase": "continuation",
+          "pid": 330,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        12
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-contrast-2-plus-d1/continuation/result.json",
+      "result_sha256": "fce54c9bf6d78527641bb0a14013fff08b24b5692c5392b1ffdb3994ae5e8fad",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 48,
+      "cpu": 12,
+      "exact_label_allowed": true,
+      "job_id": "left-c120-contrast-3-plus-d1",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-contrast-3-plus-d1",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "12"
+          ],
+          "phase": "intervention",
+          "pid": 497,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-contrast-3-plus-d1",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "12"
+          ],
+          "phase": "continuation",
+          "pid": 498,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        12
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-contrast-3-plus-d1/continuation/result.json",
+      "result_sha256": "24b3d5ba3a1b18d9db3149a42084cc19690d24542392646cbb1e8b9a953341ed",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 48,
+      "cpu": 12,
+      "exact_label_allowed": true,
+      "job_id": "left-c120-mixed-plus-d1",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-mixed-plus-d1",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "12"
+          ],
+          "phase": "intervention",
+          "pid": 705,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-mixed-plus-d1",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "12"
+          ],
+          "phase": "continuation",
+          "pid": 706,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        12
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-mixed-plus-d1/continuation/result.json",
+      "result_sha256": "3e0c8ca15fca5085b1323e530096a8d913522a16f6ec5f663ac6efdf34b3d570",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 28,
+      "cpu": 12,
+      "exact_label_allowed": true,
+      "job_id": "left-c140-contrast-1-plus-d1",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-contrast-1-plus-d1",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "12"
+          ],
+          "phase": "intervention",
+          "pid": 881,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-contrast-1-plus-d1",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "12"
+          ],
+          "phase": "continuation",
+          "pid": 902,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        12
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-contrast-1-plus-d1/continuation/result.json",
+      "result_sha256": "165d8e506072fb2ef101d7ec9eb71737de82f930022ff78c261b36b6cecdd090",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 28,
+      "cpu": 12,
+      "exact_label_allowed": true,
+      "job_id": "left-c140-contrast-2-plus-d1",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-contrast-2-plus-d1",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "12"
+          ],
+          "phase": "intervention",
+          "pid": 1119,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-contrast-2-plus-d1",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "12"
+          ],
+          "phase": "continuation",
+          "pid": 1121,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        12
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-contrast-2-plus-d1/continuation/result.json",
+      "result_sha256": "d6a8d336ba2ca4590cfd361b2af7b80426295b40986232d6d1b963eefcfcba42",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 28,
+      "cpu": 12,
+      "exact_label_allowed": true,
+      "job_id": "left-c140-contrast-3-plus-d1",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-contrast-3-plus-d1",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "12"
+          ],
+          "phase": "intervention",
+          "pid": 1328,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-contrast-3-plus-d1",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "12"
+          ],
+          "phase": "continuation",
+          "pid": 1329,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        12
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-contrast-3-plus-d1/continuation/result.json",
+      "result_sha256": "f0a273911de700cb670e038232e2537b03b63289d3733a8365838fd1d0783889",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 28,
+      "cpu": 12,
+      "exact_label_allowed": true,
+      "job_id": "left-c140-mixed-plus-d1",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-mixed-plus-d1",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "12"
+          ],
+          "phase": "intervention",
+          "pid": 1505,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-mixed-plus-d1",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "12"
+          ],
+          "phase": "continuation",
+          "pid": 1506,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        12
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-mixed-plus-d1/continuation/result.json",
+      "result_sha256": "c1e36115bb20560b8b8caeb12a96bf2caaf46c4fe370893452e3ac577ef4bf73",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 46,
+      "cpu": 13,
+      "exact_label_allowed": true,
+      "job_id": "left-c120-contrast-1-plus-d3",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-contrast-1-plus-d3",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "13"
+          ],
+          "phase": "intervention",
+          "pid": 233,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-contrast-1-plus-d3",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "13"
+          ],
+          "phase": "continuation",
+          "pid": 237,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        13
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-contrast-1-plus-d3/continuation/result.json",
+      "result_sha256": "1bc0c3edfe928a8415d6ea27c5e3bccc6de994b4ef87a80aa4d5d599638a0a84",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 46,
+      "cpu": 13,
+      "exact_label_allowed": true,
+      "job_id": "left-c120-contrast-2-plus-d3",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-contrast-2-plus-d3",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "13"
+          ],
+          "phase": "intervention",
+          "pid": 465,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-contrast-2-plus-d3",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "13"
+          ],
+          "phase": "continuation",
+          "pid": 466,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        13
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-contrast-2-plus-d3/continuation/result.json",
+      "result_sha256": "5a46b4c66c52606b0e223a09a01977512a9ed11d50510e9f3ed299dc7b595cec",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 46,
+      "cpu": 13,
+      "exact_label_allowed": true,
+      "job_id": "left-c120-contrast-3-plus-d3",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-contrast-3-plus-d3",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "13"
+          ],
+          "phase": "intervention",
+          "pid": 673,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-contrast-3-plus-d3",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "13"
+          ],
+          "phase": "continuation",
+          "pid": 694,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        13
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-contrast-3-plus-d3/continuation/result.json",
+      "result_sha256": "eb4a1decab0a2adf2d37c8bb16327848e17b6cef531f8e254463dfb53bc65ee3",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 46,
+      "cpu": 13,
+      "exact_label_allowed": true,
+      "job_id": "left-c120-mixed-plus-d3",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-mixed-plus-d3",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "13"
+          ],
+          "phase": "intervention",
+          "pid": 913,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-mixed-plus-d3",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "13"
+          ],
+          "phase": "continuation",
+          "pid": 914,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        13
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-mixed-plus-d3/continuation/result.json",
+      "result_sha256": "0f4d2755a17b97ed3a73c31d388b9cf4ac8f344459d4faab3f3926a5f735c4fd",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 26,
+      "cpu": 13,
+      "exact_label_allowed": true,
+      "job_id": "left-c140-contrast-1-plus-d3",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-contrast-1-plus-d3",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "13"
+          ],
+          "phase": "intervention",
+          "pid": 1120,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-contrast-1-plus-d3",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "13"
+          ],
+          "phase": "continuation",
+          "pid": 1122,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        13
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-contrast-1-plus-d3/continuation/result.json",
+      "result_sha256": "124149906703ddb926ac2f7a98460a300380cdfc0012d4cad77517d2751c0cab",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 26,
+      "cpu": 13,
+      "exact_label_allowed": true,
+      "job_id": "left-c140-contrast-2-plus-d3",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-contrast-2-plus-d3",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "13"
+          ],
+          "phase": "intervention",
+          "pid": 1327,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-contrast-2-plus-d3",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "13"
+          ],
+          "phase": "continuation",
+          "pid": 1330,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        13
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-contrast-2-plus-d3/continuation/result.json",
+      "result_sha256": "b8af5805169f9f39414325a7503d4b79831fdfdea60b4c393e514ee9e1741637",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 26,
+      "cpu": 13,
+      "exact_label_allowed": true,
+      "job_id": "left-c140-contrast-3-plus-d3",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-contrast-3-plus-d3",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "13"
+          ],
+          "phase": "intervention",
+          "pid": 1537,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-contrast-3-plus-d3",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "13"
+          ],
+          "phase": "continuation",
+          "pid": 1538,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        13
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-contrast-3-plus-d3/continuation/result.json",
+      "result_sha256": "567afbe09080b0b47870f02e32989aa078fe25fd753aa290d7a43149f1c73241",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 26,
+      "cpu": 13,
+      "exact_label_allowed": true,
+      "job_id": "left-c140-mixed-plus-d3",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-mixed-plus-d3",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "13"
+          ],
+          "phase": "intervention",
+          "pid": 1731,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-mixed-plus-d3",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "13"
+          ],
+          "phase": "continuation",
+          "pid": 1743,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        13
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-mixed-plus-d3/continuation/result.json",
+      "result_sha256": "4a778bebf10fd68b126366c76487672e0e82d24fcdefe70ffa2e20b5584bab5a",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 48,
+      "cpu": 14,
+      "exact_label_allowed": true,
+      "job_id": "left-c120-contrast-1-minus-d1",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-contrast-1-minus-d1",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "14"
+          ],
+          "phase": "intervention",
+          "pid": 232,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-contrast-1-minus-d1",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "14"
+          ],
+          "phase": "continuation",
+          "pid": 235,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        14
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-contrast-1-minus-d1/continuation/result.json",
+      "result_sha256": "417f31d47590917e7e67c39db0be74bcf02bbc3be1329b7cce3ce32dcbf8c439",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 48,
+      "cpu": 14,
+      "exact_label_allowed": true,
+      "job_id": "left-c120-contrast-2-minus-d1",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-contrast-2-minus-d1",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "14"
+          ],
+          "phase": "intervention",
+          "pid": 401,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-contrast-2-minus-d1",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "14"
+          ],
+          "phase": "continuation",
+          "pid": 413,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        14
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-contrast-2-minus-d1/continuation/result.json",
+      "result_sha256": "5dd623cecd7b7733e24909a98ae02bae40d73c8fde02e6a7753b4fbd6c96fdb2",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 48,
+      "cpu": 14,
+      "exact_label_allowed": true,
+      "job_id": "left-c120-contrast-3-minus-d1",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-contrast-3-minus-d1",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "14"
+          ],
+          "phase": "intervention",
+          "pid": 579,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-contrast-3-minus-d1",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "14"
+          ],
+          "phase": "continuation",
+          "pid": 580,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        14
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-contrast-3-minus-d1/continuation/result.json",
+      "result_sha256": "7791bde9ee969256f503ff63343dd725f2b3b9e240358bbdf926c61845e5c8f1",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 48,
+      "cpu": 14,
+      "exact_label_allowed": true,
+      "job_id": "left-c120-mixed-minus-d1",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-mixed-minus-d1",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "14"
+          ],
+          "phase": "intervention",
+          "pid": 829,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-mixed-minus-d1",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "14"
+          ],
+          "phase": "continuation",
+          "pid": 840,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        14
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-mixed-minus-d1/continuation/result.json",
+      "result_sha256": "06bb880edfe97e87f91d73e465352f2551868b04f468a5b67026d23ad8348e19",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 28,
+      "cpu": 14,
+      "exact_label_allowed": true,
+      "job_id": "left-c140-contrast-1-minus-d1",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-contrast-1-minus-d1",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "14"
+          ],
+          "phase": "intervention",
+          "pid": 1077,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-contrast-1-minus-d1",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "14"
+          ],
+          "phase": "continuation",
+          "pid": 1118,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        14
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-contrast-1-minus-d1/continuation/result.json",
+      "result_sha256": "f6c242a1595a1a266da14bc050f8855dbd359a7c739bca440240cae82bdf7cd9",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 28,
+      "cpu": 14,
+      "exact_label_allowed": true,
+      "job_id": "left-c140-contrast-2-minus-d1",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-contrast-2-minus-d1",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "14"
+          ],
+          "phase": "intervention",
+          "pid": 1265,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-contrast-2-minus-d1",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "14"
+          ],
+          "phase": "continuation",
+          "pid": 1286,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        14
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-contrast-2-minus-d1/continuation/result.json",
+      "result_sha256": "523ffc8f30d334676fb718a622fedb0afeb54f58aeb7b215346e35717a7ff0af",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 28,
+      "cpu": 14,
+      "exact_label_allowed": true,
+      "job_id": "left-c140-contrast-3-minus-d1",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-contrast-3-minus-d1",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "14"
+          ],
+          "phase": "intervention",
+          "pid": 1451,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-contrast-3-minus-d1",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "14"
+          ],
+          "phase": "continuation",
+          "pid": 1482,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        14
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-contrast-3-minus-d1/continuation/result.json",
+      "result_sha256": "dc5e8512e8a3265cfc61ce6c4241382469da136eff79f4208b3ae730ba79eb09",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 28,
+      "cpu": 14,
+      "exact_label_allowed": true,
+      "job_id": "left-c140-mixed-minus-d1",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-mixed-minus-d1",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "14"
+          ],
+          "phase": "intervention",
+          "pid": 1649,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-mixed-minus-d1",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "14"
+          ],
+          "phase": "continuation",
+          "pid": 1670,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        14
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-mixed-minus-d1/continuation/result.json",
+      "result_sha256": "d458769fb32e414e76083b402d3e45cbe0cb99b165b629afda2a56da76a815f9",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 46,
+      "cpu": 15,
+      "exact_label_allowed": true,
+      "job_id": "left-c120-contrast-1-minus-d3",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-contrast-1-minus-d3",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "15"
+          ],
+          "phase": "intervention",
+          "pid": 234,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-contrast-1-minus-d3",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "15"
+          ],
+          "phase": "continuation",
+          "pid": 238,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        15
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-contrast-1-minus-d3/continuation/result.json",
+      "result_sha256": "9cd8be415a25dc5417bb9e01e17a3bc50b3dedfca595d682e83c76c91381dbc0",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 46,
+      "cpu": 15,
+      "exact_label_allowed": true,
+      "job_id": "left-c120-contrast-2-minus-d3",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-contrast-2-minus-d3",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "15"
+          ],
+          "phase": "intervention",
+          "pid": 412,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-contrast-2-minus-d3",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "15"
+          ],
+          "phase": "continuation",
+          "pid": 414,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        15
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-contrast-2-minus-d3/continuation/result.json",
+      "result_sha256": "52b28044246de805f7b1d4f77e47ab25200d308918dd7d92e535deb998983604",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 46,
+      "cpu": 15,
+      "exact_label_allowed": true,
+      "job_id": "left-c120-contrast-3-minus-d3",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-contrast-3-minus-d3",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "15"
+          ],
+          "phase": "intervention",
+          "pid": 621,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-contrast-3-minus-d3",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "15"
+          ],
+          "phase": "continuation",
+          "pid": 632,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        15
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-contrast-3-minus-d3/continuation/result.json",
+      "result_sha256": "c7236d71bd99637fca382ee342381ceec09e8f2819c47e2b1c99eb5a549f4b46",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 46,
+      "cpu": 15,
+      "exact_label_allowed": true,
+      "job_id": "left-c120-mixed-minus-d3",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-mixed-minus-d3",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "15"
+          ],
+          "phase": "intervention",
+          "pid": 787,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c120-mixed-minus-d3",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "15"
+          ],
+          "phase": "continuation",
+          "pid": 808,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        15
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-mixed-minus-d3/continuation/result.json",
+      "result_sha256": "e07223cf261ce98d540afbef524b133a98f8a640acef20e12e78f266d7e7a098",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 26,
+      "cpu": 15,
+      "exact_label_allowed": true,
+      "job_id": "left-c140-contrast-1-minus-d3",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-contrast-1-minus-d3",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "15"
+          ],
+          "phase": "intervention",
+          "pid": 985,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-contrast-1-minus-d3",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "15"
+          ],
+          "phase": "continuation",
+          "pid": 1006,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        15
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-contrast-1-minus-d3/continuation/result.json",
+      "result_sha256": "c4053fc6ef0a45fd7fba54a14a88107c9669fa4acf22967e8fd3b657e1dbfc88",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 26,
+      "cpu": 15,
+      "exact_label_allowed": true,
+      "job_id": "left-c140-contrast-2-minus-d3",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-contrast-2-minus-d3",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "15"
+          ],
+          "phase": "intervention",
+          "pid": 1223,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-contrast-2-minus-d3",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "15"
+          ],
+          "phase": "continuation",
+          "pid": 1264,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        15
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-contrast-2-minus-d3/continuation/result.json",
+      "result_sha256": "67ce37b1730ce4425b9981e18d4bd4132b7eeadc3c805d67ec12fe3a8b0b3509",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 26,
+      "cpu": 15,
+      "exact_label_allowed": true,
+      "job_id": "left-c140-contrast-3-minus-d3",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-contrast-3-minus-d3",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "15"
+          ],
+          "phase": "intervention",
+          "pid": 1483,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-contrast-3-minus-d3",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "15"
+          ],
+          "phase": "continuation",
+          "pid": 1504,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        15
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-contrast-3-minus-d3/continuation/result.json",
+      "result_sha256": "27db070e674b1ed892cc5eab6938296c1bd8d1660b8120e766cf88e4e8554611",
+      "status": "physiological_failure_certified"
+    },
+    {
+      "continuation_cycles": 26,
+      "cpu": 15,
+      "exact_label_allowed": true,
+      "job_id": "left-c140-mixed-minus-d3",
+      "last_certified_cycle": 169,
+      "numeric_threads": 1,
+      "phases": [
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-mixed-minus-d3",
+            "--phase",
+            "intervention",
+            "--cpu",
+            "15"
+          ],
+          "phase": "intervention",
+          "pid": 1742,
+          "returncode": 0
+        },
+        {
+          "command": [
+            "/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+            "worker",
+            "--manifest",
+            "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+            "--job-id",
+            "left-c140-mixed-minus-d3",
+            "--phase",
+            "continuation",
+            "--cpu",
+            "15"
+          ],
+          "phase": "continuation",
+          "pid": 1744,
+          "returncode": 0
+        }
+      ],
+      "reserved_affinity": [
+        15
+      ],
+      "result": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-mixed-minus-d3/continuation/result.json",
+      "result_sha256": "ce23e563820773298a98c93d5467ee72a16f5fcb7f05c34ce80c27507fc32414",
+      "status": "physiological_failure_certified"
+    }
+  ]
+}

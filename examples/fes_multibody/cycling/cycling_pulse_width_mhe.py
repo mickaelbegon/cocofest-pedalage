@@ -62,6 +62,11 @@ from cocofest.optimization.endurance_rollout_ocp import (
 )
 from cocofest.optimization.muscle_horizon_ocp import MuscleHorizonBinding
 from cocofest.optimization.parametric_fatigue_weights import ParametricFatigueWeightBinding
+from cocofest.optimization.fatigue_objective_ablation import (
+    terminal_linear_fatigue,
+    terminal_parameterized_linear_fatigue,
+    validate_fatigue_objective_variant,
+)
 from cocofest.optimization.task_reserve_ocp import (
     TaskReserveObjectiveBinding,
     task_reserve_parameter_options,
@@ -1297,6 +1302,7 @@ def prepare_nmpc(
     minimize_control = simulation_conditions["minimize_control"]
     cost_fun_weight = simulation_conditions["cost_fun_weight"]
     objective_shape = simulation_conditions.get("objective_shape", "quadratic")
+    fatigue_objective_variant = simulation_conditions.get("fatigue_objective_variant", "legacy")
     terminal_reserve_weight = simulation_conditions.get(
         "terminal_reserve_weight", 0.0
     )
@@ -1308,6 +1314,7 @@ def prepare_nmpc(
     muscle_horizon_options = simulation_conditions.get("muscle_horizon_options")
     muscle_horizon_binding = None
     fatigue_weight_binding = simulation_conditions.get("fatigue_weight_binding")
+    control_weight_binding = simulation_conditions.get("control_weight_binding")
     task_reserve_binding = simulation_conditions.get("task_reserve_binding")
     max_pw_work_binding = simulation_conditions.get("max_pw_work_binding")
     mechanical_reserve_binding = simulation_conditions.get("mechanical_reserve_binding")
@@ -1461,6 +1468,9 @@ def prepare_nmpc(
             load_torque_min_nm=simulation_conditions.get("load_torque_min", -3.0),
             load_torque_max_nm=simulation_conditions.get("load_torque_max", 3.0),
             number_of_turns=n_cycles_simultaneous,
+            enforce_work_per_cycle=simulation_conditions.get(
+                "enforce_isokinetic_work_per_cycle", False
+            ),
         )
         if not np.isclose(
             window_cycle_duration,
@@ -1690,6 +1700,15 @@ def prepare_nmpc(
             raise ValueError("fatigue_weight_binding requires the fatigue objective.")
         if fatigue_weight_binding.size != len(model.muscles_dynamics_model):
             raise ValueError("Fatigue-weight binding does not match the model muscle count.")
+    if control_weight_binding is not None:
+        from cocofest.optimization.parametric_control_weights import ParametricControlWeightBinding
+
+        if not isinstance(control_weight_binding, ParametricControlWeightBinding):
+            raise TypeError("control_weight_binding must be a ParametricControlWeightBinding.")
+        if not minimize_control:
+            raise ValueError("control_weight_binding requires the control objective.")
+        if control_weight_binding.size != len(model.muscles_dynamics_model):
+            raise ValueError("Control-weight binding does not match the model muscle count.")
     if mechanical_reserve_binding is not None:
         from cocofest.optimization.mechanical_reserve_projection_ocp import MechanicalReserveProjectionBinding
 
@@ -1797,6 +1816,10 @@ def prepare_nmpc(
         ),
         enforce_isokinetic_equilibrium=isokinetic_config is not None,
         isokinetic_config=isokinetic_config,
+        enforce_isokinetic_work_per_cycle=(
+            isokinetic_config is not None
+            and isokinetic_config.enforce_work_per_cycle
+        ),
     )
 
     # --- Set objective --- #
@@ -1881,11 +1904,14 @@ def prepare_nmpc(
             else x_init["q"].init[2][-1]
         ),
         objective_shape=objective_shape,
+        fatigue_objective_variant=fatigue_objective_variant,
+        fatigue_objective_duration_s=window_cycle_duration,
         terminal_reserve_weight=terminal_reserve_weight,
         terminal_reserve_temperature=terminal_reserve_temperature,
         endurance_rollout_binding=rollout_binding,
         muscle_horizon_binding=muscle_horizon_binding,
         fatigue_weight_binding=fatigue_weight_binding,
+        control_weight_binding=control_weight_binding,
         task_reserve_binding=task_reserve_binding,
         max_pw_work_binding=max_pw_work_binding,
         mechanical_reserve_binding=mechanical_reserve_binding,
@@ -1955,7 +1981,7 @@ def prepare_nmpc(
         nmpc_options["ordering_strategy"] = mhe_info["ordering_strategy"]
     parameter_bindings = tuple(
         binding for binding in (rollout_binding, muscle_horizon_binding, fatigue_weight_binding,
-                                mechanical_reserve_binding, task_reserve_binding,
+                                control_weight_binding, mechanical_reserve_binding, task_reserve_binding,
                                 max_pw_work_binding)
         if binding is not None
     )
@@ -1980,6 +2006,8 @@ def prepare_nmpc(
         ))
     elif fatigue_weight_binding is not None:
         nmpc_options.update(fatigue_weight_binding.parameter_options(use_sx=use_sx))
+    elif control_weight_binding is not None:
+        nmpc_options.update(control_weight_binding.parameter_options(use_sx=use_sx))
     elif rollout_binding is not None:
         nmpc_options.update(rollout_binding.parameter_options(use_sx=use_sx))
     elif muscle_horizon_binding is not None:
@@ -1996,6 +2024,9 @@ def prepare_nmpc(
     if fatigue_weight_binding is not None:
         fatigue_weight_binding.attach(nmpc)
         nmpc.fatigue_weight_binding = fatigue_weight_binding
+    if control_weight_binding is not None:
+        control_weight_binding.attach(nmpc)
+        nmpc.control_weight_binding = control_weight_binding
     if mechanical_reserve_binding is not None:
         mechanical_reserve_binding.attach(nmpc)
         nmpc.mechanical_reserve_binding = mechanical_reserve_binding
@@ -3084,6 +3115,7 @@ def set_constraints(
     physical_crank_terminal_angle: float | None = None,
     enforce_isokinetic_equilibrium: bool = False,
     isokinetic_config: IsokineticCyclingConfig | None = None,
+    enforce_isokinetic_work_per_cycle: bool = False,
 ):
     constraints = ConstraintList()
     if not np.isfinite(contact_position_tolerance_m) or contact_position_tolerance_m < 0.0:
@@ -3126,6 +3158,27 @@ def set_constraints(
             min_bound=guarded_minimum,
             max_bound=guarded_maximum,
         )
+    if enforce_isokinetic_work_per_cycle:
+        if isokinetic_config is None:
+            raise ValueError(
+                "Per-cycle isokinetic work requires an isokinetic configuration."
+            )
+        if cycle_len is None or cycle_len <= 0:
+            raise ValueError("Per-cycle isokinetic work requires a positive cycle_len.")
+        if n_cycles_simultaneous < 1:
+            raise ValueError("n_cycles_simultaneous must be strictly positive.")
+        # The terminal E_prod bound fixes the Nth boundary.  Fixing every
+        # preceding boundary to k*W makes every individual cycle carry W,
+        # rather than merely enforcing the same work over the whole FHO.
+        for cycle_index in range(1, n_cycles_simultaneous):
+            target = cycle_index * isokinetic_config.per_cycle_energy_target_j
+            constraints.add(
+                ConstraintFcn.TRACK_STATE,
+                key="E_prod",
+                node=cycle_index * cycle_len,
+                min_bound=target,
+                max_bound=target,
+            )
     if (
         enforce_contact_constraints_terminal
         or enforce_contact_position_terminal
@@ -3379,6 +3432,8 @@ def set_objective_functions(
     cost_fun_weight,
     target,
     objective_shape: str = "quadratic",
+    fatigue_objective_variant: str = "legacy",
+    fatigue_objective_duration_s: float = 1.0,
     terminal_reserve_weight: float = 0.0,
     terminal_reserve_temperature: float = DEFAULT_SMOOTH_MIN_TEMPERATURE,
     control_regularization_weight: float = 0.0,
@@ -3395,6 +3450,7 @@ def set_objective_functions(
     endurance_rollout_binding=None,
     muscle_horizon_binding=None,
     fatigue_weight_binding=None,
+    control_weight_binding=None,
     mechanical_reserve_binding=None,
     task_reserve_binding=None,
     max_pw_work_binding=None,
@@ -3414,6 +3470,11 @@ def set_objective_functions(
         or terminal_reserve_temperature <= 0.0
     ):
         raise ValueError("terminal_reserve_temperature must be finite and positive.")
+    fatigue_objective_variant = validate_fatigue_objective_variant(
+        fatigue_objective_variant,
+        minimize_fatigue=minimize_fatigue,
+        duration_s=fatigue_objective_duration_s,
+    )
 
     objective_functions = ObjectiveList()
     if max_pw_work_binding is not None:
@@ -3476,20 +3537,36 @@ def set_objective_functions(
             quadratic=is_quadratic,
         )
     if minimize_fatigue:
-        objective_functions.add(
-            (
+        is_terminal_fatigue = fatigue_objective_variant.startswith("terminal_")
+        is_linear_fatigue = fatigue_objective_variant in ("integral_linear", "terminal_linear")
+        if is_linear_fatigue:
+            fatigue_function = (
+                terminal_parameterized_linear_fatigue
+                if fatigue_weight_binding is not None
+                else terminal_linear_fatigue
+            )
+        else:
+            fatigue_function = (
                 CustomObjective.minimize_parameterized_overall_muscle_fatigue
                 if fatigue_weight_binding is not None
                 else CustomObjective.minimize_overall_muscle_fatigue
-            ),
-            custom_type=ObjectiveFcn.Lagrange,
-            node=Node.ALL,
-            weight=10000 * cost_fun_weight[1],
-            quadratic=is_quadratic,
+            )
+        objective_functions.add(
+            fatigue_function,
+            custom_type=ObjectiveFcn.Mayer if is_terminal_fatigue else ObjectiveFcn.Lagrange,
+            node=Node.END if is_terminal_fatigue else Node.ALL,
+            weight=(10000 * cost_fun_weight[1]
+                    * (fatigue_objective_duration_s if is_terminal_fatigue else 1.0)),
+            quadratic=(False if is_linear_fatigue else
+                       True if fatigue_objective_variant != "legacy" else is_quadratic),
         )
     if minimize_control:
         objective_functions.add(
-            CustomObjective.minimize_overall_stimulation_charge,
+            (
+                CustomObjective.minimize_parameterized_overall_stimulation_charge
+                if control_weight_binding is not None
+                else CustomObjective.minimize_overall_stimulation_charge
+            ),
             custom_type=ObjectiveFcn.Lagrange,
             node=Node.ALL,
             weight=10000 * cost_fun_weight[2],

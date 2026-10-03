@@ -136,6 +136,7 @@ BENCHMARK_CONFIGURATION_FIELDS = (
     "mechanical_formulation",
     "formulation",
     "isokinetic_kinematics",
+    "enforce_isokinetic_work_per_cycle",
     "isokinetic_omega",
     "energy_equivalent_torque",
     "energy_target_j",
@@ -314,6 +315,8 @@ BENCHMARK_CONFIGURATION_FIELDS = (
     "ipopt_limited_memory_max_history",
     "parametric_fatigue_weights",
     "fatigue_weight_values",
+    "parametric_control_weights",
+    "control_weight_values",
     "warmup_ipopt_linear_solver",
     "standard_warmup_seed",
     "standard_warmup_seed_continuation",
@@ -4023,6 +4026,7 @@ def main(
     bilateral_reduced: bool = False,
     formulation: str = "dynamic",
     isokinetic_kinematics: str = "states",
+    enforce_isokinetic_work_per_cycle: bool = False,
     reduced_dynamic_residual: str = "direct",
     energy_equivalent_torque: float = 0.2,
     isokinetic_omega: float = -float(2 * np.pi),
@@ -4047,6 +4051,8 @@ def main(
     ipopt_limited_memory_max_history: int | None = None,
     parametric_fatigue_weights: bool = False,
     fatigue_weight_values: tuple[float, ...] | list[float] | None = None,
+    parametric_control_weights: bool = False,
+    control_weight_values: tuple[float, ...] | list[float] | None = None,
     warmup_ipopt_linear_solver: str | None = None,
     standard_warmup_seed: str | Path | None = None,
     standard_warmup_seed_continuation: bool = False,
@@ -4706,6 +4712,10 @@ def main(
     acados_args.parametric_fatigue_weights = bool(parametric_fatigue_weights)
     ipopt_args.fatigue_weight_values = fatigue_weight_values
     acados_args.fatigue_weight_values = fatigue_weight_values
+    ipopt_args.parametric_control_weights = bool(parametric_control_weights)
+    acados_args.parametric_control_weights = bool(parametric_control_weights)
+    ipopt_args.control_weight_values = control_weight_values
+    acados_args.control_weight_values = control_weight_values
     ipopt_args.common_initial_solution_recenter_first_node_bounds = (
         common_initial_solution_recenter_first_node_bounds
     )
@@ -5327,6 +5337,10 @@ def main(
         raise ValueError(
             "Prescribed isokinetic kinematics require reduced isokinetic mechanics."
         )
+    if enforce_isokinetic_work_per_cycle and formulation != "isokinetic":
+        raise ValueError(
+            "enforce_isokinetic_work_per_cycle requires formulation='isokinetic'."
+        )
     if not np.isfinite(energy_equivalent_torque) or energy_equivalent_torque < 0:
         raise ValueError("energy_equivalent_torque must be finite and non-negative.")
     if not np.isfinite(isokinetic_omega) or isokinetic_omega >= 0:
@@ -5343,6 +5357,9 @@ def main(
         solver_configuration.bilateral_reduced = bilateral_reduced
         solver_configuration.formulation = formulation
         solver_configuration.isokinetic_kinematics = isokinetic_kinematics
+        solver_configuration.enforce_isokinetic_work_per_cycle = bool(
+            enforce_isokinetic_work_per_cycle
+        )
         solver_configuration.reduced_dynamic_residual = reduced_dynamic_residual
         solver_configuration.energy_equivalent_torque = float(
             energy_equivalent_torque
@@ -5518,6 +5535,14 @@ def build_cli() -> argparse.ArgumentParser:
         help="Keep theta/omega as NLP states or prescribe their exact isokinetic trajectory.",
     )
     parser.add_argument(
+        "--enforce-isokinetic-work-per-cycle",
+        action="store_true",
+        help=(
+            "Constrain cumulative produced work at every crank-turn boundary, "
+            "rather than only at the end of the complete FHO window."
+        ),
+    )
+    parser.add_argument(
         "--reduced-dynamic-residual",
         choices=("direct", "implicit_inverse"),
         default="direct",
@@ -5662,6 +5687,15 @@ def build_cli() -> argparse.ArgumentParser:
         "--fatigue-weight-values", type=float, nargs=4,
         metavar=("DELT_ANT", "DELT_POST", "BICEPS", "TRICEPS"), default=None,
         help="Fixed [0,1] weights in Delt_ant, Delt_post, Biceps, Triceps order; requires --parametric-fatigue-weights.",
+    )
+    parser.add_argument(
+        "--parametric-control-weights", action="store_true",
+        help="Keep four PW-squared weights as numerical NLP parameters for RHO-BO-PW.",
+    )
+    parser.add_argument(
+        "--control-weight-values", type=float, nargs=4,
+        metavar=("DELT_ANT", "DELT_POST", "BICEPS", "TRICEPS"), default=None,
+        help="Strictly positive PW-squared weights; requires --parametric-control-weights.",
     )
     parser.add_argument(
         "--ipopt-hessian-approximation",
@@ -7189,6 +7223,9 @@ if __name__ == "__main__":
         bilateral_reduced=args.bilateral_reduced,
         formulation=args.formulation,
         isokinetic_kinematics=args.isokinetic_kinematics,
+        enforce_isokinetic_work_per_cycle=(
+            args.enforce_isokinetic_work_per_cycle
+        ),
         reduced_dynamic_residual=args.reduced_dynamic_residual,
         energy_equivalent_torque=args.energy_equivalent_torque,
         isokinetic_omega=args.isokinetic_omega,
@@ -7218,6 +7255,8 @@ if __name__ == "__main__":
         ipopt_limited_memory_max_history=args.ipopt_limited_memory_max_history,
         parametric_fatigue_weights=args.parametric_fatigue_weights,
         fatigue_weight_values=args.fatigue_weight_values,
+        parametric_control_weights=args.parametric_control_weights,
+        control_weight_values=args.control_weight_values,
         warmup_ipopt_linear_solver=args.warmup_ipopt_linear_solver,
         standard_warmup_seed=args.standard_warmup_seed,
         standard_warmup_seed_continuation=(args.standard_warmup_seed_continuation),

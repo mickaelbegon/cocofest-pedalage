@@ -1,0 +1,1318 @@
+{
+  "actions": [
+    {
+      "action_group": "unit",
+      "amplitude": 0.35,
+      "centered_log_direction": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "id": "unit",
+      "partition": "control",
+      "weights": {
+        "Biceps": 1.0,
+        "Delt_ant": 1.0,
+        "Delt_post": 1.0,
+        "Triceps": 1.0
+      }
+    },
+    {
+      "action_group": "contrast-1-plus",
+      "amplitude": 0.35,
+      "centered_log_direction": [
+        0.7071067811865475,
+        -0.7071067811865475,
+        0.0,
+        0.0
+      ],
+      "id": "contrast-1-plus",
+      "partition": "train",
+      "weights": {
+        "Biceps": 0.9848424694844572,
+        "Delt_ant": 1.2613893766731252,
+        "Delt_post": 0.7689256843579604,
+        "Triceps": 0.9848424694844572
+      }
+    },
+    {
+      "action_group": "contrast-1-minus",
+      "amplitude": 0.35,
+      "centered_log_direction": [
+        -0.7071067811865475,
+        0.7071067811865475,
+        -0.0,
+        -0.0
+      ],
+      "id": "contrast-1-minus",
+      "partition": "train",
+      "weights": {
+        "Biceps": 0.9848424694844572,
+        "Delt_ant": 0.7689256843579604,
+        "Delt_post": 1.2613893766731252,
+        "Triceps": 0.9848424694844572
+      }
+    },
+    {
+      "action_group": "contrast-2-plus",
+      "amplitude": 0.35,
+      "centered_log_direction": [
+        0.4082482904638631,
+        0.4082482904638631,
+        -0.8164965809277261,
+        0.0
+      ],
+      "id": "contrast-2-plus",
+      "partition": "train",
+      "weights": {
+        "Biceps": 0.7405773308157807,
+        "Delt_ant": 1.1369343629222823,
+        "Delt_post": 1.1369343629222823,
+        "Triceps": 0.9855539433396548
+      }
+    },
+    {
+      "action_group": "contrast-2-minus",
+      "amplitude": 0.35,
+      "centered_log_direction": [
+        -0.4082482904638631,
+        -0.4082482904638631,
+        0.8164965809277261,
+        -0.0
+      ],
+      "id": "contrast-2-minus",
+      "partition": "train",
+      "weights": {
+        "Biceps": 1.3096743404274582,
+        "Delt_ant": 0.853096853171625,
+        "Delt_post": 0.853096853171625,
+        "Triceps": 0.9841319532292917
+      }
+    },
+    {
+      "action_group": "contrast-3-plus",
+      "amplitude": 0.35,
+      "centered_log_direction": [
+        0.2886751345948129,
+        0.2886751345948129,
+        0.2886751345948129,
+        -0.8660254037844387
+      ],
+      "id": "contrast-3-plus",
+      "partition": "train",
+      "weights": {
+        "Biceps": 1.0906471787010112,
+        "Delt_ant": 1.0906471787010112,
+        "Delt_post": 1.0906471787010112,
+        "Triceps": 0.7280584638969667
+      }
+    },
+    {
+      "action_group": "contrast-3-minus",
+      "amplitude": 0.35,
+      "centered_log_direction": [
+        -0.2886751345948129,
+        -0.2886751345948129,
+        -0.2886751345948129,
+        0.8660254037844387
+      ],
+      "id": "contrast-3-minus",
+      "partition": "train",
+      "weights": {
+        "Biceps": 0.8892798901283215,
+        "Delt_ant": 0.8892798901283215,
+        "Delt_post": 0.8892798901283215,
+        "Triceps": 1.3321603296150348
+      }
+    },
+    {
+      "action_group": "mixed-plus",
+      "amplitude": 0.35,
+      "centered_log_direction": [
+        0.8106172175260455,
+        -0.0058793634016804175,
+        -0.30473785412436505,
+        -0.5000000000000001
+      ],
+      "id": "mixed-plus",
+      "partition": "holdout",
+      "weights": {
+        "Biceps": 0.8846148473277168,
+        "Delt_ant": 1.3070482435338593,
+        "Delt_post": 0.9821586184959997,
+        "Triceps": 0.8261782906424245
+      }
+    },
+    {
+      "action_group": "mixed-minus",
+      "amplitude": 0.35,
+      "centered_log_direction": [
+        -0.8106172175260455,
+        0.0058793634016804175,
+        0.30473785412436505,
+        0.5000000000000001
+      ],
+      "id": "mixed-minus",
+      "partition": "holdout",
+      "weights": {
+        "Biceps": 1.0964254108679512,
+        "Delt_ant": 0.7420645735453729,
+        "Delt_post": 0.9875331531748224,
+        "Triceps": 1.1739768624118536
+      }
+    }
+  ],
+  "activation_allowed": false,
+  "anchors": [
+    {
+      "archive_sha256": "52bab751efa15f60dda140e175aa5083e3c2360788583f006056acb1ce5fac94",
+      "cycle": 120,
+      "prepared_problem_sha256": "67e09b17d76709be31af116271fa09365bc44be8f6e3faedb02595888bdd28ee",
+      "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-120/receipt.json",
+      "receipt_sha256": "c530501283808918e0ca665d6936bef3d2619b803f180f62f11a2a92e3b48f12"
+    },
+    {
+      "archive_sha256": "c690785d5e7ca44bce9a7dafe3686a5d2180b714fe77f1da06c9094632213a06",
+      "cycle": 140,
+      "prepared_problem_sha256": "8db35714c31487aad22281af57eb65065ba2dfba75c9e26e2509c8762f66aff5",
+      "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-140/receipt.json",
+      "receipt_sha256": "a0f3b8b5e17037104a94d43428335c6781044a0d35f7a27cfd298a38627298f1"
+    }
+  ],
+  "audit_tolerance": 1e-05,
+  "classification": {
+    "numerical_stop": "Any other unsuccessful or unverified continuation.",
+    "physiological_failure_certified": "No zero-objective feasible witness, explicit local infeasible status, and feasible frozen fatigue-rest counterfactual. Protocol-conditioned endpoint, not proof of global infeasibility.",
+    "right_censored": "All cycles certified through absolute cycle budget."
+  },
+  "control_gate": {
+    "allowed_difference_cycles": 0,
+    "expected_last_certified_cycle": 169
+  },
+  "cpu_ids": [
+    12,
+    13,
+    14,
+    15
+  ],
+  "cpu_preflight": "Host FHO PID 4004377 uses 0-11; preserved. Reserve 12-15; leave siblings 28-31 unused.",
+  "created_utc": "2026-10-03T12:41:24Z",
+  "grouping": "Both durations and anchors of one action remain in the same train/holdout partition.",
+  "jobs": [
+    {
+      "action": {
+        "action_group": "unit",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "id": "unit",
+        "partition": "control",
+        "weights": {
+          "Biceps": 1.0,
+          "Delt_ant": 1.0,
+          "Delt_post": 1.0,
+          "Triceps": 1.0
+        }
+      },
+      "anchor": {
+        "archive_sha256": "52bab751efa15f60dda140e175aa5083e3c2360788583f006056acb1ce5fac94",
+        "cycle": 120,
+        "prepared_problem_sha256": "67e09b17d76709be31af116271fa09365bc44be8f6e3faedb02595888bdd28ee",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-120/receipt.json",
+        "receipt_sha256": "c530501283808918e0ca665d6936bef3d2619b803f180f62f11a2a92e3b48f12"
+      },
+      "id": "left-c120-unit-d1",
+      "intervention_cycles": 1,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-unit-d1"
+    },
+    {
+      "action": {
+        "action_group": "unit",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "id": "unit",
+        "partition": "control",
+        "weights": {
+          "Biceps": 1.0,
+          "Delt_ant": 1.0,
+          "Delt_post": 1.0,
+          "Triceps": 1.0
+        }
+      },
+      "anchor": {
+        "archive_sha256": "52bab751efa15f60dda140e175aa5083e3c2360788583f006056acb1ce5fac94",
+        "cycle": 120,
+        "prepared_problem_sha256": "67e09b17d76709be31af116271fa09365bc44be8f6e3faedb02595888bdd28ee",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-120/receipt.json",
+        "receipt_sha256": "c530501283808918e0ca665d6936bef3d2619b803f180f62f11a2a92e3b48f12"
+      },
+      "id": "left-c120-unit-d3",
+      "intervention_cycles": 3,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-unit-d3"
+    },
+    {
+      "action": {
+        "action_group": "contrast-1-plus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          0.7071067811865475,
+          -0.7071067811865475,
+          0.0,
+          0.0
+        ],
+        "id": "contrast-1-plus",
+        "partition": "train",
+        "weights": {
+          "Biceps": 0.9848424694844572,
+          "Delt_ant": 1.2613893766731252,
+          "Delt_post": 0.7689256843579604,
+          "Triceps": 0.9848424694844572
+        }
+      },
+      "anchor": {
+        "archive_sha256": "52bab751efa15f60dda140e175aa5083e3c2360788583f006056acb1ce5fac94",
+        "cycle": 120,
+        "prepared_problem_sha256": "67e09b17d76709be31af116271fa09365bc44be8f6e3faedb02595888bdd28ee",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-120/receipt.json",
+        "receipt_sha256": "c530501283808918e0ca665d6936bef3d2619b803f180f62f11a2a92e3b48f12"
+      },
+      "id": "left-c120-contrast-1-plus-d1",
+      "intervention_cycles": 1,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-contrast-1-plus-d1"
+    },
+    {
+      "action": {
+        "action_group": "contrast-1-plus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          0.7071067811865475,
+          -0.7071067811865475,
+          0.0,
+          0.0
+        ],
+        "id": "contrast-1-plus",
+        "partition": "train",
+        "weights": {
+          "Biceps": 0.9848424694844572,
+          "Delt_ant": 1.2613893766731252,
+          "Delt_post": 0.7689256843579604,
+          "Triceps": 0.9848424694844572
+        }
+      },
+      "anchor": {
+        "archive_sha256": "52bab751efa15f60dda140e175aa5083e3c2360788583f006056acb1ce5fac94",
+        "cycle": 120,
+        "prepared_problem_sha256": "67e09b17d76709be31af116271fa09365bc44be8f6e3faedb02595888bdd28ee",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-120/receipt.json",
+        "receipt_sha256": "c530501283808918e0ca665d6936bef3d2619b803f180f62f11a2a92e3b48f12"
+      },
+      "id": "left-c120-contrast-1-plus-d3",
+      "intervention_cycles": 3,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-contrast-1-plus-d3"
+    },
+    {
+      "action": {
+        "action_group": "contrast-1-minus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          -0.7071067811865475,
+          0.7071067811865475,
+          -0.0,
+          -0.0
+        ],
+        "id": "contrast-1-minus",
+        "partition": "train",
+        "weights": {
+          "Biceps": 0.9848424694844572,
+          "Delt_ant": 0.7689256843579604,
+          "Delt_post": 1.2613893766731252,
+          "Triceps": 0.9848424694844572
+        }
+      },
+      "anchor": {
+        "archive_sha256": "52bab751efa15f60dda140e175aa5083e3c2360788583f006056acb1ce5fac94",
+        "cycle": 120,
+        "prepared_problem_sha256": "67e09b17d76709be31af116271fa09365bc44be8f6e3faedb02595888bdd28ee",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-120/receipt.json",
+        "receipt_sha256": "c530501283808918e0ca665d6936bef3d2619b803f180f62f11a2a92e3b48f12"
+      },
+      "id": "left-c120-contrast-1-minus-d1",
+      "intervention_cycles": 1,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-contrast-1-minus-d1"
+    },
+    {
+      "action": {
+        "action_group": "contrast-1-minus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          -0.7071067811865475,
+          0.7071067811865475,
+          -0.0,
+          -0.0
+        ],
+        "id": "contrast-1-minus",
+        "partition": "train",
+        "weights": {
+          "Biceps": 0.9848424694844572,
+          "Delt_ant": 0.7689256843579604,
+          "Delt_post": 1.2613893766731252,
+          "Triceps": 0.9848424694844572
+        }
+      },
+      "anchor": {
+        "archive_sha256": "52bab751efa15f60dda140e175aa5083e3c2360788583f006056acb1ce5fac94",
+        "cycle": 120,
+        "prepared_problem_sha256": "67e09b17d76709be31af116271fa09365bc44be8f6e3faedb02595888bdd28ee",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-120/receipt.json",
+        "receipt_sha256": "c530501283808918e0ca665d6936bef3d2619b803f180f62f11a2a92e3b48f12"
+      },
+      "id": "left-c120-contrast-1-minus-d3",
+      "intervention_cycles": 3,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-contrast-1-minus-d3"
+    },
+    {
+      "action": {
+        "action_group": "contrast-2-plus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          0.4082482904638631,
+          0.4082482904638631,
+          -0.8164965809277261,
+          0.0
+        ],
+        "id": "contrast-2-plus",
+        "partition": "train",
+        "weights": {
+          "Biceps": 0.7405773308157807,
+          "Delt_ant": 1.1369343629222823,
+          "Delt_post": 1.1369343629222823,
+          "Triceps": 0.9855539433396548
+        }
+      },
+      "anchor": {
+        "archive_sha256": "52bab751efa15f60dda140e175aa5083e3c2360788583f006056acb1ce5fac94",
+        "cycle": 120,
+        "prepared_problem_sha256": "67e09b17d76709be31af116271fa09365bc44be8f6e3faedb02595888bdd28ee",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-120/receipt.json",
+        "receipt_sha256": "c530501283808918e0ca665d6936bef3d2619b803f180f62f11a2a92e3b48f12"
+      },
+      "id": "left-c120-contrast-2-plus-d1",
+      "intervention_cycles": 1,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-contrast-2-plus-d1"
+    },
+    {
+      "action": {
+        "action_group": "contrast-2-plus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          0.4082482904638631,
+          0.4082482904638631,
+          -0.8164965809277261,
+          0.0
+        ],
+        "id": "contrast-2-plus",
+        "partition": "train",
+        "weights": {
+          "Biceps": 0.7405773308157807,
+          "Delt_ant": 1.1369343629222823,
+          "Delt_post": 1.1369343629222823,
+          "Triceps": 0.9855539433396548
+        }
+      },
+      "anchor": {
+        "archive_sha256": "52bab751efa15f60dda140e175aa5083e3c2360788583f006056acb1ce5fac94",
+        "cycle": 120,
+        "prepared_problem_sha256": "67e09b17d76709be31af116271fa09365bc44be8f6e3faedb02595888bdd28ee",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-120/receipt.json",
+        "receipt_sha256": "c530501283808918e0ca665d6936bef3d2619b803f180f62f11a2a92e3b48f12"
+      },
+      "id": "left-c120-contrast-2-plus-d3",
+      "intervention_cycles": 3,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-contrast-2-plus-d3"
+    },
+    {
+      "action": {
+        "action_group": "contrast-2-minus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          -0.4082482904638631,
+          -0.4082482904638631,
+          0.8164965809277261,
+          -0.0
+        ],
+        "id": "contrast-2-minus",
+        "partition": "train",
+        "weights": {
+          "Biceps": 1.3096743404274582,
+          "Delt_ant": 0.853096853171625,
+          "Delt_post": 0.853096853171625,
+          "Triceps": 0.9841319532292917
+        }
+      },
+      "anchor": {
+        "archive_sha256": "52bab751efa15f60dda140e175aa5083e3c2360788583f006056acb1ce5fac94",
+        "cycle": 120,
+        "prepared_problem_sha256": "67e09b17d76709be31af116271fa09365bc44be8f6e3faedb02595888bdd28ee",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-120/receipt.json",
+        "receipt_sha256": "c530501283808918e0ca665d6936bef3d2619b803f180f62f11a2a92e3b48f12"
+      },
+      "id": "left-c120-contrast-2-minus-d1",
+      "intervention_cycles": 1,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-contrast-2-minus-d1"
+    },
+    {
+      "action": {
+        "action_group": "contrast-2-minus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          -0.4082482904638631,
+          -0.4082482904638631,
+          0.8164965809277261,
+          -0.0
+        ],
+        "id": "contrast-2-minus",
+        "partition": "train",
+        "weights": {
+          "Biceps": 1.3096743404274582,
+          "Delt_ant": 0.853096853171625,
+          "Delt_post": 0.853096853171625,
+          "Triceps": 0.9841319532292917
+        }
+      },
+      "anchor": {
+        "archive_sha256": "52bab751efa15f60dda140e175aa5083e3c2360788583f006056acb1ce5fac94",
+        "cycle": 120,
+        "prepared_problem_sha256": "67e09b17d76709be31af116271fa09365bc44be8f6e3faedb02595888bdd28ee",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-120/receipt.json",
+        "receipt_sha256": "c530501283808918e0ca665d6936bef3d2619b803f180f62f11a2a92e3b48f12"
+      },
+      "id": "left-c120-contrast-2-minus-d3",
+      "intervention_cycles": 3,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-contrast-2-minus-d3"
+    },
+    {
+      "action": {
+        "action_group": "contrast-3-plus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          0.2886751345948129,
+          0.2886751345948129,
+          0.2886751345948129,
+          -0.8660254037844387
+        ],
+        "id": "contrast-3-plus",
+        "partition": "train",
+        "weights": {
+          "Biceps": 1.0906471787010112,
+          "Delt_ant": 1.0906471787010112,
+          "Delt_post": 1.0906471787010112,
+          "Triceps": 0.7280584638969667
+        }
+      },
+      "anchor": {
+        "archive_sha256": "52bab751efa15f60dda140e175aa5083e3c2360788583f006056acb1ce5fac94",
+        "cycle": 120,
+        "prepared_problem_sha256": "67e09b17d76709be31af116271fa09365bc44be8f6e3faedb02595888bdd28ee",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-120/receipt.json",
+        "receipt_sha256": "c530501283808918e0ca665d6936bef3d2619b803f180f62f11a2a92e3b48f12"
+      },
+      "id": "left-c120-contrast-3-plus-d1",
+      "intervention_cycles": 1,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-contrast-3-plus-d1"
+    },
+    {
+      "action": {
+        "action_group": "contrast-3-plus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          0.2886751345948129,
+          0.2886751345948129,
+          0.2886751345948129,
+          -0.8660254037844387
+        ],
+        "id": "contrast-3-plus",
+        "partition": "train",
+        "weights": {
+          "Biceps": 1.0906471787010112,
+          "Delt_ant": 1.0906471787010112,
+          "Delt_post": 1.0906471787010112,
+          "Triceps": 0.7280584638969667
+        }
+      },
+      "anchor": {
+        "archive_sha256": "52bab751efa15f60dda140e175aa5083e3c2360788583f006056acb1ce5fac94",
+        "cycle": 120,
+        "prepared_problem_sha256": "67e09b17d76709be31af116271fa09365bc44be8f6e3faedb02595888bdd28ee",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-120/receipt.json",
+        "receipt_sha256": "c530501283808918e0ca665d6936bef3d2619b803f180f62f11a2a92e3b48f12"
+      },
+      "id": "left-c120-contrast-3-plus-d3",
+      "intervention_cycles": 3,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-contrast-3-plus-d3"
+    },
+    {
+      "action": {
+        "action_group": "contrast-3-minus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          -0.2886751345948129,
+          -0.2886751345948129,
+          -0.2886751345948129,
+          0.8660254037844387
+        ],
+        "id": "contrast-3-minus",
+        "partition": "train",
+        "weights": {
+          "Biceps": 0.8892798901283215,
+          "Delt_ant": 0.8892798901283215,
+          "Delt_post": 0.8892798901283215,
+          "Triceps": 1.3321603296150348
+        }
+      },
+      "anchor": {
+        "archive_sha256": "52bab751efa15f60dda140e175aa5083e3c2360788583f006056acb1ce5fac94",
+        "cycle": 120,
+        "prepared_problem_sha256": "67e09b17d76709be31af116271fa09365bc44be8f6e3faedb02595888bdd28ee",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-120/receipt.json",
+        "receipt_sha256": "c530501283808918e0ca665d6936bef3d2619b803f180f62f11a2a92e3b48f12"
+      },
+      "id": "left-c120-contrast-3-minus-d1",
+      "intervention_cycles": 1,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-contrast-3-minus-d1"
+    },
+    {
+      "action": {
+        "action_group": "contrast-3-minus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          -0.2886751345948129,
+          -0.2886751345948129,
+          -0.2886751345948129,
+          0.8660254037844387
+        ],
+        "id": "contrast-3-minus",
+        "partition": "train",
+        "weights": {
+          "Biceps": 0.8892798901283215,
+          "Delt_ant": 0.8892798901283215,
+          "Delt_post": 0.8892798901283215,
+          "Triceps": 1.3321603296150348
+        }
+      },
+      "anchor": {
+        "archive_sha256": "52bab751efa15f60dda140e175aa5083e3c2360788583f006056acb1ce5fac94",
+        "cycle": 120,
+        "prepared_problem_sha256": "67e09b17d76709be31af116271fa09365bc44be8f6e3faedb02595888bdd28ee",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-120/receipt.json",
+        "receipt_sha256": "c530501283808918e0ca665d6936bef3d2619b803f180f62f11a2a92e3b48f12"
+      },
+      "id": "left-c120-contrast-3-minus-d3",
+      "intervention_cycles": 3,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-contrast-3-minus-d3"
+    },
+    {
+      "action": {
+        "action_group": "mixed-plus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          0.8106172175260455,
+          -0.0058793634016804175,
+          -0.30473785412436505,
+          -0.5000000000000001
+        ],
+        "id": "mixed-plus",
+        "partition": "holdout",
+        "weights": {
+          "Biceps": 0.8846148473277168,
+          "Delt_ant": 1.3070482435338593,
+          "Delt_post": 0.9821586184959997,
+          "Triceps": 0.8261782906424245
+        }
+      },
+      "anchor": {
+        "archive_sha256": "52bab751efa15f60dda140e175aa5083e3c2360788583f006056acb1ce5fac94",
+        "cycle": 120,
+        "prepared_problem_sha256": "67e09b17d76709be31af116271fa09365bc44be8f6e3faedb02595888bdd28ee",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-120/receipt.json",
+        "receipt_sha256": "c530501283808918e0ca665d6936bef3d2619b803f180f62f11a2a92e3b48f12"
+      },
+      "id": "left-c120-mixed-plus-d1",
+      "intervention_cycles": 1,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-mixed-plus-d1"
+    },
+    {
+      "action": {
+        "action_group": "mixed-plus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          0.8106172175260455,
+          -0.0058793634016804175,
+          -0.30473785412436505,
+          -0.5000000000000001
+        ],
+        "id": "mixed-plus",
+        "partition": "holdout",
+        "weights": {
+          "Biceps": 0.8846148473277168,
+          "Delt_ant": 1.3070482435338593,
+          "Delt_post": 0.9821586184959997,
+          "Triceps": 0.8261782906424245
+        }
+      },
+      "anchor": {
+        "archive_sha256": "52bab751efa15f60dda140e175aa5083e3c2360788583f006056acb1ce5fac94",
+        "cycle": 120,
+        "prepared_problem_sha256": "67e09b17d76709be31af116271fa09365bc44be8f6e3faedb02595888bdd28ee",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-120/receipt.json",
+        "receipt_sha256": "c530501283808918e0ca665d6936bef3d2619b803f180f62f11a2a92e3b48f12"
+      },
+      "id": "left-c120-mixed-plus-d3",
+      "intervention_cycles": 3,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-mixed-plus-d3"
+    },
+    {
+      "action": {
+        "action_group": "mixed-minus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          -0.8106172175260455,
+          0.0058793634016804175,
+          0.30473785412436505,
+          0.5000000000000001
+        ],
+        "id": "mixed-minus",
+        "partition": "holdout",
+        "weights": {
+          "Biceps": 1.0964254108679512,
+          "Delt_ant": 0.7420645735453729,
+          "Delt_post": 0.9875331531748224,
+          "Triceps": 1.1739768624118536
+        }
+      },
+      "anchor": {
+        "archive_sha256": "52bab751efa15f60dda140e175aa5083e3c2360788583f006056acb1ce5fac94",
+        "cycle": 120,
+        "prepared_problem_sha256": "67e09b17d76709be31af116271fa09365bc44be8f6e3faedb02595888bdd28ee",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-120/receipt.json",
+        "receipt_sha256": "c530501283808918e0ca665d6936bef3d2619b803f180f62f11a2a92e3b48f12"
+      },
+      "id": "left-c120-mixed-minus-d1",
+      "intervention_cycles": 1,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-mixed-minus-d1"
+    },
+    {
+      "action": {
+        "action_group": "mixed-minus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          -0.8106172175260455,
+          0.0058793634016804175,
+          0.30473785412436505,
+          0.5000000000000001
+        ],
+        "id": "mixed-minus",
+        "partition": "holdout",
+        "weights": {
+          "Biceps": 1.0964254108679512,
+          "Delt_ant": 0.7420645735453729,
+          "Delt_post": 0.9875331531748224,
+          "Triceps": 1.1739768624118536
+        }
+      },
+      "anchor": {
+        "archive_sha256": "52bab751efa15f60dda140e175aa5083e3c2360788583f006056acb1ce5fac94",
+        "cycle": 120,
+        "prepared_problem_sha256": "67e09b17d76709be31af116271fa09365bc44be8f6e3faedb02595888bdd28ee",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-120/receipt.json",
+        "receipt_sha256": "c530501283808918e0ca665d6936bef3d2619b803f180f62f11a2a92e3b48f12"
+      },
+      "id": "left-c120-mixed-minus-d3",
+      "intervention_cycles": 3,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c120-mixed-minus-d3"
+    },
+    {
+      "action": {
+        "action_group": "unit",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "id": "unit",
+        "partition": "control",
+        "weights": {
+          "Biceps": 1.0,
+          "Delt_ant": 1.0,
+          "Delt_post": 1.0,
+          "Triceps": 1.0
+        }
+      },
+      "anchor": {
+        "archive_sha256": "c690785d5e7ca44bce9a7dafe3686a5d2180b714fe77f1da06c9094632213a06",
+        "cycle": 140,
+        "prepared_problem_sha256": "8db35714c31487aad22281af57eb65065ba2dfba75c9e26e2509c8762f66aff5",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-140/receipt.json",
+        "receipt_sha256": "a0f3b8b5e17037104a94d43428335c6781044a0d35f7a27cfd298a38627298f1"
+      },
+      "id": "left-c140-unit-d1",
+      "intervention_cycles": 1,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-unit-d1"
+    },
+    {
+      "action": {
+        "action_group": "unit",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "id": "unit",
+        "partition": "control",
+        "weights": {
+          "Biceps": 1.0,
+          "Delt_ant": 1.0,
+          "Delt_post": 1.0,
+          "Triceps": 1.0
+        }
+      },
+      "anchor": {
+        "archive_sha256": "c690785d5e7ca44bce9a7dafe3686a5d2180b714fe77f1da06c9094632213a06",
+        "cycle": 140,
+        "prepared_problem_sha256": "8db35714c31487aad22281af57eb65065ba2dfba75c9e26e2509c8762f66aff5",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-140/receipt.json",
+        "receipt_sha256": "a0f3b8b5e17037104a94d43428335c6781044a0d35f7a27cfd298a38627298f1"
+      },
+      "id": "left-c140-unit-d3",
+      "intervention_cycles": 3,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-unit-d3"
+    },
+    {
+      "action": {
+        "action_group": "contrast-1-plus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          0.7071067811865475,
+          -0.7071067811865475,
+          0.0,
+          0.0
+        ],
+        "id": "contrast-1-plus",
+        "partition": "train",
+        "weights": {
+          "Biceps": 0.9848424694844572,
+          "Delt_ant": 1.2613893766731252,
+          "Delt_post": 0.7689256843579604,
+          "Triceps": 0.9848424694844572
+        }
+      },
+      "anchor": {
+        "archive_sha256": "c690785d5e7ca44bce9a7dafe3686a5d2180b714fe77f1da06c9094632213a06",
+        "cycle": 140,
+        "prepared_problem_sha256": "8db35714c31487aad22281af57eb65065ba2dfba75c9e26e2509c8762f66aff5",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-140/receipt.json",
+        "receipt_sha256": "a0f3b8b5e17037104a94d43428335c6781044a0d35f7a27cfd298a38627298f1"
+      },
+      "id": "left-c140-contrast-1-plus-d1",
+      "intervention_cycles": 1,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-contrast-1-plus-d1"
+    },
+    {
+      "action": {
+        "action_group": "contrast-1-plus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          0.7071067811865475,
+          -0.7071067811865475,
+          0.0,
+          0.0
+        ],
+        "id": "contrast-1-plus",
+        "partition": "train",
+        "weights": {
+          "Biceps": 0.9848424694844572,
+          "Delt_ant": 1.2613893766731252,
+          "Delt_post": 0.7689256843579604,
+          "Triceps": 0.9848424694844572
+        }
+      },
+      "anchor": {
+        "archive_sha256": "c690785d5e7ca44bce9a7dafe3686a5d2180b714fe77f1da06c9094632213a06",
+        "cycle": 140,
+        "prepared_problem_sha256": "8db35714c31487aad22281af57eb65065ba2dfba75c9e26e2509c8762f66aff5",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-140/receipt.json",
+        "receipt_sha256": "a0f3b8b5e17037104a94d43428335c6781044a0d35f7a27cfd298a38627298f1"
+      },
+      "id": "left-c140-contrast-1-plus-d3",
+      "intervention_cycles": 3,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-contrast-1-plus-d3"
+    },
+    {
+      "action": {
+        "action_group": "contrast-1-minus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          -0.7071067811865475,
+          0.7071067811865475,
+          -0.0,
+          -0.0
+        ],
+        "id": "contrast-1-minus",
+        "partition": "train",
+        "weights": {
+          "Biceps": 0.9848424694844572,
+          "Delt_ant": 0.7689256843579604,
+          "Delt_post": 1.2613893766731252,
+          "Triceps": 0.9848424694844572
+        }
+      },
+      "anchor": {
+        "archive_sha256": "c690785d5e7ca44bce9a7dafe3686a5d2180b714fe77f1da06c9094632213a06",
+        "cycle": 140,
+        "prepared_problem_sha256": "8db35714c31487aad22281af57eb65065ba2dfba75c9e26e2509c8762f66aff5",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-140/receipt.json",
+        "receipt_sha256": "a0f3b8b5e17037104a94d43428335c6781044a0d35f7a27cfd298a38627298f1"
+      },
+      "id": "left-c140-contrast-1-minus-d1",
+      "intervention_cycles": 1,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-contrast-1-minus-d1"
+    },
+    {
+      "action": {
+        "action_group": "contrast-1-minus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          -0.7071067811865475,
+          0.7071067811865475,
+          -0.0,
+          -0.0
+        ],
+        "id": "contrast-1-minus",
+        "partition": "train",
+        "weights": {
+          "Biceps": 0.9848424694844572,
+          "Delt_ant": 0.7689256843579604,
+          "Delt_post": 1.2613893766731252,
+          "Triceps": 0.9848424694844572
+        }
+      },
+      "anchor": {
+        "archive_sha256": "c690785d5e7ca44bce9a7dafe3686a5d2180b714fe77f1da06c9094632213a06",
+        "cycle": 140,
+        "prepared_problem_sha256": "8db35714c31487aad22281af57eb65065ba2dfba75c9e26e2509c8762f66aff5",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-140/receipt.json",
+        "receipt_sha256": "a0f3b8b5e17037104a94d43428335c6781044a0d35f7a27cfd298a38627298f1"
+      },
+      "id": "left-c140-contrast-1-minus-d3",
+      "intervention_cycles": 3,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-contrast-1-minus-d3"
+    },
+    {
+      "action": {
+        "action_group": "contrast-2-plus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          0.4082482904638631,
+          0.4082482904638631,
+          -0.8164965809277261,
+          0.0
+        ],
+        "id": "contrast-2-plus",
+        "partition": "train",
+        "weights": {
+          "Biceps": 0.7405773308157807,
+          "Delt_ant": 1.1369343629222823,
+          "Delt_post": 1.1369343629222823,
+          "Triceps": 0.9855539433396548
+        }
+      },
+      "anchor": {
+        "archive_sha256": "c690785d5e7ca44bce9a7dafe3686a5d2180b714fe77f1da06c9094632213a06",
+        "cycle": 140,
+        "prepared_problem_sha256": "8db35714c31487aad22281af57eb65065ba2dfba75c9e26e2509c8762f66aff5",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-140/receipt.json",
+        "receipt_sha256": "a0f3b8b5e17037104a94d43428335c6781044a0d35f7a27cfd298a38627298f1"
+      },
+      "id": "left-c140-contrast-2-plus-d1",
+      "intervention_cycles": 1,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-contrast-2-plus-d1"
+    },
+    {
+      "action": {
+        "action_group": "contrast-2-plus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          0.4082482904638631,
+          0.4082482904638631,
+          -0.8164965809277261,
+          0.0
+        ],
+        "id": "contrast-2-plus",
+        "partition": "train",
+        "weights": {
+          "Biceps": 0.7405773308157807,
+          "Delt_ant": 1.1369343629222823,
+          "Delt_post": 1.1369343629222823,
+          "Triceps": 0.9855539433396548
+        }
+      },
+      "anchor": {
+        "archive_sha256": "c690785d5e7ca44bce9a7dafe3686a5d2180b714fe77f1da06c9094632213a06",
+        "cycle": 140,
+        "prepared_problem_sha256": "8db35714c31487aad22281af57eb65065ba2dfba75c9e26e2509c8762f66aff5",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-140/receipt.json",
+        "receipt_sha256": "a0f3b8b5e17037104a94d43428335c6781044a0d35f7a27cfd298a38627298f1"
+      },
+      "id": "left-c140-contrast-2-plus-d3",
+      "intervention_cycles": 3,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-contrast-2-plus-d3"
+    },
+    {
+      "action": {
+        "action_group": "contrast-2-minus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          -0.4082482904638631,
+          -0.4082482904638631,
+          0.8164965809277261,
+          -0.0
+        ],
+        "id": "contrast-2-minus",
+        "partition": "train",
+        "weights": {
+          "Biceps": 1.3096743404274582,
+          "Delt_ant": 0.853096853171625,
+          "Delt_post": 0.853096853171625,
+          "Triceps": 0.9841319532292917
+        }
+      },
+      "anchor": {
+        "archive_sha256": "c690785d5e7ca44bce9a7dafe3686a5d2180b714fe77f1da06c9094632213a06",
+        "cycle": 140,
+        "prepared_problem_sha256": "8db35714c31487aad22281af57eb65065ba2dfba75c9e26e2509c8762f66aff5",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-140/receipt.json",
+        "receipt_sha256": "a0f3b8b5e17037104a94d43428335c6781044a0d35f7a27cfd298a38627298f1"
+      },
+      "id": "left-c140-contrast-2-minus-d1",
+      "intervention_cycles": 1,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-contrast-2-minus-d1"
+    },
+    {
+      "action": {
+        "action_group": "contrast-2-minus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          -0.4082482904638631,
+          -0.4082482904638631,
+          0.8164965809277261,
+          -0.0
+        ],
+        "id": "contrast-2-minus",
+        "partition": "train",
+        "weights": {
+          "Biceps": 1.3096743404274582,
+          "Delt_ant": 0.853096853171625,
+          "Delt_post": 0.853096853171625,
+          "Triceps": 0.9841319532292917
+        }
+      },
+      "anchor": {
+        "archive_sha256": "c690785d5e7ca44bce9a7dafe3686a5d2180b714fe77f1da06c9094632213a06",
+        "cycle": 140,
+        "prepared_problem_sha256": "8db35714c31487aad22281af57eb65065ba2dfba75c9e26e2509c8762f66aff5",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-140/receipt.json",
+        "receipt_sha256": "a0f3b8b5e17037104a94d43428335c6781044a0d35f7a27cfd298a38627298f1"
+      },
+      "id": "left-c140-contrast-2-minus-d3",
+      "intervention_cycles": 3,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-contrast-2-minus-d3"
+    },
+    {
+      "action": {
+        "action_group": "contrast-3-plus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          0.2886751345948129,
+          0.2886751345948129,
+          0.2886751345948129,
+          -0.8660254037844387
+        ],
+        "id": "contrast-3-plus",
+        "partition": "train",
+        "weights": {
+          "Biceps": 1.0906471787010112,
+          "Delt_ant": 1.0906471787010112,
+          "Delt_post": 1.0906471787010112,
+          "Triceps": 0.7280584638969667
+        }
+      },
+      "anchor": {
+        "archive_sha256": "c690785d5e7ca44bce9a7dafe3686a5d2180b714fe77f1da06c9094632213a06",
+        "cycle": 140,
+        "prepared_problem_sha256": "8db35714c31487aad22281af57eb65065ba2dfba75c9e26e2509c8762f66aff5",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-140/receipt.json",
+        "receipt_sha256": "a0f3b8b5e17037104a94d43428335c6781044a0d35f7a27cfd298a38627298f1"
+      },
+      "id": "left-c140-contrast-3-plus-d1",
+      "intervention_cycles": 1,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-contrast-3-plus-d1"
+    },
+    {
+      "action": {
+        "action_group": "contrast-3-plus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          0.2886751345948129,
+          0.2886751345948129,
+          0.2886751345948129,
+          -0.8660254037844387
+        ],
+        "id": "contrast-3-plus",
+        "partition": "train",
+        "weights": {
+          "Biceps": 1.0906471787010112,
+          "Delt_ant": 1.0906471787010112,
+          "Delt_post": 1.0906471787010112,
+          "Triceps": 0.7280584638969667
+        }
+      },
+      "anchor": {
+        "archive_sha256": "c690785d5e7ca44bce9a7dafe3686a5d2180b714fe77f1da06c9094632213a06",
+        "cycle": 140,
+        "prepared_problem_sha256": "8db35714c31487aad22281af57eb65065ba2dfba75c9e26e2509c8762f66aff5",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-140/receipt.json",
+        "receipt_sha256": "a0f3b8b5e17037104a94d43428335c6781044a0d35f7a27cfd298a38627298f1"
+      },
+      "id": "left-c140-contrast-3-plus-d3",
+      "intervention_cycles": 3,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-contrast-3-plus-d3"
+    },
+    {
+      "action": {
+        "action_group": "contrast-3-minus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          -0.2886751345948129,
+          -0.2886751345948129,
+          -0.2886751345948129,
+          0.8660254037844387
+        ],
+        "id": "contrast-3-minus",
+        "partition": "train",
+        "weights": {
+          "Biceps": 0.8892798901283215,
+          "Delt_ant": 0.8892798901283215,
+          "Delt_post": 0.8892798901283215,
+          "Triceps": 1.3321603296150348
+        }
+      },
+      "anchor": {
+        "archive_sha256": "c690785d5e7ca44bce9a7dafe3686a5d2180b714fe77f1da06c9094632213a06",
+        "cycle": 140,
+        "prepared_problem_sha256": "8db35714c31487aad22281af57eb65065ba2dfba75c9e26e2509c8762f66aff5",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-140/receipt.json",
+        "receipt_sha256": "a0f3b8b5e17037104a94d43428335c6781044a0d35f7a27cfd298a38627298f1"
+      },
+      "id": "left-c140-contrast-3-minus-d1",
+      "intervention_cycles": 1,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-contrast-3-minus-d1"
+    },
+    {
+      "action": {
+        "action_group": "contrast-3-minus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          -0.2886751345948129,
+          -0.2886751345948129,
+          -0.2886751345948129,
+          0.8660254037844387
+        ],
+        "id": "contrast-3-minus",
+        "partition": "train",
+        "weights": {
+          "Biceps": 0.8892798901283215,
+          "Delt_ant": 0.8892798901283215,
+          "Delt_post": 0.8892798901283215,
+          "Triceps": 1.3321603296150348
+        }
+      },
+      "anchor": {
+        "archive_sha256": "c690785d5e7ca44bce9a7dafe3686a5d2180b714fe77f1da06c9094632213a06",
+        "cycle": 140,
+        "prepared_problem_sha256": "8db35714c31487aad22281af57eb65065ba2dfba75c9e26e2509c8762f66aff5",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-140/receipt.json",
+        "receipt_sha256": "a0f3b8b5e17037104a94d43428335c6781044a0d35f7a27cfd298a38627298f1"
+      },
+      "id": "left-c140-contrast-3-minus-d3",
+      "intervention_cycles": 3,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-contrast-3-minus-d3"
+    },
+    {
+      "action": {
+        "action_group": "mixed-plus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          0.8106172175260455,
+          -0.0058793634016804175,
+          -0.30473785412436505,
+          -0.5000000000000001
+        ],
+        "id": "mixed-plus",
+        "partition": "holdout",
+        "weights": {
+          "Biceps": 0.8846148473277168,
+          "Delt_ant": 1.3070482435338593,
+          "Delt_post": 0.9821586184959997,
+          "Triceps": 0.8261782906424245
+        }
+      },
+      "anchor": {
+        "archive_sha256": "c690785d5e7ca44bce9a7dafe3686a5d2180b714fe77f1da06c9094632213a06",
+        "cycle": 140,
+        "prepared_problem_sha256": "8db35714c31487aad22281af57eb65065ba2dfba75c9e26e2509c8762f66aff5",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-140/receipt.json",
+        "receipt_sha256": "a0f3b8b5e17037104a94d43428335c6781044a0d35f7a27cfd298a38627298f1"
+      },
+      "id": "left-c140-mixed-plus-d1",
+      "intervention_cycles": 1,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-mixed-plus-d1"
+    },
+    {
+      "action": {
+        "action_group": "mixed-plus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          0.8106172175260455,
+          -0.0058793634016804175,
+          -0.30473785412436505,
+          -0.5000000000000001
+        ],
+        "id": "mixed-plus",
+        "partition": "holdout",
+        "weights": {
+          "Biceps": 0.8846148473277168,
+          "Delt_ant": 1.3070482435338593,
+          "Delt_post": 0.9821586184959997,
+          "Triceps": 0.8261782906424245
+        }
+      },
+      "anchor": {
+        "archive_sha256": "c690785d5e7ca44bce9a7dafe3686a5d2180b714fe77f1da06c9094632213a06",
+        "cycle": 140,
+        "prepared_problem_sha256": "8db35714c31487aad22281af57eb65065ba2dfba75c9e26e2509c8762f66aff5",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-140/receipt.json",
+        "receipt_sha256": "a0f3b8b5e17037104a94d43428335c6781044a0d35f7a27cfd298a38627298f1"
+      },
+      "id": "left-c140-mixed-plus-d3",
+      "intervention_cycles": 3,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-mixed-plus-d3"
+    },
+    {
+      "action": {
+        "action_group": "mixed-minus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          -0.8106172175260455,
+          0.0058793634016804175,
+          0.30473785412436505,
+          0.5000000000000001
+        ],
+        "id": "mixed-minus",
+        "partition": "holdout",
+        "weights": {
+          "Biceps": 1.0964254108679512,
+          "Delt_ant": 0.7420645735453729,
+          "Delt_post": 0.9875331531748224,
+          "Triceps": 1.1739768624118536
+        }
+      },
+      "anchor": {
+        "archive_sha256": "c690785d5e7ca44bce9a7dafe3686a5d2180b714fe77f1da06c9094632213a06",
+        "cycle": 140,
+        "prepared_problem_sha256": "8db35714c31487aad22281af57eb65065ba2dfba75c9e26e2509c8762f66aff5",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-140/receipt.json",
+        "receipt_sha256": "a0f3b8b5e17037104a94d43428335c6781044a0d35f7a27cfd298a38627298f1"
+      },
+      "id": "left-c140-mixed-minus-d1",
+      "intervention_cycles": 1,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-mixed-minus-d1"
+    },
+    {
+      "action": {
+        "action_group": "mixed-minus",
+        "amplitude": 0.35,
+        "centered_log_direction": [
+          -0.8106172175260455,
+          0.0058793634016804175,
+          0.30473785412436505,
+          0.5000000000000001
+        ],
+        "id": "mixed-minus",
+        "partition": "holdout",
+        "weights": {
+          "Biceps": 1.0964254108679512,
+          "Delt_ant": 0.7420645735453729,
+          "Delt_post": 0.9875331531748224,
+          "Triceps": 1.1739768624118536
+        }
+      },
+      "anchor": {
+        "archive_sha256": "c690785d5e7ca44bce9a7dafe3686a5d2180b714fe77f1da06c9094632213a06",
+        "cycle": 140,
+        "prepared_problem_sha256": "8db35714c31487aad22281af57eb65065ba2dfba75c9e26e2509c8762f66aff5",
+        "receipt": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/factorial-weights-split-20261003/unit_fixed/results/checkpoints/cycle-140/receipt.json",
+        "receipt_sha256": "a0f3b8b5e17037104a94d43428335c6781044a0d35f7a27cfd298a38627298f1"
+      },
+      "id": "left-c140-mixed-minus-d3",
+      "intervention_cycles": 3,
+      "output": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/left-c140-mixed-minus-d3"
+    }
+  ],
+  "kind": "unilateral_continuation_label_protocol",
+  "maximum_parallel_jobs": 4,
+  "muscle_order": [
+    "Delt_ant",
+    "Delt_post",
+    "Biceps",
+    "Triceps"
+  ],
+  "numeric_threads": 1,
+  "return_policy": {
+    "configuration_source": "authenticated anchor payload unchanged except process affinity and output",
+    "equivalent_mean_torque_nm": 0.96,
+    "kind": "unit_fatigue_integral_quadratic",
+    "maximum_absolute_cycles": 240,
+    "muscle_order": [
+      "Delt_ant",
+      "Delt_post",
+      "Biceps",
+      "Triceps"
+    ],
+    "recovery": "same source _FrozenRhoRetry and counterfactual probes",
+    "side": "left",
+    "weights": {
+      "Biceps": 1.0,
+      "Delt_ant": 1.0,
+      "Delt_post": 1.0,
+      "Triceps": 1.0
+    }
+  },
+  "return_policy_sha256": "b32328856dea7911c98f1b0fc699d188cfe23acdd7d12d7c3c00bc240d383571",
+  "runner_path": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/scripts/run_unilateral_continuation_labels.py",
+  "runner_sha256": "19bada2e27d329d79bc8f9bfd1358cc77ce56a7bde58d1906061366b15695fdf",
+  "schema_version": 1,
+  "side": "left"
+}

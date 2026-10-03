@@ -963,6 +963,13 @@ def next_acados_control_homotopy_radius(
 
 
 def _terminal_wheel_objective_weight(args: argparse.Namespace) -> float:
+    # With prescribed isokinetic kinematics theta and omega are algebraic
+    # constants, not decision states.  A terminal wheel objective is therefore
+    # both redundant and rejected by the OCP builder.  This used to be hidden
+    # for the fatigue-only default but made the valid direct-PW ``control``
+    # objective impossible to use in prescribed mode.
+    if getattr(args, "isokinetic_kinematics", None) == "prescribed":
+        return 0.0
     configured = getattr(args, "terminal_wheel_regularization_weight", None)
     if configured is not None:
         return float(configured)
@@ -1327,6 +1334,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
         choices=("quadratic", "linear"),
         default="quadratic",
         help="Shape of the objective terms passed to bioptim.",
+    )
+    parser.add_argument(
+        "--fatigue-objective-variant",
+        choices=("legacy", "integral_quadratic", "integral_linear",
+                 "terminal_quadratic", "terminal_linear"),
+        default="legacy",
+        help=("Experimental one-cycle fatigue ablation. Terminal variants scale "
+              "the endpoint cost by the physical window duration in seconds."),
     )
     parser.add_argument(
         "--terminal-reserve-weight",
@@ -2659,6 +2674,19 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "Four fixed fatigue weights in model-muscle order. Requires "
             "--parametric-fatigue-weights; zero is permitted for local FHO-to-RHO fitting."
         ),
+    )
+    parser.add_argument(
+        "--parametric-control-weights",
+        action="store_true",
+        help="Represent four PW-squared muscle weights as fixed NLP parameters.",
+    )
+    parser.add_argument(
+        "--control-weight-values",
+        type=float,
+        nargs=4,
+        metavar=("DELT_ANT", "DELT_POST", "BICEPS", "TRICEPS"),
+        default=None,
+        help="Four strictly positive PW-squared weights; requires --parametric-control-weights.",
     )
     parser.add_argument(
         "--ipopt-hsl-library",
@@ -5116,6 +5144,19 @@ def _validate_common_initial_solution_metadata(
         }
         actual = metadata.get(field, legacy_defaults.get(field))
         if actual != expected[field]:
+            if field == "reduced_internal_crank_velocity_guard_interval_s":
+                # The interval is derived from the prescribed cycle duration
+                # and stimulation count.  Archives written on a different
+                # floating-point evaluation path can differ by one ULP (for
+                # example 0.03333333333333333 vs 0.03333333333333334) while
+                # encoding exactly the same guard.  Do not reject a physically
+                # identical continuation seed for that serialization noise.
+                if (
+                    isinstance(actual, (int, float, np.integer, np.floating))
+                    and isinstance(expected[field], (int, float, np.integer, np.floating))
+                    and np.isclose(float(actual), float(expected[field]), rtol=0.0, atol=1e-14)
+                ):
+                    continue
             if feasibility_probe and field in {"objective", "objective_shape"}:
                 # A frozen one-cycle probe deliberately changes only the
                 # allocation preference. All other metadata checks retain the
@@ -5699,6 +5740,7 @@ def _codegen_signature(args: argparse.Namespace) -> str:
         "collocation_method": args.collocation_method,
         "objective": args.objective,
         "objective_shape": args.objective_shape,
+        "fatigue_objective_variant": getattr(args, "fatigue_objective_variant", "legacy"),
         "parametric_fatigue_weights": bool(
             getattr(args, "parametric_fatigue_weights", False)
         ),
@@ -11092,6 +11134,7 @@ def attach_isokinetic_audits(
                 control_traces,
                 cycle_count=config.number_of_turns,
                 capacity_scales=capacity_scales,
+                restart_at_cycle_boundaries=config.enforce_work_per_cycle,
             )
             reference_energy = float(
                 high_accuracy["final_reference_state"]["E_prod"][0]
@@ -11104,6 +11147,56 @@ def attach_isokinetic_audits(
             audit["high_accuracy_energy_target_error_j"] = float(
                 high_accuracy_energy_error
             )
+            per_cycle_rollout_error = 0.0
+            per_cycle_rollout_tolerance = float("inf")
+            if config.enforce_work_per_cycle:
+                reference_cycle_energy = np.asarray(
+                    high_accuracy["per_cycle_reference_energy_j"], dtype=float
+                )
+                targets = config.per_cycle_energy_target_j * np.arange(
+                    1, config.number_of_turns + 1, dtype=float
+                )
+                if reference_cycle_energy.shape != targets.shape:
+                    raise RuntimeError(
+                        "The high-accuracy work trace does not contain one "
+                        "boundary value per requested cycle."
+                    )
+                # E_prod is cumulative in an FHO.  Compare successive
+                # boundaries, not each cumulative value to k*W: the latter
+                # would incorrectly count a small earlier replay drift again
+                # on every later turn.
+                per_cycle_increment = np.asarray(
+                    high_accuracy["per_cycle_reference_work_j"], dtype=float
+                )
+                per_cycle_rollout_error = float(
+                    np.max(
+                        np.abs(
+                            per_cycle_increment
+                            - config.per_cycle_energy_target_j
+                        )
+                    )
+                )
+                # The requested operational certificate is 0.2% on *each*
+                # crank turn, which is stricter than the legacy aggregate
+                # two-centijoule smoke-test tolerance.
+                per_cycle_rollout_tolerance = (
+                    2e-3 * config.per_cycle_energy_target_j
+                )
+                audit["high_accuracy_per_cycle_energy_j"] = (
+                    reference_cycle_energy.tolist()
+                )
+                audit["high_accuracy_per_cycle_work_j"] = (
+                    per_cycle_increment.tolist()
+                )
+                audit["high_accuracy_maximum_per_cycle_energy_error_j"] = (
+                    per_cycle_rollout_error
+                )
+                audit["per_cycle_energy_target_j"] = float(
+                    config.per_cycle_energy_target_j
+                )
+                audit["high_accuracy_per_cycle_energy_tolerance_j"] = (
+                    per_cycle_rollout_tolerance
+                )
             # The trapezoidal value retained above is a diagnostic only: its
             # accuracy depends on plotting density. Certification uses the
             # adaptive DOP853 rollout of the exact ODE and PW sequence.
@@ -11145,7 +11238,13 @@ def attach_isokinetic_audits(
                 <= TORQUE_BOUND_TOLERANCE_NM
                 and certification_energy_error <= ENERGY_TOLERANCE_J
                 and high_accuracy_energy_error
-                <= ROLLOUT_ENERGY_TOLERANCE_J
+                <= (
+                    config.number_of_turns * per_cycle_rollout_tolerance
+                    if config.enforce_work_per_cycle
+                    else ROLLOUT_ENERGY_TOLERANCE_J
+                )
+                and per_cycle_rollout_error
+                <= per_cycle_rollout_tolerance
                 and dense_load_is_bounded
             )
         except Exception as exc:
@@ -12246,14 +12345,15 @@ def high_accuracy_trace_rollout_diagnostics(
     crank_velocity_target_rad_s: float = DEFAULT_CRANK_QDOT_RAD_S,
     crank_velocity_fast_margin_rad_s: float = 3.0,
     crank_velocity_slow_margin_rad_s: float = 3.0,
+    restart_at_cycle_boundaries: bool = False,
 ) -> dict:
     """Reintegrate an exported RHO prefix with one common DOP853 reference.
 
-    Unlike a collocation-defect check, this rollout never resets the reference
-    state at an optimized shooting node.  It therefore scores the exact same
-    PW sequence independently of the Radau degree that produced it.  Time is
-    reset at every RHO because the periodic-node OCP represents one crank cycle
-    per window while the Ding states remain continuous across windows.
+    By default the rollout never resets the reference state at an optimized
+    shooting node, exposing drift across a complete prefix.  Per-cycle FHO
+    work certificates deliberately restart from each optimized FHO boundary:
+    this applies the same one-cycle validation contract as RHO, rather than
+    rejecting a later cycle for accumulated replay drift from earlier cycles.
     """
 
     from scipy.integrate import solve_ivp
@@ -12377,6 +12477,8 @@ def high_accuracy_trace_rollout_diagnostics(
     maximum_endpoint_error_interval = None
     maximum_absolute_by_state = {key: 0.0 for key in nlp.states.keys()}
     reference_evaluations = 0
+    per_cycle_reference_energy_j = []
+    per_cycle_reference_work_j = []
     dense_load_minimum = float("inf")
     dense_load_maximum = -float("inf")
     dense_load_sample_count = 0
@@ -12414,6 +12516,13 @@ def high_accuracy_trace_rollout_diagnostics(
         state_scales[np.asarray(nlp.states[key].index).reshape(-1)] = scale
 
     for interval in range(expected_intervals):
+        if restart_at_cycle_boundaries and interval and (
+            interval % intervals_per_cycle == 0
+        ):
+            # Preserve the diagnostic integrals appended after n_states, but
+            # restart all physical/accounting states from the NLP boundary.
+            # This mirrors a RHO validation window exactly.
+            augmented[:n_states] = states[:, interval]
         local_node = interval % intervals_per_cycle
         interval_start = local_node * dt
         numerical_timeseries = _numerical_timeseries_at_node(nlp, local_node)
@@ -12542,6 +12651,15 @@ def high_accuracy_trace_rollout_diagnostics(
                 maximum_absolute_by_state[key],
                 float(np.max(np.abs(endpoint_error[indexes]))),
             )
+        if (interval + 1) % intervals_per_cycle == 0:
+            energy_index = int(
+                np.asarray(nlp.states["E_prod"].index).reshape(-1)[0]
+            )
+            per_cycle_reference_energy_j.append(float(augmented[energy_index]))
+            cycle_start = interval + 1 - intervals_per_cycle
+            per_cycle_reference_work_j.append(
+                float(augmented[energy_index] - states[energy_index, cycle_start])
+            )
 
     auc_values = augmented[n_states : n_states + n_capacities]
     objective_values = augmented[n_states + n_capacities :]
@@ -12612,11 +12730,14 @@ def high_accuracy_trace_rollout_diagnostics(
         "cycle_count": int(cycle_count),
         "interval_count": int(expected_intervals),
         "state_node_stride": state_node_stride,
+        "restart_at_cycle_boundaries": bool(restart_at_cycle_boundaries),
         "reference_evaluations": int(reference_evaluations),
         "maximum_absolute_endpoint_error": maximum_absolute_endpoint_error,
         "maximum_scaled_endpoint_error": maximum_scaled_endpoint_error,
         "maximum_endpoint_error_interval": maximum_endpoint_error_interval,
         "maximum_absolute_endpoint_error_by_state": maximum_absolute_by_state,
+        "per_cycle_reference_energy_j": per_cycle_reference_energy_j,
+        "per_cycle_reference_work_j": per_cycle_reference_work_j,
         "dense_isokinetic_load_audit": dense_load_summary,
         "dense_crank_velocity_audit": dense_velocity_summary,
         "final_reference_state": {
@@ -19652,6 +19773,13 @@ def solve_case(
         raise ValueError(
             "--isokinetic-kinematics prescribed requires reduced isokinetic mechanics."
         )
+    args.enforce_isokinetic_work_per_cycle = bool(
+        getattr(args, "enforce_isokinetic_work_per_cycle", False)
+    )
+    if args.enforce_isokinetic_work_per_cycle and args.formulation != "isokinetic":
+        raise ValueError(
+            "--enforce-isokinetic-work-per-cycle requires --formulation isokinetic."
+        )
     args.reduced_dynamic_residual = str(
         getattr(args, "reduced_dynamic_residual", "direct")
     )
@@ -19686,6 +19814,7 @@ def solve_case(
             load_torque_min_nm=getattr(args, "load_torque_min", -3.0),
             load_torque_max_nm=getattr(args, "load_torque_max", 3.0),
             number_of_turns=args.cycles_per_window,
+            enforce_work_per_cycle=args.enforce_isokinetic_work_per_cycle,
         )
         args.isokinetic_omega = isokinetic_config.omega_target_rad_s
         args.energy_equivalent_torque = (
@@ -19798,6 +19927,17 @@ def solve_case(
                 raise ValueError("--fatigue-weight-values must lie in [0, 1].")
     elif args.fatigue_weight_values is not None:
         raise ValueError("--fatigue-weight-values requires --parametric-fatigue-weights.")
+    if getattr(args, "parametric_control_weights", False):
+        if args.solver not in NLP_SOLVER_NAMES:
+            raise ValueError("--parametric-control-weights is available only with CasADi NLP solvers.")
+        if "control" not in objectives:
+            raise ValueError("--parametric-control-weights requires the control objective.")
+        if args.control_weight_values is not None:
+            values = np.asarray(args.control_weight_values, dtype=float)
+            if not np.all(np.isfinite(values)) or np.any(values <= 0.0):
+                raise ValueError("--control-weight-values must be finite and strictly positive.")
+    elif args.control_weight_values is not None:
+        raise ValueError("--control-weight-values requires --parametric-control-weights.")
     validate_terminal_reserve_options(
         args.terminal_reserve_weight,
         args.terminal_reserve_temperature,
@@ -20911,6 +21051,16 @@ def solve_case(
             requested_fatigue_weights if requested_fatigue_weights is not None else [1.0] * len(muscle_models),
             allow_zero=requested_fatigue_weights is not None,
         )
+    control_weight_binding = None
+    if getattr(args, "parametric_control_weights", False):
+        from cocofest.optimization.parametric_control_weights import ParametricControlWeightBinding
+
+        requested_control_weights = getattr(args, "control_weight_values", None)
+        if requested_control_weights is not None and len(requested_control_weights) != len(muscle_models):
+            raise ValueError("--control-weight-values does not match the model muscle count.")
+        control_weight_binding = ParametricControlWeightBinding(
+            requested_control_weights if requested_control_weights is not None else [1.0] * len(muscle_models)
+        )
     mechanical_reserve_binding = None
     if getattr(args, "experimental_mechanical_reserve_weight", 0.0) > 0.0:
         from cocofest.optimization.adaptive_moment_rollout import DingPulseWidthParameters
@@ -21132,8 +21282,11 @@ def solve_case(
         "minimize_control": "control" in objectives,
         "cost_fun_weight": build_cost_fun_weight(objectives),
         "objective_shape": args.objective_shape,
+        "fatigue_objective_variant": getattr(args, "fatigue_objective_variant", "legacy"),
         **({"fatigue_weight_binding": fatigue_weight_binding}
            if fatigue_weight_binding is not None else {}),
+        **({"control_weight_binding": control_weight_binding}
+           if control_weight_binding is not None else {}),
         **({"mechanical_reserve_binding": mechanical_reserve_binding}
            if mechanical_reserve_binding is not None else {}),
         **({"max_pw_work_options": {
@@ -21207,6 +21360,11 @@ def solve_case(
         "reduced_cycling_dynamics": reduced_cycling_dynamics,
         "formulation": args.formulation,
         "isokinetic_kinematics": args.isokinetic_kinematics,
+        "enforce_isokinetic_work_per_cycle": (
+            isokinetic_config.enforce_work_per_cycle
+            if isokinetic_config is not None
+            else False
+        ),
         "isokinetic_omega": (
             isokinetic_config.omega_target_rad_s
             if isokinetic_config is not None

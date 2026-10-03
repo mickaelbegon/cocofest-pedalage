@@ -1,0 +1,647 @@
+{
+  "activation_allowed": false,
+  "all_anchors_pass_directional_holdout": false,
+  "anchors": {
+    "c120": {
+      "accepted": false,
+      "activation_allowed": false,
+      "capacity_scale": [
+        0.014344806711466207,
+        0.00177784579235174,
+        0.0035115603441499,
+        1e-08
+      ],
+      "exact_holdout_families": 2,
+      "exact_train_families": 6,
+      "excluded": [],
+      "fast_history_envelope_available": true,
+      "heldout_pair_correct": 0,
+      "heldout_pair_total": 0,
+      "heldout_sign_correct": 0,
+      "heldout_sign_total": 0,
+      "holdout": [
+        {
+          "fast_history_inside_training_envelope": false,
+          "id": "left-c120-mixed-plus-d3",
+          "inside_training_range": true,
+          "observed_advantage_cycles": 0,
+          "off_span_distance": 5.551115123125783e-16,
+          "predicted_advantage_cycles": 0.0,
+          "trusted": true
+        },
+        {
+          "fast_history_inside_training_envelope": false,
+          "id": "left-c120-mixed-minus-d3",
+          "inside_training_range": false,
+          "observed_advantage_cycles": 0,
+          "off_span_distance": 7.771561172376096e-16,
+          "predicted_advantage_cycles": 0.0,
+          "trusted": false
+        }
+      ],
+      "muscle_order": [
+        "Delt_ant",
+        "Delt_post",
+        "Biceps",
+        "Triceps"
+      ],
+      "projected_gradient_cycles_per_capacity_ratio": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "reachable_basis": [
+        [
+          -0.5912322900364971,
+          0.4006958061966373,
+          -0.07041091475624903,
+          0.6963688341660716
+        ],
+        [
+          -0.5059467137198814,
+          -0.8578180771411624,
+          0.0573521430576318,
+          0.06983409691968431
+        ],
+        [
+          0.6275516035965296,
+          -0.31645621679836955,
+          -0.06021010624015817,
+          0.7088082891583848
+        ],
+        [
+          -0.025323643451839305,
+          -0.05870673109557841,
+          -0.9940461648617904,
+          -0.08822955814216417
+        ]
+      ],
+      "reachable_condition": 4.880197666052875,
+      "reachable_rank": 4,
+      "reasons": [
+        "holdout_outside_reachable_training_span",
+        "unmodeled_fast_history_outside_training_envelope",
+        "insufficient_non_tied_holdout_contrasts"
+      ]
+    },
+    "c140": {
+      "accepted": false,
+      "activation_allowed": false,
+      "capacity_scale": [
+        0.013252339823088155,
+        0.0027725010030623665,
+        0.002390969969129908,
+        0.0019283905789203581
+      ],
+      "exact_holdout_families": 2,
+      "exact_train_families": 6,
+      "excluded": [],
+      "fast_history_envelope_available": true,
+      "heldout_pair_correct": 0,
+      "heldout_pair_total": 0,
+      "heldout_sign_correct": 0,
+      "heldout_sign_total": 0,
+      "holdout": [
+        {
+          "fast_history_inside_training_envelope": true,
+          "id": "left-c140-mixed-plus-d3",
+          "inside_training_range": true,
+          "observed_advantage_cycles": 0,
+          "off_span_distance": 4.440892098500626e-16,
+          "predicted_advantage_cycles": 0.0,
+          "trusted": true
+        },
+        {
+          "fast_history_inside_training_envelope": false,
+          "id": "left-c140-mixed-minus-d3",
+          "inside_training_range": false,
+          "observed_advantage_cycles": 0,
+          "off_span_distance": 3.3306690738754696e-16,
+          "predicted_advantage_cycles": 0.0,
+          "trusted": false
+        }
+      ],
+      "muscle_order": [
+        "Delt_ant",
+        "Delt_post",
+        "Biceps",
+        "Triceps"
+      ],
+      "projected_gradient_cycles_per_capacity_ratio": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "reachable_basis": [
+        [
+          -0.5703566819020098,
+          -0.12444544290706525,
+          0.025940685025890288,
+          0.8115008736962528
+        ],
+        [
+          0.3118858824917646,
+          0.30094641595223737,
+          -0.8523737950973723,
+          0.2926044505115032
+        ],
+        [
+          0.5722148570047302,
+          -0.7688731960233862,
+          0.03510879999407919,
+          0.2831457893432548
+        ],
+        [
+          0.49999060904692877,
+          0.5502532098061311,
+          0.5211078261307018,
+          0.41913891433302275
+        ]
+      ],
+      "reachable_condition": 5.5899536272537675,
+      "reachable_rank": 4,
+      "reasons": [
+        "holdout_outside_reachable_training_span",
+        "unmodeled_fast_history_outside_training_envelope",
+        "insufficient_non_tied_holdout_contrasts"
+      ]
+    }
+  },
+  "control_replay_gate_passed": true,
+  "kind": "unilateral_continuation_value_directional_validation",
+  "label_interpretation": "locally certified frozen endpoint under the declared reference RHO, not global infeasibility",
+  "manifest": "/home/mickaelbegon/Documents/Kevin/cocofest-pedalage/asymmetric-sides-r192-rho-bo-20260928/unilateral-continuation-labels-20261003/manifest.json",
+  "manifest_sha256": "ea11854191806c46133b16944bad1ee9f60d7335e3a591146ab06fca55d86e40",
+  "maximum_relative_slow_offset_observed": 5.717279424595233e-12,
+  "next_gate": "matched +g/-g/0 causal RHO branches before any endurance claim",
+  "nominal_torque_nm": 0.96,
+  "observed_exact_action_advantages": [
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c120",
+      "delta_capacity_ratios": {
+        "Biceps": -0.0007757896986289037,
+        "Delt_ant": 0.002619094912357567,
+        "Delt_post": -0.0007391117862658447,
+        "Triceps": -1.2443912567050575e-10
+      },
+      "family": "contrast-1-plus",
+      "id": "left-c120-contrast-1-plus-d1",
+      "intervention_cycles": 1,
+      "partition": "train"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c120",
+      "delta_capacity_ratios": {
+        "Biceps": -0.002497199318452936,
+        "Delt_ant": 0.006567980431730458,
+        "Delt_post": -0.0010370003387560889,
+        "Triceps": -5.042785078401835e-10
+      },
+      "family": "contrast-1-plus",
+      "id": "left-c120-contrast-1-plus-d3",
+      "intervention_cycles": 3,
+      "partition": "train"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c120",
+      "delta_capacity_ratios": {
+        "Biceps": 0.00067278762083256,
+        "Delt_ant": -0.004705488883607778,
+        "Delt_post": 2.2507383201642028e-07,
+        "Triceps": 9.635670039642719e-11
+      },
+      "family": "contrast-1-minus",
+      "id": "left-c120-contrast-1-minus-d1",
+      "intervention_cycles": 1,
+      "partition": "train"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c120",
+      "delta_capacity_ratios": {
+        "Biceps": 0.0007949284087185315,
+        "Delt_ant": -0.006940807321055398,
+        "Delt_post": 0.00177784579235174,
+        "Triceps": 5.143085957115545e-10
+      },
+      "family": "contrast-1-minus",
+      "id": "left-c120-contrast-1-minus-d3",
+      "intervention_cycles": 3,
+      "partition": "train"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c120",
+      "delta_capacity_ratios": {
+        "Biceps": -0.0009207361633137845,
+        "Delt_ant": 0.002958580904289465,
+        "Delt_post": 2.1367414526629602e-07,
+        "Triceps": 6.923794870772326e-11
+      },
+      "family": "contrast-2-plus",
+      "id": "left-c120-contrast-2-plus-d1",
+      "intervention_cycles": 1,
+      "partition": "train"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c120",
+      "delta_capacity_ratios": {
+        "Biceps": -0.0035115603441499,
+        "Delt_ant": 0.009680654587629345,
+        "Delt_post": 0.0017778023562866618,
+        "Triceps": 4.398730268917461e-10
+      },
+      "family": "contrast-2-plus",
+      "id": "left-c120-contrast-2-plus-d3",
+      "intervention_cycles": 3,
+      "partition": "train"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c120",
+      "delta_capacity_ratios": {
+        "Biceps": 0.0010829157551958124,
+        "Delt_ant": -0.007018185159028412,
+        "Delt_post": -0.0007390977034495982,
+        "Triceps": -8.137412965680824e-11
+      },
+      "family": "contrast-2-minus",
+      "id": "left-c120-contrast-2-minus-d1",
+      "intervention_cycles": 1,
+      "partition": "train"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c120",
+      "delta_capacity_ratios": {
+        "Biceps": 0.002215380209490636,
+        "Delt_ant": -0.014344806711466207,
+        "Delt_post": -0.0010369565952907944,
+        "Triceps": -3.791928993024385e-10
+      },
+      "family": "contrast-2-minus",
+      "id": "left-c120-contrast-2-minus-d3",
+      "intervention_cycles": 3,
+      "partition": "train"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c120",
+      "delta_capacity_ratios": {
+        "Biceps": 4.254042673679237e-10,
+        "Delt_ant": -2.4410123811158257e-08,
+        "Delt_post": 7.742701935153917e-08,
+        "Triceps": -2.2635449070662617e-10
+      },
+      "family": "contrast-3-plus",
+      "id": "left-c120-contrast-3-plus-d1",
+      "intervention_cycles": 1,
+      "partition": "train"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c120",
+      "delta_capacity_ratios": {
+        "Biceps": 4.9586826866843126e-09,
+        "Delt_ant": 4.247906026932924e-09,
+        "Delt_post": 8.542799490030006e-08,
+        "Triceps": -1.0933876026797407e-09
+      },
+      "family": "contrast-3-plus",
+      "id": "left-c120-contrast-3-plus-d3",
+      "intervention_cycles": 3,
+      "partition": "train"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c120",
+      "delta_capacity_ratios": {
+        "Biceps": -6.677790542752859e-10,
+        "Delt_ant": 1.9621556823778974e-08,
+        "Delt_post": -1.21904337291312e-07,
+        "Triceps": 2.2656020393085896e-09
+      },
+      "family": "contrast-3-minus",
+      "id": "left-c120-contrast-3-minus-d1",
+      "intervention_cycles": 1,
+      "partition": "train"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c120",
+      "delta_capacity_ratios": {
+        "Biceps": -8.00785271426463e-09,
+        "Delt_ant": -4.068623582487163e-08,
+        "Delt_post": -1.351970558838289e-07,
+        "Triceps": 5.121743917868571e-09
+      },
+      "family": "contrast-3-minus",
+      "id": "left-c120-contrast-3-minus-d3",
+      "intervention_cycles": 3,
+      "partition": "train"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c120",
+      "delta_capacity_ratios": {
+        "Biceps": -0.0008396912357750974,
+        "Delt_ant": 0.002958603260138859,
+        "Delt_post": -0.0007390838828797985,
+        "Triceps": -1.661463189250867e-10
+      },
+      "family": "mixed-plus",
+      "id": "left-c120-mixed-plus-d1",
+      "intervention_cycles": 1,
+      "partition": "holdout"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c120",
+      "delta_capacity_ratios": {
+        "Biceps": -0.0030873943356165556,
+        "Delt_ant": 0.009680688890800648,
+        "Delt_post": -0.0010369030906097754,
+        "Triceps": -7.151110814618278e-10
+      },
+      "family": "mixed-plus",
+      "id": "left-c120-mixed-plus-d3",
+      "intervention_cycles": 3,
+      "partition": "holdout"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c120",
+      "delta_capacity_ratios": {
+        "Biceps": 0.0009788757886166621,
+        "Delt_ant": -0.007018151910389014,
+        "Delt_post": 1.501263476866299e-07,
+        "Triceps": 3.561477779356892e-10
+      },
+      "family": "mixed-minus",
+      "id": "left-c120-mixed-minus-d1",
+      "intervention_cycles": 1,
+      "partition": "holdout"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c120",
+      "delta_capacity_ratios": {
+        "Biceps": 0.0016015455209544838,
+        "Delt_ant": -0.012507813802237089,
+        "Delt_post": 0.001776471703327176,
+        "Triceps": 1.2394927306758063e-09
+      },
+      "family": "mixed-minus",
+      "id": "left-c120-mixed-minus-d3",
+      "intervention_cycles": 3,
+      "partition": "holdout"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c140",
+      "delta_capacity_ratios": {
+        "Biceps": -0.0006419558041803608,
+        "Delt_ant": 0.0008598838830977673,
+        "Delt_post": -1.4641620915689657e-08,
+        "Triceps": -1.8421335568064023e-09
+      },
+      "family": "contrast-1-plus",
+      "id": "left-c140-contrast-1-plus-d1",
+      "intervention_cycles": 1,
+      "partition": "train"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c140",
+      "delta_capacity_ratios": {
+        "Biceps": -0.002149726923573958,
+        "Delt_ant": 0.0011710172627761306,
+        "Delt_post": -6.818399445052137e-08,
+        "Triceps": -3.8452298012359165e-09
+      },
+      "family": "contrast-1-plus",
+      "id": "left-c140-contrast-1-plus-d3",
+      "intervention_cycles": 3,
+      "partition": "train"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c140",
+      "delta_capacity_ratios": {
+        "Biceps": 0.0008005277797508148,
+        "Delt_ant": -0.005655367729608618,
+        "Delt_post": 0.0008091363987752231,
+        "Triceps": 0.0005672545927245531
+      },
+      "family": "contrast-1-minus",
+      "id": "left-c140-contrast-1-minus-d1",
+      "intervention_cycles": 1,
+      "partition": "train"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c140",
+      "delta_capacity_ratios": {
+        "Biceps": 0.0012699277369172535,
+        "Delt_ant": -0.013252339823088155,
+        "Delt_post": 0.0027725010030623665,
+        "Triceps": 0.001928375880005273
+      },
+      "family": "contrast-1-minus",
+      "id": "left-c140-contrast-1-minus-d3",
+      "intervention_cycles": 3,
+      "partition": "train"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c140",
+      "delta_capacity_ratios": {
+        "Biceps": -0.0006419572406101137,
+        "Delt_ant": 0.0008597929310205643,
+        "Delt_post": 1.1487269724330673e-07,
+        "Triceps": -8.537871520886142e-10
+      },
+      "family": "contrast-2-plus",
+      "id": "left-c140-contrast-2-plus-d1",
+      "intervention_cycles": 1,
+      "partition": "train"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c140",
+      "delta_capacity_ratios": {
+        "Biceps": -0.002149731263668908,
+        "Delt_ant": 0.0011708071276185228,
+        "Delt_post": 1.416876731497041e-07,
+        "Triceps": -2.0430186431497077e-09
+      },
+      "family": "contrast-2-plus",
+      "id": "left-c140-contrast-2-plus-d3",
+      "intervention_cycles": 3,
+      "partition": "train"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c140",
+      "delta_capacity_ratios": {
+        "Biceps": 0.0008005425118637888,
+        "Delt_ant": -0.0044701618109656005,
+        "Delt_post": -5.808887704183974e-09,
+        "Triceps": 0.0003983050212790218
+      },
+      "family": "contrast-2-minus",
+      "id": "left-c140-contrast-2-minus-d1",
+      "intervention_cycles": 1,
+      "partition": "train"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c140",
+      "delta_capacity_ratios": {
+        "Biceps": 0.002390969969129908,
+        "Delt_ant": -0.011317049795981693,
+        "Delt_post": -1.2805162152851324e-08,
+        "Triceps": 0.0004744059354115926
+      },
+      "family": "contrast-2-minus",
+      "id": "left-c140-contrast-2-minus-d3",
+      "intervention_cycles": 3,
+      "partition": "train"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c140",
+      "delta_capacity_ratios": {
+        "Biceps": 2.4053814495772485e-10,
+        "Delt_ant": 1.0805755512599546e-08,
+        "Delt_post": -5.145471826395465e-10,
+        "Triceps": -2.208014104887468e-09
+      },
+      "family": "contrast-3-plus",
+      "id": "left-c140-contrast-3-plus-d1",
+      "intervention_cycles": 1,
+      "partition": "train"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c140",
+      "delta_capacity_ratios": {
+        "Biceps": 1.4105803192165922e-09,
+        "Delt_ant": 3.130937376027987e-08,
+        "Delt_post": -1.5853922619157856e-09,
+        "Triceps": -4.772710671119285e-09
+      },
+      "family": "contrast-3-plus",
+      "id": "left-c140-contrast-3-plus-d3",
+      "intervention_cycles": 3,
+      "partition": "train"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c140",
+      "delta_capacity_ratios": {
+        "Biceps": -1.5174490552993802e-09,
+        "Delt_ant": -0.0014016122186105706,
+        "Delt_post": 2.2346735573108845e-10,
+        "Triceps": 0.000567256512893688
+      },
+      "family": "contrast-3-minus",
+      "id": "left-c140-contrast-3-minus-d1",
+      "intervention_cycles": 1,
+      "partition": "train"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c140",
+      "delta_capacity_ratios": {
+        "Biceps": -2.525501870964675e-07,
+        "Delt_ant": -0.00525454517570767,
+        "Delt_post": -1.0597358546249325e-09,
+        "Triceps": 0.0019283905789203581
+      },
+      "family": "contrast-3-minus",
+      "id": "left-c140-contrast-3-minus-d3",
+      "intervention_cycles": 3,
+      "partition": "train"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c140",
+      "delta_capacity_ratios": {
+        "Biceps": -0.0006419571316975681,
+        "Delt_ant": 0.0008598858116574126,
+        "Delt_post": -6.807068797520799e-09,
+        "Triceps": -2.1459927168621107e-09
+      },
+      "family": "mixed-plus",
+      "id": "left-c140-mixed-plus-d1",
+      "intervention_cycles": 1,
+      "partition": "holdout"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c140",
+      "delta_capacity_ratios": {
+        "Biceps": -0.0021497294736076977,
+        "Delt_ant": 0.001170994316410101,
+        "Delt_post": -2.120805864258557e-08,
+        "Triceps": -4.9045522088064786e-09
+      },
+      "family": "mixed-plus",
+      "id": "left-c140-mixed-plus-d3",
+      "intervention_cycles": 3,
+      "partition": "holdout"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c140",
+      "delta_capacity_ratios": {
+        "Biceps": 0.000800541565203261,
+        "Delt_ant": -0.0056554030216756646,
+        "Delt_post": 0.0008090452748622523,
+        "Triceps": 0.0005672563942319409
+      },
+      "family": "mixed-minus",
+      "id": "left-c140-mixed-minus-d1",
+      "intervention_cycles": 1,
+      "partition": "holdout"
+    },
+    {
+      "advantage_cycles": 0,
+      "anchor_id": "c140",
+      "delta_capacity_ratios": {
+        "Biceps": 0.002279242220555533,
+        "Delt_ant": -0.017720671628923657,
+        "Delt_post": 0.0009819317259406324,
+        "Triceps": 0.0019283892231667377
+      },
+      "family": "mixed-minus",
+      "id": "left-c140-mixed-minus-d3",
+      "intervention_cycles": 3,
+      "partition": "holdout"
+    }
+  ],
+  "planned_jobs": 36,
+  "return_policy_sha256": "b32328856dea7911c98f1b0fc699d188cfe23acdd7d12d7c3c00bc240d383571",
+  "schema_version": 1,
+  "side": "left",
+  "status_counts": {
+    "numerical_stop": 0,
+    "off_slow_manifold": 0,
+    "pending": 0,
+    "physiological_failure_certified": 36,
+    "right_censored": 0
+  },
+  "unmodeled_endpoint_covariates": [
+    "Cn",
+    "F",
+    "last_pulse_width_history",
+    "phase and mechanical state"
+  ]
+}

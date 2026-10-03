@@ -39,7 +39,7 @@ from scripts.probe_independent_rho_task_reserve import _load_arm
 from scripts.validate_independent_rho_checkpoint import _object, _source_path
 
 
-def _build_runtime(payload, side):
+def _build_runtime(payload, side, *, cpu=None):
     from cocofest.optimization.configured_cycling_model import configured_model_factories
     from examples.fes_multibody.cycling import cycling_pulse_width_mhe_acados_periodic as driver
 
@@ -61,7 +61,12 @@ def _build_runtime(payload, side):
     # prepared bounds are restored afterwards; never run _set_cyclic_bound on
     # the restored problem, which could replace source terminal constraints.
     runtime["nmpc"]._initialize_state_idx_to_cycle({"states": {}})
-    _apply_worker_solver_affinity(payload, side)
+    if cpu is None:
+        _apply_worker_solver_affinity(payload, side)
+    else:
+        if cpu not in os.sched_getaffinity(0):
+            raise ValueError("Requested branch CPU is outside the worker affinity")
+        os.sched_setaffinity(0, {cpu})
     return runtime
 
 
@@ -99,13 +104,13 @@ def _worker(connection, spec, verify_endpoint=None):
         if verify_endpoint is None:
             result = execute_short_branch(source, policy=spec["policy"], muscle_names=spec["muscle_order"],
                 output_directory=Path(spec["output_directory"]),
-                build_runtime=lambda: _build_runtime(payload, spec["side"]), solve_one_cycle=_solve,
+                build_runtime=lambda: _build_runtime(payload, spec["side"], cpu=spec.get("cpu")), solve_one_cycle=_solve,
                 advance_one_cycle=_advance,
                 audit=lambda solution, program, target, tol: independent_full_nlp_audit(
                     solution, program, target_work_j=target, tolerance=tol),
                 save_witness=_save_witness, tolerance=spec["tolerance"])
         else:
-            runtime = _build_runtime(payload, spec["side"])
+            runtime = _build_runtime(payload, spec["side"], cpu=spec.get("cpu"))
             result = restore_prepared_checkpoint(Path(verify_endpoint["primal_path"]), runtime["nmpc"],
                                                  completed_cycles=verify_endpoint["completed_cycles"])
         connection.send({"kind": "result", "pid": os.getpid(), "result": result})
@@ -202,9 +207,11 @@ def load_branch_endpoint(path: Path) -> tuple[TaskReserveCheckpoint, dict]:
 
 
 def run(plan_path: Path, *, anchor_id: str, branch_id: str, output_directory: Path,
-        tolerance: float = 1e-5, timeout_seconds: float = 900.) -> Path:
+        tolerance: float = 1e-5, timeout_seconds: float = 900., cpu: int | None = None) -> Path:
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
         raise ValueError("Worker timeout must be finite and positive")
+    if cpu is not None and (isinstance(cpu, bool) or cpu not in os.sched_getaffinity(0)):
+        raise ValueError("Requested branch CPU is outside process affinity")
     plan_path = Path(plan_path).resolve(strict=True)
     plan = _object(plan_path)
     if plan.get("schema_version") != 1 or plan.get("kind") != "local_task_reserve_experiment_plan":
@@ -227,7 +234,7 @@ def run(plan_path: Path, *, anchor_id: str, branch_id: str, output_directory: Pa
         "anchor_id": anchor_id, "side": plan["side"], "source_receipt": str(anchor),
         "source_receipt_sha256": sha256(anchor.read_bytes()).hexdigest(),
         "physical_task_context": physical, "physical_task_context_sha256": json_digest(physical)}
-    spec = {**provenance, "policy": policy, "muscle_order": names,
+    spec = {**provenance, "policy": policy, "muscle_order": names, "cpu": cpu,
             "output_directory": str(Path(output_directory).resolve()), "tolerance": tolerance}
     produced = _spawn(spec, timeout_seconds=timeout_seconds)
     export = produced["result"]
@@ -256,10 +263,11 @@ def main(argv=None):
     parser.add_argument("--output-directory", required=True, type=Path)
     parser.add_argument("--tolerance", type=float, default=1e-5)
     parser.add_argument("--timeout-seconds", type=float, default=900.)
+    parser.add_argument("--cpu", type=int, help="Pin both branch producer and verifier to this CPU")
     args = parser.parse_args(argv)
     print(run(args.plan, anchor_id=args.anchor, branch_id=args.branch,
               output_directory=args.output_directory, tolerance=args.tolerance,
-              timeout_seconds=args.timeout_seconds))
+              timeout_seconds=args.timeout_seconds, cpu=args.cpu))
 
 
 if __name__ == "__main__":

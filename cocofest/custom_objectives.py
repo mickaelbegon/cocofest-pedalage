@@ -269,6 +269,18 @@ class CustomObjective:
         return stim_charge
 
     @staticmethod
+    def minimize_parameterized_overall_stimulation_charge(controller: PenaltyController) -> MX:
+        """Return ``sqrt(w_i) * PW_i/PWmax_i`` for fixed NLP parameters."""
+        from casadi import sqrt
+        from .optimization.parametric_control_weights import CONTROL_WEIGHT_PARAMETER_KEY
+
+        charge = CustomObjective.minimize_overall_stimulation_charge(controller)
+        weights = controller.parameters[CONTROL_WEIGHT_PARAMETER_KEY].cx
+        if int(weights.numel()) != int(charge.numel()):
+            raise ValueError("Control weight parameter/model dimension mismatch")
+        return vertcat(*[sqrt(weights[index]) * charge[index] for index in range(int(charge.numel()))])
+
+    @staticmethod
     def minimize_muscle_fatigue_normalized(controller: PenaltyController, fes_model: FesModel, power: int = 1) -> MX:
         """
         Minimize the normalized muscle fatigue.
