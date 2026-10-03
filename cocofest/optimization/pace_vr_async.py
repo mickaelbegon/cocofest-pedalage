@@ -6,20 +6,25 @@ the RHO. The existing fixed-parameter weight graph is reused without rebuild.
 """
 from dataclasses import asdict
 from concurrent.futures import ProcessPoolExecutor
+from copy import deepcopy
 import hashlib
 import json
 import multiprocessing
 import os
 import math
+from queue import Empty, Full
 import time
 
 import numpy as np
 
 from .pace_vr import PaceVrConfig, PaceVrSnapshot, evaluate_pace_vr_weight_candidates, run_pace_vr_snapshot
+from .pace_rt_ocp import PACE_RT_MODE
 from .rho_pace_async import AsyncPaceWorker
 
 
 APPLICATION_MODE = "derived_fatigue_weights_experimental"
+APPLICATION_MODES = frozenset((APPLICATION_MODE, PACE_RT_MODE))
+_PROCESS_SUPERVISOR_CACHE = {}
 
 
 def validate_pace_vr_configuration(payload):
@@ -29,14 +34,42 @@ def validate_pace_vr_configuration(payload):
     config = dict(declared)
     if config.get("asynchronous") is not True:
         raise ValueError("experimental_pace_vr requires asynchronous=true; synchronous RHO blocking is forbidden.")
-    if config.get("application_mode") != APPLICATION_MODE:
-        raise ValueError(f"PACE-VR terminal-value binding is not wired; explicitly select application_mode={APPLICATION_MODE}.")
+    if config.get("application_mode") not in APPLICATION_MODES:
+        raise ValueError("PACE-VR terminal-value binding is not wired for this application_mode.")
     if payload.get("parametric_fatigue_weights") is not True:
         raise ValueError("PACE-VR weight adapter requires parametric_fatigue_weights=true for compiled NLP reuse.")
     if payload.get("muscle_pace", {}).get("adaptation_enabled", True) is not False:
         raise ValueError("PACE-VR weight adapter requires disabled competing muscle-weight feedback.")
     if float(payload.get("experimental_mechanical_reserve_weight", 0.)) > 0:
         raise ValueError("PACE-VR weight adapter cannot coexist with the mechanical-reserve parameter graph.")
+    if config["application_mode"] == PACE_RT_MODE:
+        if not np.isfinite(config.get("terminal_proximal_weight", .03)) or config.get("terminal_proximal_weight", .03) < 0:
+            raise ValueError("PACE-RT terminal_proximal_weight must be finite and nonnegative.")
+        if not np.isfinite(config.get("target_fraction", .25)) or not 0 <= config.get("target_fraction", .25) <= 1:
+            raise ValueError("PACE-RT target_fraction must lie in [0, 1].")
+        if not np.isfinite(config.get("terminal_shortage_weight", 1.)) or config.get("terminal_shortage_weight", 1.) < 0:
+            raise ValueError("PACE-RT terminal_shortage_weight must be finite and nonnegative.")
+        config.setdefault("normalize_terminal_shortage", False)
+        if type(config["normalize_terminal_shortage"]) is not bool:
+            raise ValueError("PACE-RT normalize_terminal_shortage must be a boolean.")
+        config.setdefault("enforce_terminal_target_constraint", False)
+        if type(config["enforce_terminal_target_constraint"]) is not bool:
+            raise ValueError("PACE-RT enforce_terminal_target_constraint must be a boolean.")
+        config.setdefault("lexicographic_reserve_priority", False)
+        if type(config["lexicographic_reserve_priority"]) is not bool:
+            raise ValueError("PACE-RT lexicographic_reserve_priority must be a boolean.")
+        config.setdefault("lexicographic_reserve_epsilon", 1e-4)
+        epsilon = config["lexicographic_reserve_epsilon"]
+        if (isinstance(epsilon, bool) or not isinstance(epsilon, (int, float))
+                or not np.isfinite(epsilon) or epsilon < 0):
+            raise ValueError("PACE-RT lexicographic_reserve_epsilon must be finite and nonnegative.")
+        if config["lexicographic_reserve_priority"] and not config["enforce_terminal_target_constraint"]:
+            raise ValueError("PACE-RT reserve priority requires the compiled terminal target constraint.")
+        if config["lexicographic_reserve_priority"]:
+            primary_weights = payload.get("fatigue_weight_values")
+            if (not isinstance(primary_weights, (list, tuple)) or not primary_weights
+                    or any(float(value) != 0. for value in primary_weights)):
+                raise ValueError("PACE-RT reserve priority requires zero fatigue_weight_values for the primary solve.")
     config.setdefault("horizon_cycles", 20)
     ladder = config.get("horizon_ladder_cycles", (config["horizon_cycles"],))
     if isinstance(ladder, (str, bytes)):
@@ -64,6 +97,11 @@ def validate_pace_vr_configuration(payload):
     config["supervisor_cpu_ids"] = cpus
     config["supervisor_cpu_id"] = cpus[0]
     config["horizon_ladder_cycles"] = horizons
+    config.setdefault("persistent_supervisor", False)
+    if type(config["persistent_supervisor"]) is not bool:
+        raise ValueError("PACE-VR persistent_supervisor must be a boolean.")
+    if config["persistent_supervisor"] and len(horizons) != 1:
+        raise ValueError("PACE-VR persistent_supervisor currently requires one rollout horizon and two arm CPUs.")
     affinity = payload.get("solver_cpu_affinity")
     if not isinstance(affinity, dict) or set(affinity) != {"right", "left"}:
         raise ValueError("PACE-VR requires explicit right/left solver_cpu_affinity for CPU isolation.")
@@ -180,8 +218,14 @@ def _candidate_weight_sets(incumbent, proposed):
 
 def _evaluate_pace_vr_side(task):
     """Evaluate one independent arm in a separately pinned child process."""
-    (side, horizon, snapshot_doc, incumbent, maximum_log_step, minimum_margin_improvement,
-     publication_reserve_s, fit_budget_fraction, deadline, cpu_id) = task
+    if len(task) == 10:  # Backward-compatible direct unit-test / worker payload.
+        (side, horizon, snapshot_doc, incumbent, maximum_log_step, minimum_margin_improvement,
+         publication_reserve_s, fit_budget_fraction, deadline, cpu_id) = task
+        application_mode, terminal_proximal_weight, terminal_shortage_weight = APPLICATION_MODE, .03, 1.
+    else:
+        (side, horizon, snapshot_doc, incumbent, maximum_log_step, minimum_margin_improvement,
+         publication_reserve_s, fit_budget_fraction, deadline, cpu_id, application_mode,
+         terminal_proximal_weight, terminal_shortage_weight) = task
     if hasattr(os, "sched_setaffinity"):
         os.sched_setaffinity(0, {cpu_id})
     source = PaceVrSnapshot(**snapshot_doc)
@@ -209,15 +253,26 @@ def _evaluate_pace_vr_side(task):
                                   rollout_snapshot.context_digest,
                                   time.monotonic() + fit_budget_fraction * remaining,
                                   rollout_snapshot.payload_json)
-    outcome = run_pace_vr_snapshot(fit_snapshot)
+    outcome = run_pace_vr_snapshot(fit_snapshot, supervisor_cache=_PROCESS_SUPERVISOR_CACHE)
     # The horizon is a slow-policy setting, not part of the certified RHO
     # snapshot provenance.  The owner therefore validates the original digest.
     outcome["rollout_context_digest"] = outcome["context_digest"]
     outcome["context_digest"] = source.context_digest
     outcome["request_id"] = source.request_id
     outcome["rollout_horizon_cycles"] = horizon
-    proposal = derived_fatigue_weights(outcome, incumbent, maximum_log_step)
-    if proposal is not None:
+    proposal = None
+    if application_mode == PACE_RT_MODE:
+        fit = outcome.get("local_fit") or {}
+        if outcome.get("accepted") is True and fit.get("accepted") is True:
+            proposal = {"local_fit": fit, "terminal_proximal_weight": float(terminal_proximal_weight),
+                        "terminal_shortage_weight": float(terminal_shortage_weight)}
+            outcome["candidate_screen"] = {"chosen": "terminal_reserve_target",
+                                           "reason": "accepted_local_fit_with_bounded_target"}
+        else:
+            outcome["candidate_screen"] = {"chosen": "incumbent", "reason": "no_valid_terminal_fit"}
+    else:
+        proposal = derived_fatigue_weights(outcome, incumbent, maximum_log_step)
+    if proposal is not None and application_mode == APPLICATION_MODE:
         incumbent_array = np.asarray(incumbent, float)
         proposed_array = np.asarray(proposal, float)
         candidate_weights = _candidate_weight_sets(incumbent_array, proposed_array)
@@ -225,13 +280,13 @@ def _evaluate_pace_vr_side(task):
         estimated_runtime = outcome["runtime_s"] / (1 + fit["sample_count"])
         trials = evaluate_pace_vr_weight_candidates(
             rollout_snapshot, candidate_weights, deadline_monotonic=publication_deadline,
-            estimated_candidate_runtime_s=estimated_runtime)
+            estimated_candidate_runtime_s=estimated_runtime, supervisor_cache=_PROCESS_SUPERVISOR_CACHE)
         proposal, screen = _choose_verified_weights(
             outcome, trials, incumbent_array, proposed_array, minimum_margin_improvement)
         screen["publication_deadline_monotonic"] = publication_deadline
         screen["fit_deadline_monotonic"] = fit_snapshot.deadline_monotonic
         outcome["candidate_screen"] = screen
-    else:
+    elif application_mode == APPLICATION_MODE:
         outcome["candidate_screen"] = {"chosen": "incumbent", "reason": "no_valid_gradient_proposal"}
     outcome["policy_selected"] = proposal is not None
     outcome["completed_monotonic"] = time.monotonic()
@@ -254,7 +309,8 @@ def evaluate_bilateral_pace_vr(payload):
               payload["maximum_log_step"], payload.get("candidate_minimum_margin_improvement", 2e-4),
               payload.get("candidate_publication_reserve_seconds", 1.),
               payload.get("candidate_fit_budget_fraction", .65), deadline,
-              cpus[2 * horizon_index + side_index])
+              cpus[2 * horizon_index + side_index], payload["application_mode"],
+              payload.get("terminal_proximal_weight", .03), payload.get("terminal_shortage_weight", 1.))
              for horizon_index, horizon in enumerate(horizons)
              for side_index, side in enumerate(order)]
     # Process isolation is required: the Python/SLSQP path does not reliably
@@ -275,30 +331,221 @@ def evaluate_bilateral_pace_vr(payload):
         if chosen is not None:
             horizon, outcome, proposal = chosen
             selected_horizons[side] = horizon
-            proposed[side] = dict(weights=proposal, source_cycle=outcome["source_cycle"],
+            decision = ({"weights": proposal} if payload["application_mode"] == APPLICATION_MODE
+                        else {key: value for key, value in proposal.items() if key != "local_fit"})
+            proposed[side] = dict(**decision, source_cycle=outcome["source_cycle"],
                                   request_id=outcome["request_id"], context_digest=outcome["context_digest"],
                                   local_fit=outcome["local_fit"], deadline_met=outcome["deadline_met"],
-                                  rollout_horizon_cycles=horizon)
+                                  rollout_horizon_cycles=horizon, application_mode=payload["application_mode"])
             results.setdefault("arms", {})[side] = results["attempts"][str(horizon)][side]
         else:
             # Retain the longest audit as the representative outcome when no
             # candidate passed; the complete ladder remains in ``attempts``.
             results.setdefault("arms", {})[side] = results["attempts"][str(candidates[0][0])][side]
-    return proposed or None, dict(arms=results["arms"], attempts=results["attempts"], application_mode=APPLICATION_MODE,
+    return proposed or None, dict(arms=results["arms"], attempts=results["attempts"], application_mode=payload["application_mode"],
                                   evaluation_order=list(order), horizon_ladder_cycles=list(horizons),
                                   selected_horizon_cycles=selected_horizons,
-                                  terminal_value_in_nlp=False, uses_fho_data=False)
+                                  terminal_value_in_nlp=payload["application_mode"] == PACE_RT_MODE,
+                                  uses_fho_data=False)
+
+
+def _persistent_arm_loop(side, cpu_id, requests, results, latest_sequence, evaluator):
+    """One pinned arm process; stale queued requests never enter the rollout."""
+    if hasattr(os, "sched_setaffinity"):
+        os.sched_setaffinity(0, {cpu_id})
+    if hasattr(os, "nice"):
+        os.nice(5)
+    # Imports and the CasADi backend are loaded before the first snapshot.
+    from .pace_vr import _casadi_qpoases_available
+    _casadi_qpoases_available()
+    while True:
+        item = requests.get()
+        if item is None:
+            return
+        sequence, task, submitted_at = item
+        if sequence != latest_sequence.value:
+            continue
+        started_at = time.monotonic()
+        try:
+            _, _, outcome, proposal = evaluator(task)
+            error = None
+        except Exception as exception:
+            outcome, proposal = None, None
+            error = f"{type(exception).__name__}: {exception}"
+        finished_at = time.monotonic()
+        results.put_nowait((sequence, side, outcome, proposal, submitted_at,
+                            started_at, finished_at, error))
+
+
+class PersistentBilateralPaceWorker:
+    """Two warm arm processes with replaceable, one-slot request mailboxes.
+
+    ``submit`` and ``poll`` only perform nonblocking queue operations. Running
+    evaluations may finish, but their sequence is invalidated immediately by
+    a newer snapshot and their result cannot reach the RHO owner.
+    """
+
+    replaces_pending = True
+
+    def __init__(self, *, horizon_cycles, budget_seconds, max_age_cycles, cpu_ids,
+                 context=None, clock=time.monotonic, evaluator=_evaluate_pace_vr_side):
+        self.horizon_cycles = int(horizon_cycles)
+        self.budget_seconds = float(budget_seconds)
+        self.max_age_cycles = int(max_age_cycles)
+        self.cpu_ids = tuple(cpu_ids)
+        if self.horizon_cycles < 1 or self.budget_seconds <= 0 or self.max_age_cycles < 1:
+            raise ValueError("Persistent worker horizon, budget and age must be positive.")
+        if len(self.cpu_ids) != 2 or len(set(self.cpu_ids)) != 2:
+            raise ValueError("Persistent bilateral worker requires two distinct CPU ids.")
+        self.context = context or multiprocessing.get_context("spawn")
+        self.clock = clock
+        self.results = self.context.Queue()
+        self.slots = {}
+        self.pending = {}
+        self.active = {}
+        self.closed = False
+        for side, cpu_id in zip(("right", "left"), self.cpu_ids):
+            requests = self.context.Queue(maxsize=1)
+            sequence = self.context.RawValue("q", 0)
+            process = self.context.Process(
+                target=_persistent_arm_loop,
+                args=(side, cpu_id, requests, self.results, sequence, evaluator),
+                daemon=True)
+            process.start()
+            self.slots[side] = (process, requests, sequence)
+
+    @property
+    def busy(self):
+        return bool(self.active)
+
+    def _flush_pending(self):
+        for side, item in tuple(self.pending.items()):
+            _, queue, _ = self.slots[side]
+            try:
+                queue.put_nowait(item)
+            except Full:
+                continue
+            del self.pending[side]
+
+    def submit(self, payload, *, cycle_index, incumbent_weights):
+        if self.closed:
+            return False
+        now = self.clock()
+        order = tuple(payload.get("evaluation_order", ("right", "left")))
+        if set(order) != {"right", "left"} or len(order) != 2:
+            raise ValueError("The bilateral evaluation order must contain each arm once.")
+        if tuple(payload["horizon_ladder_cycles"]) != (self.horizon_cycles,):
+            raise ValueError("Persistent worker requires its configured single horizon.")
+        deadline = now + float(payload["budget_seconds"])
+        for side in order:
+            _, _, sequence = self.slots[side]
+            next_sequence = sequence.value + 1
+            sequence.value = next_sequence
+            task = (side, self.horizon_cycles, deepcopy(payload["snapshots"][side]),
+                    tuple(payload["incumbent_weights"][side]), payload["maximum_log_step"],
+                    payload["candidate_minimum_margin_improvement"],
+                    payload["candidate_publication_reserve_seconds"],
+                    payload["candidate_fit_budget_fraction"], deadline,
+                    self.cpu_ids[0 if side == "right" else 1], payload["application_mode"],
+                    payload["terminal_proximal_weight"], payload["terminal_shortage_weight"])
+            self.pending[side] = (next_sequence, task, now)
+            self.active[side] = dict(sequence=next_sequence, source_cycle=int(cycle_index),
+                                     incumbent=tuple(payload["incumbent_weights"][side]),
+                                     submitted_at=now, deadline=deadline,
+                                     application_mode=payload["application_mode"])
+        self._flush_pending()
+        return True
+
+    def poll(self, *, cycle_index, incumbent_weights):
+        if self.closed:
+            return None, None
+        self._flush_pending()
+        proposals, arms, timings, source_cycles = {}, {}, {}, []
+        while True:
+            try:
+                sequence, side, outcome, proposal, submitted_at, started_at, finished_at, error = self.results.get_nowait()
+            except Empty:
+                break
+            current = self.active.get(side)
+            if current is None or sequence != current["sequence"]:
+                continue
+            del self.active[side]
+            source_cycles.append(current["source_cycle"])
+            age = int(cycle_index) - current["source_cycle"]
+            timing = dict(queue_wait_s=started_at - submitted_at,
+                          compute_s=finished_at - started_at,
+                          result_transport_s=max(0., self.clock() - finished_at),
+                          total_s=finished_at - submitted_at)
+            timings[side] = timing
+            reason = None
+            if error:
+                reason = "projection_worker_failed"
+            elif finished_at > current["deadline"]:
+                reason = "projection_deadline_exceeded"
+            elif age < 1 or age > self.max_age_cycles:
+                reason = "stale_projection"
+            elif (tuple(incumbent_weights[:len(current["incumbent"])]) if side == "right" else
+                  tuple(incumbent_weights[-len(current["incumbent"]):])) != current["incumbent"]:
+                reason = "incumbent_weights_changed"
+            if reason:
+                arms[side] = {"discard_reason": reason, "error": error}
+                continue
+            arms[side] = {key: value for key, value in outcome.items() if key not in {"state_history", "pulse_widths"}}
+            if proposal is not None and outcome.get("deadline_met") is True:
+                decision = ({"weights": proposal} if current["application_mode"] == APPLICATION_MODE
+                            else {key: value for key, value in proposal.items() if key != "local_fit"})
+                proposals[side] = dict(**decision, source_cycle=outcome["source_cycle"],
+                                       request_id=outcome["request_id"], context_digest=outcome["context_digest"],
+                                       local_fit=outcome["local_fit"], deadline_met=True,
+                                       rollout_horizon_cycles=self.horizon_cycles,
+                                       application_mode=current["application_mode"])
+        for side, current in tuple(self.active.items()):
+            if self.clock() > current["deadline"] or int(cycle_index) - current["source_cycle"] > self.max_age_cycles:
+                _, _, sequence = self.slots[side]
+                sequence.value += 1
+                del self.active[side]
+                self.pending.pop(side, None)
+                source_cycles.append(current["source_cycle"])
+                arms[side] = {"discard_reason": "projection_deadline_exceeded"}
+        if not arms:
+            return None, None
+        return proposals or None, dict(arms=arms, timings=timings, asynchronous=True,
+                                       persistent_supervisor=True,
+                                       source_cycle_index=min(source_cycles))
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        for process, requests, sequence in self.slots.values():
+            sequence.value += 1
+            if process.is_alive():
+                process.terminate()
+            process.join(timeout=0)
+            if not process.is_alive():
+                process.close()
+            requests.cancel_join_thread()
+            requests.close()
+        self.results.cancel_join_thread()
+        self.results.close()
 
 
 class BilateralPaceVrAsync:
-    """One disposable slow process; boundary calls do not wait for completion."""
+    """Bilateral async owner; boundary calls do not wait for completion."""
 
     def __init__(self, config, *, worker=None):
         self.config = config
-        self.worker = worker or AsyncPaceWorker(
-            evaluate_bilateral_pace_vr, horizon_cycles=config["horizon_cycles"],
-            budget_seconds=config["deadline_seconds"], max_age_cycles=config["maximum_age_cycles"],
-            cpu_ids=config["supervisor_cpu_ids"])
+        if worker is not None:
+            self.worker = worker
+        elif config.get("persistent_supervisor", False):
+            self.worker = PersistentBilateralPaceWorker(
+                horizon_cycles=config["horizon_cycles"], budget_seconds=config["deadline_seconds"],
+                max_age_cycles=config["maximum_age_cycles"], cpu_ids=config["supervisor_cpu_ids"])
+        else:
+            self.worker = AsyncPaceWorker(
+                evaluate_bilateral_pace_vr, horizon_cycles=config["horizon_cycles"],
+                budget_seconds=config["deadline_seconds"], max_age_cycles=config["maximum_age_cycles"],
+                cpu_ids=config["supervisor_cpu_ids"])
         self.contexts = {}
         self.last_weights = {"right": (), "left": ()}
         self.events = []
@@ -333,13 +580,14 @@ class BilateralPaceVrAsync:
                         event.setdefault("refused", {})[side] = reason
                     else:
                         commands[side] = {**decision, "applied_cycle": cycle, "application_lag_cycles": age,
-                                          "application_mode": APPLICATION_MODE, "terminal_value_in_nlp": False}
+                                          "application_mode": decision.get("application_mode"),
+                                          "terminal_value_in_nlp": decision.get("application_mode") == PACE_RT_MODE}
                 if commands:
                     event["status"] = "proposed"
             event["applied_arms"] = list(commands)
             self.events.append(event)
         due = cycle == 1 or cycle > 0 and cycle % self.config["update_every_cycles"] == 0
-        if due and not commands and not self.worker.busy and all(snapshot_docs.values()):
+        if due and not commands and (not self.worker.busy or getattr(self.worker, "replaces_pending", False)) and all(snapshot_docs.values()):
             # AsyncPaceWorker's older policy adapts its bookkeeping horizon;
             # this request already contains a frozen fixed-horizon snapshot.
             # Keep the declared horizon truthful until snapshot adaptation is
@@ -351,6 +599,9 @@ class BilateralPaceVrAsync:
                      candidate_minimum_margin_improvement=self.config["candidate_minimum_margin_improvement"],
                      candidate_publication_reserve_seconds=self.config["candidate_publication_reserve_seconds"],
                      candidate_fit_budget_fraction=self.config["candidate_fit_budget_fraction"],
+                     application_mode=self.config["application_mode"],
+                     terminal_proximal_weight=self.config.get("terminal_proximal_weight", .03),
+                     terminal_shortage_weight=self.config.get("terminal_shortage_weight", 1.),
                      horizon_cycles=self.config["horizon_cycles"],
                      horizon_ladder_cycles=list(self.config["horizon_ladder_cycles"]),
                      supervisor_cpu_ids=list(self.config["supervisor_cpu_ids"]),
@@ -360,7 +611,8 @@ class BilateralPaceVrAsync:
                                     horizon_cycles=self.config["horizon_cycles"],
                                     horizon_ladder_cycles=list(self.config["horizon_ladder_cycles"]),
                                     horizon_adaptation="parallel_largest_valid",
-                                    application_mode=APPLICATION_MODE, terminal_value_in_nlp=False))
+                                    application_mode=self.config["application_mode"],
+                                    terminal_value_in_nlp=self.config["application_mode"] == PACE_RT_MODE))
         return commands
 
     def close(self):

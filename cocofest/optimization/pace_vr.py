@@ -692,6 +692,34 @@ class PaceVrSupervisor:
         base["runtime_s"] = perf_counter() - started
         return base
 
+    def fit_predicted_terminal(self, initial_states, pulse_widths, *, certified=False, weights=None,
+                               deadline_monotonic=None):
+        """Fit the local value at the nominal *next* terminal state.
+
+        The fast RHO optimises its next terminal state, not the boundary from
+        which the slow calculation was launched.  Centering the local model at
+        this predicted terminal removes the deterministic one-cycle fatigue
+        drift from its trust region.  It costs one compact rollout outside the
+        RHO and retains the same work-constrained allocator for every step.
+        """
+        started = perf_counter()
+        preview = self.evaluate(initial_states, pulse_widths, certified=certified, weights=weights,
+                                deadline_monotonic=deadline_monotonic)
+        if not preview["accepted"] or len(preview["state_history"]) < 2 or not preview["pulse_widths"]:
+            preview["local_fit"] = dict(accepted=False, reasons=["nominal_next_terminal_unavailable"],
+                                        fit_mode="constant_only", sample_count=0, fit_rank=0)
+            preview["runtime_s"] = perf_counter() - started
+            return preview
+        fit = self.fit_terminal(np.asarray(preview["state_history"][1], dtype=float),
+                                np.asarray(preview["pulse_widths"][0], dtype=float), certified=True,
+                                weights=weights, deadline_monotonic=deadline_monotonic)
+        fit["reference_terminal"] = "nominal_next_cycle_projected_state"
+        fit["source_preview"] = {key: preview[key] for key in (
+            "accepted", "feasible_prefix_cycles", "minimum_task_margin", "terminal_value",
+            "work_residual_max", "constraint_violation_max")}
+        fit["runtime_s"] = perf_counter() - started
+        return fit
+
 
 @dataclass(frozen=True)
 class PaceVrSnapshot:
@@ -710,7 +738,8 @@ class PaceVrSnapshot:
 
 
 def create_pace_vr_snapshot(supervisor, initial_states, pulse_widths, *, request_id,
-                           source_cycle, deadline_seconds, certified=False, weights=None):
+                           source_cycle, deadline_seconds, certified=False, weights=None,
+                           fit_reference="source_terminal"):
     """Copy certified inputs, including sampled geometry, into an immutable request."""
     states, _ = supervisor._inputs(initial_states, pulse_widths, certified)
     if not isinstance(request_id, str) or not request_id:
@@ -719,6 +748,8 @@ def create_pace_vr_snapshot(supervisor, initial_states, pulse_widths, *, request
         raise ValueError("source_cycle must be a nonnegative integer.")
     if not np.isfinite(deadline_seconds) or deadline_seconds <= 0:
         raise ValueError("deadline_seconds must be finite and positive.")
+    if fit_reference not in {"source_terminal", "predicted_next_terminal"}:
+        raise ValueError("Unknown PACE-VR fit_reference.")
     phases = []
     for phase, interval in enumerate(supervisor.intervals):
         phases.append(dict(duration=interval.duration,
@@ -731,7 +762,8 @@ def create_pace_vr_snapshot(supervisor, initial_states, pulse_widths, *, request
                    angular_velocity_rad_s=supervisor.omega, required_work_j=supervisor.required_work_j,
                    nonmuscle_power_w=supervisor.nonmuscle_power.tolist(),
                    power_lower_w=supervisor.lower_power.tolist() if np.all(np.isfinite(supervisor.lower_power)) else None,
-                   power_upper_w=supervisor.upper_power.tolist() if np.all(np.isfinite(supervisor.upper_power)) else None)
+                   power_upper_w=supervisor.upper_power.tolist() if np.all(np.isfinite(supervisor.upper_power)) else None,
+                   fit_reference=fit_reference)
     digest = hashlib.sha256(json.dumps(context, allow_nan=False, sort_keys=True).encode()).hexdigest()
     payload = dict(context=context, initial_states=states.tolist(),
                    pulse_widths=np.asarray(pulse_widths).tolist(),
@@ -749,7 +781,7 @@ class _SampledGain:
         return self.values[min(len(self.values) - 1, max(0, int(time / self.duration * len(self.values))))]
 
 
-def _supervisor_from_snapshot(snapshot):
+def _supervisor_from_snapshot(snapshot, *, cache=None):
     """Rebuild one rollout model from a certified, immutable snapshot."""
     if isinstance(snapshot, dict):
         snapshot = PaceVrSnapshot(**snapshot)
@@ -760,6 +792,8 @@ def _supervisor_from_snapshot(snapshot):
     digest = hashlib.sha256(json.dumps(context, allow_nan=False, sort_keys=True).encode()).hexdigest()
     if digest != snapshot.context_digest:
         raise ValueError("Snapshot context digest mismatch.")
+    if cache is not None and digest in cache:
+        return cache[digest], payload
     parameters = []
     for entry in context["pulse_width_parameters"]:
         entry = dict(entry)
@@ -775,11 +809,16 @@ def _supervisor_from_snapshot(snapshot):
         intervals=intervals, pulse_width_parameters=parameters, config=PaceVrConfig(**context["config"]),
         **{key: context[key] for key in ("angular_velocity_rad_s", "required_work_j", "nonmuscle_power_w",
                                        "power_lower_w", "power_upper_w")})
+    if cache is not None:
+        # A worker keeps only the current geometry/configuration.  The QP
+        # layouts and warm starts owned by this supervisor survive snapshots.
+        cache.clear()
+        cache[digest] = supervisor
     return supervisor, payload
 
 
 def evaluate_pace_vr_weight_candidates(snapshot, candidates, *, deadline_monotonic=None,
-                                       estimated_candidate_runtime_s=0.):
+                                       estimated_candidate_runtime_s=0., supervisor_cache=None):
     """Replay candidate policies from the same state, geometry and horizon.
 
     The value is the reduced rollout's censored prefix/margin score. It is a
@@ -787,7 +826,7 @@ def evaluate_pace_vr_weight_candidates(snapshot, candidates, *, deadline_monoton
     """
     if isinstance(snapshot, dict):
         snapshot = PaceVrSnapshot(**snapshot)
-    supervisor, payload = _supervisor_from_snapshot(snapshot)
+    supervisor, payload = _supervisor_from_snapshot(snapshot, cache=supervisor_cache)
     deadline = snapshot.deadline_monotonic if deadline_monotonic is None else min(
         snapshot.deadline_monotonic, deadline_monotonic)
     evaluated = {}
@@ -811,13 +850,15 @@ def evaluate_pace_vr_weight_candidates(snapshot, candidates, *, deadline_monoton
     return evaluated
 
 
-def run_pace_vr_snapshot(snapshot):
+def run_pace_vr_snapshot(snapshot, *, supervisor_cache=None):
     """Top-level worker callable; CPU affinity and process lifecycle are owner concerns."""
     if isinstance(snapshot, dict):
         snapshot = PaceVrSnapshot(**snapshot)
-    supervisor, payload = _supervisor_from_snapshot(snapshot)
-    result = supervisor.fit_terminal(payload["initial_states"], payload["pulse_widths"], certified=True,
-                                     weights=payload["weights"], deadline_monotonic=snapshot.deadline_monotonic)
+    supervisor, payload = _supervisor_from_snapshot(snapshot, cache=supervisor_cache)
+    fitting = (supervisor.fit_predicted_terminal if payload["context"].get("fit_reference") == "predicted_next_terminal"
+               else supervisor.fit_terminal)
+    result = fitting(payload["initial_states"], payload["pulse_widths"], certified=True,
+                     weights=payload["weights"], deadline_monotonic=snapshot.deadline_monotonic)
     result.update(request_id=snapshot.request_id, source_cycle=snapshot.source_cycle,
                   context_digest=snapshot.context_digest, deadline_monotonic=snapshot.deadline_monotonic,
                   completed_monotonic=monotonic(), applied_cycle=None)

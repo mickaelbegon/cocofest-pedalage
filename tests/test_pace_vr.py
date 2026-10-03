@@ -284,6 +284,21 @@ def test_worker_snapshot_is_immutable_context_checked_and_json_serializable():
         run_pace_vr_snapshot(replace(snapshot, context_digest="corrupted"))
 
 
+def test_cached_supervisor_reuses_qp_state_only_for_matching_context():
+    from cocofest.optimization.pace_vr import _supervisor_from_snapshot
+
+    supervisor, states, widths = case(horizon=2)
+    snapshot = create_pace_vr_snapshot(supervisor, states, widths, request_id="cached-40",
+                                      source_cycle=40, deadline_seconds=20, certified=True)
+    cache = {}
+    first, _ = _supervisor_from_snapshot(snapshot, cache=cache)
+    second, _ = _supervisor_from_snapshot(snapshot, cache=cache)
+    assert first is second
+    assert first._qpoases_qp is second._qpoases_qp
+    with pytest.raises(ValueError, match="digest mismatch"):
+        _supervisor_from_snapshot(replace(snapshot, context_digest="corrupted"), cache=cache)
+
+
 def test_weight_candidates_replay_the_same_certified_snapshot():
     supervisor, states, widths = case(horizon=2)
     snapshot = create_pace_vr_snapshot(supervisor, states, widths, request_id="candidate-40",

@@ -4,7 +4,8 @@ import numpy as np
 import pytest
 
 from cocofest.optimization.pace_vr_async import (
-    APPLICATION_MODE, BilateralPaceVrAsync, _choose_verified_weights, _evaluate_pace_vr_side,
+    APPLICATION_MODE, BilateralPaceVrAsync, PersistentBilateralPaceWorker,
+    _choose_verified_weights, _evaluate_pace_vr_side,
     derived_fatigue_weights, validate_pace_vr_configuration,
 )
 from cocofest.simulation.independent_arms_process import _apply_pace_vr_weight_decision
@@ -41,6 +42,26 @@ def test_enabled_contract_demands_separate_cpu_and_compiled_numerical_updates():
         mutate(declared)
         with pytest.raises(ValueError, match=pattern):
             validate_pace_vr_configuration(declared)
+
+
+def test_reserve_priority_is_opt_in_and_requires_zero_primary_fatigue_and_compiled_constraint():
+    from cocofest.optimization.pace_rt_ocp import PACE_RT_MODE
+
+    declared = payload()
+    declared["experimental_pace_vr"].update(application_mode=PACE_RT_MODE)
+    assert validate_pace_vr_configuration(declared)["lexicographic_reserve_priority"] is False
+    declared["experimental_pace_vr"].update(lexicographic_reserve_priority=True)
+    with pytest.raises(ValueError, match="compiled terminal target constraint"):
+        validate_pace_vr_configuration(declared)
+    declared["experimental_pace_vr"]["enforce_terminal_target_constraint"] = True
+    with pytest.raises(ValueError, match="zero fatigue_weight_values"):
+        validate_pace_vr_configuration(declared)
+    declared["fatigue_weight_values"] = [0., 0.]
+    config = validate_pace_vr_configuration(declared)
+    assert config["lexicographic_reserve_epsilon"] == pytest.approx(1e-4)
+    declared["experimental_pace_vr"]["lexicographic_reserve_epsilon"] = -1.
+    with pytest.raises(ValueError, match="finite and nonnegative"):
+        validate_pace_vr_configuration(declared)
 
 
 class NoWaitWorker:
@@ -106,6 +127,81 @@ def test_ladder_configuration_is_sent_to_the_nonblocking_worker():
     assert worker.submissions[0][0]["horizon_ladder_cycles"] == [100, 50, 25, 20, 5]
     assert worker.submissions[0][0]["supervisor_cpu_ids"] == list(range(4, 14))
     supervisor.close()
+
+
+def test_persistent_mode_requires_one_horizon_and_preserves_default():
+    declared = payload()
+    assert validate_pace_vr_configuration(declared)["persistent_supervisor"] is False
+    declared["experimental_pace_vr"].update(persistent_supervisor=True, horizon_cycles=3)
+    assert validate_pace_vr_configuration(declared)["persistent_supervisor"] is True
+    declared["experimental_pace_vr"].update(horizon_ladder_cycles=[3, 1],
+                                             supervisor_cpu_ids=[4, 5, 6, 7])
+    with pytest.raises(ValueError, match="one rollout horizon"):
+        validate_pace_vr_configuration(declared)
+
+
+def _fast_persistent_side(task):
+    import time
+    side, horizon, snapshot, *_ = task
+    time.sleep(snapshot["delay"])
+    cycle = snapshot["source_cycle"]
+    outcome = dict(source_cycle=cycle, request_id=f"{side}:{cycle}",
+                   context_digest=snapshot["context_digest"], local_fit={"accepted": True},
+                   deadline_met=True, accepted=True, completed_monotonic=time.monotonic())
+    return side, horizon, outcome, {"local_fit": outcome["local_fit"],
+                                    "terminal_proximal_weight": .03,
+                                    "terminal_shortage_weight": 1.}
+
+
+def _persistent_payload(cycle, delay):
+    from cocofest.optimization.pace_rt_ocp import PACE_RT_MODE
+    return dict(snapshots={side: dict(source_cycle=cycle, context_digest="same", delay=delay)
+                           for side in ("right", "left")},
+                incumbent_weights={"right": [1., 1.], "left": [1., 1.]},
+                budget_seconds=4., maximum_log_step=.1,
+                candidate_minimum_margin_improvement=2e-4,
+                candidate_publication_reserve_seconds=.1,
+                candidate_fit_budget_fraction=.65,
+                application_mode=PACE_RT_MODE,
+                terminal_proximal_weight=.03, terminal_shortage_weight=1.,
+                horizon_ladder_cycles=[3], evaluation_order=["right", "left"])
+
+
+def test_persistent_workers_replace_stale_snapshots_without_waiting():
+    import multiprocessing
+    import os
+    import time
+
+    available = sorted(os.sched_getaffinity(0))
+    if len(available) < 2:
+        pytest.skip("Two available CPUs are required for pinned bilateral workers")
+    worker = PersistentBilateralPaceWorker(
+        horizon_cycles=3, budget_seconds=4., max_age_cycles=2,
+        cpu_ids=available[:2], context=multiprocessing.get_context("spawn"),
+        evaluator=_fast_persistent_side)
+    try:
+        started = time.monotonic()
+        assert worker.submit(_persistent_payload(1, .2), cycle_index=1,
+                             incumbent_weights=(1., 1., 1., 1.))
+        assert worker.submit(_persistent_payload(2, .01), cycle_index=2,
+                             incumbent_weights=(1., 1., 1., 1.))
+        assert time.monotonic() - started < 1., "RHO submissions must not wait for rollout completion"
+        received = {}
+        deadline = time.monotonic() + 8.
+        while time.monotonic() < deadline and len(received) < 2:
+            proposal, audit = worker.poll(cycle_index=3, incumbent_weights=(1., 1., 1., 1.))
+            if proposal:
+                received.update(proposal)
+                for timing in audit["timings"].values():
+                    assert timing["queue_wait_s"] >= 0
+                    assert timing["compute_s"] >= 0
+                    assert timing["result_transport_s"] >= 0
+            time.sleep(.01)
+        assert set(received) == {"right", "left"}
+        assert {decision["source_cycle"] for decision in received.values()} == {2}
+        assert worker.busy is False
+    finally:
+        worker.close()
 
 
 @pytest.mark.parametrize("patch,expected", [
