@@ -33,12 +33,23 @@ from cocofest.simulation.rho_restart_checkpoint import restore_prepared_checkpoi
 from scripts.probe_independent_rho_task_reserve import _load_arm
 
 
+def _load_margin_source(receipt, side):
+    """Accept exact bilateral anchors and independently replayed local endpoints."""
+    record = json.loads(Path(receipt).read_text())
+    if record.get("kind") == "certified_unilateral_task_reserve_branch_endpoint":
+        from scripts.run_local_task_reserve_branch import load_branch_endpoint
+        if record.get("side") != side:
+            raise ValueError("Branch endpoint belongs to another arm")
+        return load_branch_endpoint(Path(receipt))
+    return _load_arm(receipt, side)
+
+
 def run(receipt, side, output_directory, *, upper_bound=3., tolerance=1e-6, finite_difference_step=None):
     from bioptim import SolutionMerge
     from examples.fes_multibody.cycling import cycling_pulse_width_mhe_acados_periodic as driver
     from cocofest.optimization.configured_cycling_model import configured_model_factories
 
-    source, payload = _load_arm(receipt, side)
+    source, payload = _load_margin_source(receipt, side)
     model = json.loads(Path(source.model_path).read_text())
     layout = ding_a_capacity_layout(Path(source.model_path), muscle_names=tuple(model["muscles"]))
     context = {**json.loads(source.task_context_json), **capacity_coordinate_context(layout)}
