@@ -275,3 +275,109 @@ def test_feasibility_probe_requires_a_frozen_rho():
     with pytest.raises(ValueError, match="feasibility probes require"):
         _driver_arguments({"cycles": 2, "right_equivalent_mean_torque_nm": .1,
             "right_driver_arguments": ["--ipopt-frozen-rho-feasibility-probe"]}, "right")
+
+
+def _priority_setup(secondary_state, *, certified=True):
+    from cocofest.optimization.pace_rt_ocp import PaceRtObjectiveBinding
+    from cocofest.optimization.task_reserve_ocp import TaskReserveStateCoordinate
+
+    class PriorityProgram(Program):
+        def __init__(self):
+            super().__init__()
+            self.exports = []
+
+        def export_data(self, sol):
+            self.exports.append(sol.decision_states()["A_Biceps"][0, -1])
+            return self.exports[-1]
+
+    class Fatigue:
+        def __init__(self):
+            self.weights = np.zeros(1)
+            self.update_count = 0
+
+        def update(self, program, weights):
+            self.weights = np.asarray(weights, dtype=float).copy()
+            for field in ("min", "max"):
+                getattr(program.parameter_bounds["rho_fatigue_weights"], field)[:, :] = self.weights[:, None]
+            program.parameter_init["rho_fatigue_weights"].init[:, :] = self.weights[:, None]
+            self.update_count += 1
+            return {"weights": self.weights.tolist()}
+
+    program = PriorityProgram()
+    binding = PaceRtObjectiveBinding(
+        [TaskReserveStateCoordinate("A_Biceps")],
+        task_context={"coordinate_layout": [{"state_key": "A_Biceps", "index": 0,
+                                               "scale": 1., "offset": 0.}]},
+        model_sha256="a" * 64,
+        enforce_target_constraint=True)
+    binding.values = np.array([1., .35, .4, .8, -1., .2, .03, 1., 1., 0.])
+    binding.last_model = {"constant": .4, "target": .35, "center": [.8],
+                          "gradient": [-1.], "radius": [.2]}
+    binding.source_completed_cycles = 0
+    binding.update_count = 1
+    def write(program, values):
+        binding.values = np.asarray(values, dtype=float).copy()
+        for field in ("min", "max"):
+            getattr(program.parameter_bounds["rho_task_reserve"], field)[:, :] = binding.values[:, None]
+        program.parameter_init["rho_task_reserve"].init[:, :] = binding.values[:, None]
+        binding.update_count += 1
+    binding._write = write
+    program.task_reserve_binding = binding
+    program.fatigue_weight_binding = Fatigue()
+    for key, values in (("rho_task_reserve", binding.values), ("rho_fatigue_weights", np.zeros(1))):
+        program.parameter_init[key] = SimpleNamespace(init=values[:, None].copy())
+        program.parameter_bounds[key] = SimpleNamespace(min=values[:, None].copy(), max=values[:, None].copy())
+
+    def result(value):
+        sol = solution()
+        sol.cost = .5
+        sol.real_time_to_optimize = .25
+        sol.decision_states = lambda **_kwargs: {"A_Biceps": np.array([[.8, value]])}
+        return sol
+
+    class PriorityDriver(Driver):
+        @staticmethod
+        def solve_frozen_rho_secondary_stage(nmpc, *, solver, tolerance):
+            assert solver == "nominal-ipopt"
+            assert nmpc.absolute_wheel_q_cycle_index == 0
+            assert nmpc.task_reserve_binding.values[0] == 0.
+            assert nmpc.task_reserve_binding.values[-1] == 1.
+            np.testing.assert_array_equal(nmpc.fatigue_weight_binding.weights, [1.])
+            return result(secondary_state), {"certified": certified, "status": 0 if certified else 1,
+                "feasibility": {"passes_tolerance": certified}, "solver_time_s": .25}
+
+    retry = _FrozenRhoRetry(program, PriorityDriver, tolerance=1e-5, max_attempts=1,
+                            reserve_priority_epsilon=.01, solver="nominal-ipopt",
+                            secondary_fatigue_weights=(1.,))
+    retry.capture()
+    return program, retry, result(.82)
+
+
+def test_priority_exports_and_advances_only_secondary_solution():
+    program, retry, primary = _priority_setup(.825)
+    assert program.export_data(primary) == pytest.approx(.825)
+    assert primary._cocofest_priority_protocol["primary_predicted_terminal_value"] == pytest.approx(.38)
+    assert primary._cocofest_priority_protocol["secondary_target_predicted_value"] == pytest.approx(.39)
+    assert primary._cocofest_priority_protocol["status"] == "committed_secondary"
+    assert program.advance_window(primary) == "advanced"
+    assert program.exports == pytest.approx([.825])
+    assert program.advances == [primary]
+    assert retry.completed == 1 and program.absolute_wheel_q_cycle_index == 1
+    assert program.task_reserve_binding.values[0] == 1.
+    assert program.task_reserve_binding.values[-1] == 0.
+    np.testing.assert_array_equal(program.fatigue_weight_binding.weights, [0.])
+
+
+@pytest.mark.parametrize("secondary_state,certified", [(.825, False), (.79, True)])
+def test_priority_secondary_failure_rolls_back_without_advancing(secondary_state, certified):
+    program, retry, primary = _priority_setup(secondary_state, certified=certified)
+    program.nlp[0].x_init["A_Biceps"].init[:, :] = -99.
+    program.export_data(primary)
+    assert primary._cocofest_priority_protocol["status"] == "secondary_failed_rolled_back"
+    assert program.advance_window(primary) is None
+    assert program.absolute_wheel_q_cycle_index == 0 and program.advances == []
+    assert retry.completed == 0 and not program._cocofest_retry_same_rho_pending
+    np.testing.assert_array_equal(program.nlp[0].x_init["A_Biceps"].init, [[1., .9]])
+    np.testing.assert_array_equal(program.fatigue_weight_binding.weights, [0.])
+    assert program.task_reserve_binding.values[0] == 1.
+    assert program.task_reserve_binding.values[-1] == 0.

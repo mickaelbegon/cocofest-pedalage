@@ -1762,6 +1762,14 @@ def prepare_nmpc(
             min_bound=rollout_binding.domain_lower_bounds,
             max_bound=np.inf,
         )
+    if task_reserve_binding is not None and getattr(task_reserve_binding, "enforce_target_constraint", False):
+        constraints.add(
+            CustomObjective.terminal_task_reserve_target_constraint,
+            node=Node.END,
+            binding=task_reserve_binding,
+            min_bound=-np.inf,
+            max_bound=0.,
+        )
     if muscle_horizon_binding is not None:
         total_minimum, total_maximum = muscle_horizon_binding.total_moment_bounds
         constraints.add(

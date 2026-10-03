@@ -164,7 +164,9 @@ def _pace_vr_snapshot_from_solution(*, ocp, solution, states, models, names, arg
         config=PaceVrConfig(horizon_cycles=config["horizon_cycles"], **config["core"]))
     snapshot = create_pace_vr_snapshot(supervisor, terminal, widths, request_id=f"{side}:{source_cycle}",
         source_cycle=source_cycle, deadline_seconds=config["deadline_seconds"], certified=True,
-        weights=incumbent_weights)
+        weights=incumbent_weights,
+        fit_reference=("predicted_next_terminal" if config.get("application_mode")
+                       == "terminal_reserve_target_experimental" else "source_terminal"))
     return asdict(snapshot), {"pulse_width_bound_audit": clip_audit,
                               "pulse_width_tolerance_audit": tolerance_audit,
                               "geometry_quadrature": "interval_midpoint",
@@ -208,6 +210,57 @@ def _apply_pace_vr_weight_decision(ocp, pace, decision, *, certified, current_cy
             "weights_after": list(pace.weights), "parameter_update": receipt,
             "application_mode": APPLICATION_MODE, "terminal_value_in_nlp": False,
             "compiled_nlp_reused": True}
+
+
+def _apply_pace_rt_decision(ocp, pace, decision, *, certified, current_cycle,
+                            reserve_priority=False):
+    """Install a PACE reserve-target model as numerical RHO parameters."""
+    from cocofest.optimization.pace_rt_ocp import PaceRtObjectiveBinding, PACE_RT_MODE
+
+    if certified is not True or decision.get("applied_cycle") != current_cycle:
+        raise ValueError("PACE-RT application requires its intended certified boundary.")
+    if decision.get("application_mode") != PACE_RT_MODE or decision.get("deadline_met") is not True:
+        raise ValueError("PACE-RT decision has no valid terminal-target contract.")
+    binding = getattr(ocp, "task_reserve_binding", None)
+    if not isinstance(binding, PaceRtObjectiveBinding):
+        raise ValueError("PACE-RT requires its fixed terminal reserve-target binding.")
+    nlp = ocp.nlp[0]
+    compiled = getattr(getattr(ocp, "ocp_solver", None), "shaked_ocp_solver", None)
+    receipt = binding.update_from_rollout(
+        ocp, local_fit=decision.get("local_fit"), source_completed_cycles=int(decision["source_cycle"]),
+        completed_cycles=int(current_cycle), proximal_weight=float(decision.get("terminal_proximal_weight", .03)),
+        shortage_weight=float(decision.get("terminal_shortage_weight", 1.)),
+        constraint_activation=0. if reserve_priority else None,
+    )
+    if ocp.nlp[0] is not nlp or getattr(getattr(ocp, "ocp_solver", None), "shaked_ocp_solver", None) is not compiled:
+        raise RuntimeError("PACE-RT numerical terminal update changed the compiled NLP.")
+    return {"status": "applied", "source_cycle": decision["source_cycle"], "applied_cycle": current_cycle,
+            "application_lag_cycles": current_cycle - decision["source_cycle"],
+            "parameter_update": receipt, "application_mode": PACE_RT_MODE,
+            "terminal_value_in_nlp": True, "compiled_nlp_reused": True,
+            "weights_unchanged": list(pace.weights)}
+
+
+def _observe_pace_rt_terminal(ocp, states, models, *, completed_cycles):
+    """Audit the terminal point against the active PACE-RT local domain.
+
+    The domain is deliberately an audit/hold guard, never a hard RHO
+    constraint.  A compact local model may be useful inside its announced
+    box, but it must not remain active for another RHO after the solved state
+    has left that box.  The caller can retain a freshly arrived replacement
+    decision, which is centred on a new predicted terminal state.
+    """
+    import numpy as np
+    from cocofest.optimization.pace_rt_ocp import PaceRtObjectiveBinding
+
+    binding = getattr(ocp, "task_reserve_binding", None)
+    if not isinstance(binding, PaceRtObjectiveBinding):
+        return None
+    coordinates = [
+        float(np.asarray(states[f"A_{model.muscle_name}"], dtype=float).reshape(-1)[-1]) / model.a_scale
+        for model in models
+    ]
+    return binding.validate_terminal_point(coordinates, completed_cycles=int(completed_cycles))
 
 
 def _reserve_update_due(*, certified: bool, has_solution: bool, physical_cycle: int) -> bool:
@@ -398,12 +451,20 @@ class _FrozenRhoRetry:
     not run in this coordinator. ``max_attempts`` includes the nominal solve.
     """
 
-    def __init__(self, program, driver, *, tolerance, max_attempts, recovery_args=None):
+    def __init__(self, program, driver, *, tolerance, max_attempts, recovery_args=None,
+                 reserve_priority_epsilon=None, solver=None, secondary_fatigue_weights=None):
         if type(max_attempts) is not int or max_attempts < 1:
             raise ValueError("max_attempts must be a positive integer")
         self.program, self.driver = program, driver
         self.tolerance, self.max_attempts = tolerance, max_attempts
         self.recovery_args = recovery_args
+        if reserve_priority_epsilon is not None:
+            if (solver is None or not math.isfinite(reserve_priority_epsilon)
+                    or reserve_priority_epsilon < 0):
+                raise ValueError("Reserve priority requires a solver and finite nonnegative epsilon")
+        self.reserve_priority_epsilon = reserve_priority_epsilon
+        self.solver = solver
+        self.secondary_fatigue_weights = secondary_fatigue_weights
         self.stages = ["frozen_primal_reset_duals"]
         if getattr(recovery_args, "nlp_ipopt_recovery_ma57_tuned", False):
             self.stages.append("ma57_tuned")
@@ -418,7 +479,10 @@ class _FrozenRhoRetry:
         # checkpoint is refreshed by a different callback. The class method
         # retains normal FES/stimulation transfers and before-advance audits.
         self.native_advance = type(program).advance_window.__get__(program, type(program))
+        self.native_export = type(program).export_data.__get__(program, type(program)) if reserve_priority_epsilon is not None else None
         program.advance_window = MethodType(self._advance, program)
+        if self.native_export is not None:
+            program.export_data = MethodType(self._export_data, program)
 
     def _problem_arrays(self):
         nlp = self.program.nlp[0]
@@ -633,11 +697,137 @@ class _FrozenRhoRetry:
                     self._restore()
         return probes
 
+    def _export_data(self, program, solution):
+        """Replace a certified primary Solution before Bioptim exports its cycle.
+
+        Bioptim exports before ``advance_window``. Swapping the Solution's
+        contents here makes export, physical transfer, and the next callback
+        all observe the same secondary trajectory.
+        """
+        import numpy as np
+        from bioptim import SolutionMerge
+        from cocofest.optimization.pace_rt_ocp import PaceRtObjectiveBinding
+
+        binding = getattr(program, "task_reserve_binding", None)
+        if (self.reserve_priority_epsilon is None or not isinstance(binding, PaceRtObjectiveBinding)
+                or binding.last_model is None or binding.values[0] == 0):
+            return self.native_export(solution)
+        if not binding.enforce_target_constraint or self.checkpoint is None:
+            raise RuntimeError("Reserve priority requires a compiled target constraint and frozen RHO")
+        primary_feasibility = self.driver._solution_feasibility_summary(solution, self.tolerance)
+        if not self.driver._rho_solution_is_certified(solution.status, primary_feasibility):
+            return self.native_export(solution)
+        primary_stats = self.driver.snapshot_nlp_solver_stats(program)
+        original_values = binding.values.copy()
+        original_model = dict(binding.last_model)
+        original_count = binding.update_count
+        fatigue_binding = getattr(program, "fatigue_weight_binding", None)
+        if fatigue_binding is None or self.secondary_fatigue_weights is None:
+            raise RuntimeError("Reserve priority requires the compiled fatigue-weight binding")
+        original_fatigue_weights = fatigue_binding.weights.copy()
+        original_fatigue_count = fatigue_binding.update_count
+        if np.any(original_fatigue_weights != 0):
+            raise RuntimeError("Reserve priority primary solve has nonzero fatigue weights")
+        original_nlp = program.nlp[0]
+        original_compiled = getattr(getattr(program, "ocp_solver", None), "shaked_ocp_solver", None)
+        audit = {
+            "mode": "experimental_pace_rt_two_solve_priority",
+            "primary_objective": "pace_rt_shortage_plus_terminal_proximity",
+            "physical_cycle": self.completed + 1,
+            "prepared_primal_signature": self.signature,
+            "pace_rt_graph_signature_sha256": binding.graph_signature_sha256,
+            "pace_rt_model_sha256": binding.model_sha256,
+            "pace_rt_task_context_sha256": binding.task_context_sha256,
+            "pace_rt_fit_source_completed_cycles": binding.source_completed_cycles,
+            "primary_fatigue_weights": original_fatigue_weights.tolist(),
+            "primary": {"status": int(solution.status), "feasibility": primary_feasibility,
+                        "solver_stats": primary_stats,
+                        "objective_cost": float(solution.cost),
+                        "solver_time_s": float(solution.real_time_to_optimize)},
+            "epsilon_predicted_value_units": float(self.reserve_priority_epsilon),
+            "physical_rho_advanced_between_stages": False,
+        }
+        secondary = None
+        try:
+            states = solution.decision_states(to_merge=SolutionMerge.NODES)
+            point = [float(np.asarray(states[c.state_key], dtype=float)[c.index, -1] - c.offset) / c.scale
+                     for c in binding.coordinates]
+            observed = binding.validate_terminal_point(point, completed_cycles=self.completed + 1)
+            if observed["terminal_trust_validated"] is not True:
+                raise ValueError("Primary terminal point left the PACE-RT fit domain")
+            value = float(observed["predicted_terminal_value"])
+            target = value + self.reserve_priority_epsilon
+            if not math.isfinite(target):
+                raise ValueError("Secondary reserve target is nonfinite")
+            audit.update({"primary_predicted_terminal_value": value,
+                          "secondary_target_predicted_value": target,
+                          "primary_terminal_audit": observed,
+                          "target_rule": "primary_predicted_terminal_value_plus_epsilon"})
+            audit["stage_transition"] = binding.activate_fatigue_secondary_stage(
+                program, reserve_target=target)
+            audit["secondary_fatigue_weights"] = list(self.secondary_fatigue_weights)
+            audit["fatigue_transition"] = fatigue_binding.update(program, self.secondary_fatigue_weights)
+            self._assert_frozen_physical_problem()
+            if program.nlp[0] is not original_nlp or getattr(
+                    getattr(program, "ocp_solver", None), "shaked_ocp_solver", None) is not original_compiled:
+                raise RuntimeError("Reserve priority changed the compiled NLP")
+            secondary, second_audit = self.driver.solve_frozen_rho_secondary_stage(
+                program, solver=self.solver, tolerance=self.tolerance)
+            second_audit["objective_cost"] = float(secondary.cost)
+            audit["secondary"] = second_audit
+            if not second_audit["certified"]:
+                raise RuntimeError("Secondary RHO did not pass nominal certification")
+            second_states = secondary.decision_states(to_merge=SolutionMerge.NODES)
+            second_point = [float(np.asarray(second_states[c.state_key], dtype=float)[c.index, -1] - c.offset) / c.scale
+                            for c in binding.coordinates]
+            second_value = binding.validate_terminal_point(
+                second_point, completed_cycles=self.completed + 1)["predicted_terminal_value"]
+            audit["secondary_predicted_terminal_value"] = float(second_value)
+            if not math.isfinite(second_value) or second_value > target + self.tolerance:
+                raise RuntimeError("Secondary RHO violated its predicted-value target")
+            self._assert_frozen_physical_problem()
+            audit["compiled_nlp_reused"] = True
+            audit["status"] = "committed_secondary"
+        except Exception as error:
+            audit.update({"status": "secondary_failed_rolled_back",
+                          "error": f"{type(error).__name__}: {error}"})
+            solution._cocofest_priority_failed = True
+        finally:
+            # Restore the primary numerical objective for the next physical
+            # RHO. On failure, also restore its exact prepared primal/duals.
+            binding._write(program, original_values)
+            binding.last_model = original_model
+            fatigue_binding.update(program, original_fatigue_weights)
+            if secondary is None or audit["status"] != "committed_secondary":
+                binding.update_count = original_count
+                fatigue_binding.update_count = original_fatigue_count
+                self._restore()
+            else:
+                self._assert_frozen_problem()
+        if audit["status"] == "committed_secondary":
+            # RecedingHorizonOptimization retains this object as `sol` after
+            # export; replacing its contents is needed for the next callback
+            # and final aggregate Solution to use the committed trajectory.
+            solution.__dict__.clear()
+            solution.__dict__.update(secondary.__dict__)
+        solution._cocofest_priority_protocol = audit
+        return self.native_export(solution)
+
+    def _assert_frozen_physical_problem(self):
+        import numpy as np
+        current = dict(self._problem_arrays())
+        physical = (key for key in self.frozen_bounds if not key.startswith("parameter_bounds:"))
+        if any(not np.array_equal(current[key], self.frozen_bounds[key]) for key in physical):
+            raise RuntimeError("Reserve priority changed frozen physical bounds")
+        if getattr(self.program, "absolute_wheel_q_cycle_index", None) != self.frozen_cycle_index:
+            raise RuntimeError("Reserve priority advanced the physical cycle between stages")
+
     def _advance(self, program, solution, *args, **kwargs):
         if self.checkpoint is None:
             raise RuntimeError("No prepared checkpoint exists for the physical RHO")
         feasibility = self.driver._solution_feasibility_summary(solution, self.tolerance)
-        certified = self.driver._rho_solution_is_certified(solution.status, feasibility)
+        certified = (not getattr(solution, "_cocofest_priority_failed", False)
+                     and self.driver._rho_solution_is_certified(solution.status, feasibility))
         # An auxiliary tuned solve replaces live solver stats. Keep the
         # nominal attempt's evidence before entering any recovery helper.
         solution._cocofest_nominal_solver_stats = self.driver.snapshot_nlp_solver_stats(program)
@@ -647,6 +837,12 @@ class _FrozenRhoRetry:
         solution._cocofest_attempt_in_physical_rho = self.failed_attempts + 1
         program._cocofest_retry_same_rho_pending = False
         if not certified:
+            if getattr(solution, "_cocofest_priority_failed", False):
+                # A second-stage failure is terminal for this frozen window:
+                # another nominal solve would use a different first-stage
+                # witness and obscure the two-stage audit.
+                self.failed_attempts += 1
+                return None
             self.failed_attempts += 1
             stage_index = self.failed_attempts - 1
             if self.failed_attempts < self.max_attempts and stage_index < len(self.stages):
@@ -808,6 +1004,16 @@ def _driver_arguments(payload, side):
         argv.extend(("--ipopt-hsl-library", hsl_library))
     if payload.get("parametric_fatigue_weights", False):
         argv.append("--parametric-fatigue-weights")
+        fatigue_values = payload.get("fatigue_weight_values")
+        if fatigue_values is not None:
+            if (not isinstance(fatigue_values, (list, tuple)) or not fatigue_values
+                    or any(isinstance(value, bool) or not isinstance(value, (int, float))
+                           or not math.isfinite(float(value)) or not 0 <= float(value) <= 1
+                           for value in fatigue_values)):
+                raise ValueError("fatigue_weight_values must be a nonempty finite [0, 1] list.")
+            argv.extend(("--fatigue-weight-values", *[str(float(value)) for value in fatigue_values]))
+    elif payload.get("fatigue_weight_values") is not None:
+        raise ValueError("fatigue_weight_values requires parametric_fatigue_weights=true.")
     if float(payload.get("experimental_mechanical_reserve_weight", 0.0)) > 0.0:
         argv.extend(("--experimental-mechanical-reserve-weight",
                      str(payload["experimental_mechanical_reserve_weight"])))
@@ -829,6 +1035,14 @@ def _driver_arguments(payload, side):
                 payload.get("experimental_mechanical_reserve_local_pw_trust_us", 25.0)
             )))
     args = driver.build_argument_parser().parse_args([*argv, *extra])
+    # This internal configuration is consumed during unilateral RHO graph
+    # construction, after the exact model and task context are available.  It
+    # is deliberately not serialized through the public CLI.
+    args.experimental_pace_rt_config = (
+        dict(payload["experimental_pace_vr"])
+        if payload.get("experimental_pace_vr", {}).get("application_mode")
+        == "terminal_reserve_target_experimental" else None
+    )
     if args.solver != "ipopt" or args.formulation != "isokinetic" or args.cycles_per_window != 1:
         raise ValueError("The bilateral process runner requires IPOPT, isokinetic, one-cycle RHO windows")
     if (args.nlp_ipopt_recovery_ma57_tuned or args.ipopt_failed_rho_pw_micro_retry) and not args.retry_failed_rho_without_advance:
@@ -942,6 +1156,12 @@ def _arm_worker(connection, side, payload, output_root):
                 initial_weight_basis=basis, journal_path=root / "weights.jsonl")
             from cocofest.optimization.pace_vr_async import validate_pace_vr_configuration
             vr_config = validate_pace_vr_configuration(payload)
+            reserve_priority = bool(vr_config and vr_config.get("lexicographic_reserve_priority", False))
+            if reserve_priority and (args.solver != "ipopt" or not args.use_sx
+                                     or args.formulation != "isokinetic"):
+                raise ValueError("PACE-RT reserve priority requires IPOPT SX isokinetic RHO")
+            if reserve_priority and getattr(nmpc, "fatigue_weight_binding", None) is None:
+                raise ValueError("PACE-RT reserve priority requires compiled fatigue weights")
             vr_events = []
             reserve_binding = getattr(nmpc, "mechanical_reserve_binding", None)
             reserve_events = []
@@ -976,8 +1196,12 @@ def _arm_worker(connection, side, payload, output_root):
             requested_checkpoint_cycles = _requested_restart_checkpoint_cycles(payload)
             frozen_retry = (_FrozenRhoRetry(nmpc, driver,
                 tolerance=driver._window_feasibility_tolerance(args),
-                max_attempts=args.max_consecutive_failing, recovery_args=args)
-                if args.retry_failed_rho_without_advance else None)
+                max_attempts=(args.max_consecutive_failing
+                              if args.retry_failed_rho_without_advance else 1), recovery_args=args,
+                reserve_priority_epsilon=(vr_config["lexicographic_reserve_epsilon"]
+                                          if reserve_priority else None), solver=solver,
+                secondary_fatigue_weights=(tuple(pace.weights) if reserve_priority else None))
+                if args.retry_failed_rho_without_advance or reserve_priority else None)
 
             def callback(ocp, cycle_index, solution):
                 completed = int(cycle_index)
@@ -996,6 +1220,8 @@ def _arm_worker(connection, side, payload, output_root):
                     if solver_stats is None:
                         solver_stats = driver.snapshot_nlp_solver_stats(ocp)
                     native_status = solver_stats.get("return_status") or driver._native_solver_status(ocp)
+                    if getattr(solution, "_cocofest_priority_failed", False):
+                        certified = False
                     metrics = {"certified": certified, "success": certified, "status": int(solution.status),
                                "native_solver_status": native_status,
                                "solver_stats": solver_stats,
@@ -1012,6 +1238,13 @@ def _arm_worker(connection, side, payload, output_root):
                                "weights_used": list(pace.weights),
                                "equivalent_mean_torque_nm": pace.equivalent_mean_torque_nm,
                                "target_work_j_per_cycle": 2 * math.pi * pace.equivalent_mean_torque_nm}
+                    active_fatigue_binding = getattr(ocp, "fatigue_weight_binding", None)
+                    if active_fatigue_binding is not None:
+                        # The controller's policy weights and the numerical
+                        # fatigue-objective parameters are normally identical.
+                        # Keep both in the audit because a zero-fatigue PACE-RT
+                        # ablation deliberately freezes the latter at zero.
+                        metrics["fatigue_objective_weights"] = list(active_fatigue_binding.weights)
                     if reserve_binding is not None:
                         metrics["mechanical_reserve_solver"] = reserve_binding.observe_solver(ocp)
                         from cocofest.optimization.mechanical_reserve_projection_ocp import (
@@ -1041,6 +1274,8 @@ def _arm_worker(connection, side, payload, output_root):
                         metrics["zero_objective_feasibility_probe"] = solution._cocofest_zero_objective_feasibility_probe
                     if hasattr(solution, "_cocofest_counterfactual_probes"):
                         metrics["counterfactual_probes"] = solution._cocofest_counterfactual_probes
+                    if hasattr(solution, "_cocofest_priority_protocol"):
+                        metrics["pace_rt_priority_protocol"] = solution._cocofest_priority_protocol
                 metrics.update({"capacity_ratios": dict(zip(names, ratios)),
                                 "minimum_capacity_ratio": min(ratios)})
                 # The driver tags the returned solution with the *physical*
@@ -1050,6 +1285,15 @@ def _arm_worker(connection, side, payload, output_root):
                     int(getattr(solution, "_cocofest_target_rho", completed))
                     if solution is not None else completed
                 )
+                if solution is not None:
+                    # This is intentionally post-solve.  The local PACE-RT
+                    # model shapes the RHO objective but is not a physical
+                    # feasibility constraint; only the solved endpoint tells
+                    # us whether its announced trust region was respected.
+                    terminal_audit = _observe_pace_rt_terminal(
+                        ocp, states, models, completed_cycles=physical_completed)
+                    if terminal_audit is not None:
+                        metrics["pace_rt_terminal"] = terminal_audit
                 if (solution is not None and physical_completed == 1
                         and payload.get("resistance_pace", {}).get("initial_split_policy")
                         == "capacity_fatigability_after_first_cycle"):
@@ -1130,14 +1374,61 @@ def _arm_worker(connection, side, payload, output_root):
                     return False
                 if command.get("kind") != "prepare" or command.get("completed_cycles") != physical_completed:
                     raise RuntimeError("Invalid coordinator prepare command")
+                terminal_audit = metrics.get("pace_rt_terminal")
+                incoming_decision = command.get("pace_vr_decision")
+                incoming_pace_rt = bool(
+                    isinstance(incoming_decision, dict)
+                    and incoming_decision.get("application_mode")
+                    == "terminal_reserve_target_experimental"
+                )
+                if (isinstance(terminal_audit, dict) and terminal_audit.get("active")
+                        and terminal_audit.get("terminal_trust_validated") is not True
+                        and not incoming_pace_rt):
+                    # Holding the previous PACE-RT parameters after an
+                    # extrapolated endpoint would make the next RHO depend on
+                    # an unsupported local model.  This numeric deactivation
+                    # keeps the compiled NLP intact and leaves its fatigue
+                    # objective available.  A freshly accepted PACE-RT fit is
+                    # allowed to replace the old one below.
+                    from cocofest.optimization.pace_rt_ocp import PaceRtObjectiveBinding
+                    binding = getattr(ocp, "task_reserve_binding", None)
+                    if isinstance(binding, PaceRtObjectiveBinding):
+                        receipt = binding.deactivate(ocp)
+                        guard_event = {
+                            "status": "deactivated", "kind": "terminal_trust_guard",
+                            "source_cycle": binding.source_completed_cycles,
+                            "observed_cycle": physical_completed,
+                            "terminal_audit": terminal_audit,
+                            "parameter_update": receipt,
+                            "compiled_nlp_reused": True,
+                        }
+                        vr_events.append(guard_event)
+                        metrics["pace_rt_terminal"]["action"] = "deactivated_before_next_rho"
+                        with (root / "pace_vr.jsonl").open("a", encoding="utf-8") as journal:
+                            journal.write(json.dumps(guard_event, allow_nan=False) + "\n")
                 started = time.perf_counter()
                 torque = float(command["equivalent_mean_torque_nm"])
                 fatigue_weight_binding = getattr(ocp, "fatigue_weight_binding", None)
-                apply_weights = (
-                    (lambda values: fatigue_weight_binding.update(ocp, values))
-                    if fatigue_weight_binding is not None
-                    else (lambda values: update_bioptim_fatigue_cost(ocp, values))
-                )
+                fixed_fatigue_values = payload.get("fatigue_weight_values")
+                if fixed_fatigue_values is not None:
+                    fixed_fatigue_values = np.asarray(fixed_fatigue_values, dtype=float).reshape(-1)
+                    if (fatigue_weight_binding is None or fixed_fatigue_values.shape != fatigue_weight_binding.weights.shape
+                            or not np.allclose(fatigue_weight_binding.weights, fixed_fatigue_values, atol=0., rtol=0.)):
+                        raise RuntimeError("Configured fixed fatigue ablation was not installed in the compiled NLP.")
+
+                    def apply_weights(_values):
+                        # Boundary zero establishes the arm policy's bookkeeping.
+                        # It must not overwrite an explicitly fixed numerical
+                        # objective (notably the no-fatigue ablation).
+                        return {"ocp_cost_updated": True, "fixed_fatigue_objective": True,
+                                "weights": fixed_fatigue_values.tolist(),
+                                "objective_graph_rebuild_required": False}
+                else:
+                    apply_weights = (
+                        (lambda values: fatigue_weight_binding.update(ocp, values))
+                        if fatigue_weight_binding is not None
+                        else (lambda values: update_bioptim_fatigue_cost(ocp, values))
+                    )
                 physio_update_inputs = None
                 if (pace.connected and pace.config.adaptation_enabled
                         and pace.config.adaptation_strategy in {"physio_update", "mechanical_sensitivity"}
@@ -1174,9 +1465,14 @@ def _arm_worker(connection, side, payload, output_root):
                 if event["status"] in {"refused", "fatal"}:
                     raise RuntimeError(f"Local weight update refused: {event}")
                 if vr_config is not None and command.get("pace_vr_decision") is not None:
-                    vr_event = _apply_pace_vr_weight_decision(
-                        ocp, pace, command["pace_vr_decision"], certified=metrics["certified"],
-                        current_cycle=physical_completed)
+                    from cocofest.optimization.pace_rt_ocp import PACE_RT_MODE
+                    apply = (_apply_pace_rt_decision
+                             if command["pace_vr_decision"].get("application_mode") == PACE_RT_MODE
+                             else _apply_pace_vr_weight_decision)
+                    apply_options = ({"reserve_priority": reserve_priority}
+                                     if apply is _apply_pace_rt_decision else {})
+                    vr_event = apply(ocp, pace, command["pace_vr_decision"], certified=metrics["certified"],
+                                     current_cycle=physical_completed, **apply_options)
                     vr_events.append(vr_event)
                     with (root / "pace_vr.jsonl").open("a", encoding="utf-8") as journal:
                         journal.write(json.dumps(vr_event, allow_nan=False) + "\n")

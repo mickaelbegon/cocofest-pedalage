@@ -18092,6 +18092,29 @@ def run_frozen_rho_nominal_objective_probe(
     return summary
 
 
+def solve_frozen_rho_secondary_stage(periodic_nmpc, *, solver, tolerance: float):
+    """Solve the already prepared RHO once, without exporting or advancing it.
+
+    The caller owns the numerical PACE-RT stage transition and rollback. This
+    entry point deliberately uses the same compiled NLP and nominal solver as
+    the primary solve; it returns the actual Solution for certification and
+    physical transfer by the caller.
+    """
+    solution = super(RecedingHorizonOptimization, periodic_nmpc).solve(
+        solver=solver, warm_start=None,
+    )
+    populate_solution_inf_pr_from_solver_stats(solution, periodic_nmpc)
+    feasibility = _solution_feasibility_summary(solution, tolerance)
+    audit = {
+        "status": int(solution.status),
+        "solver_stats": snapshot_nlp_solver_stats(periodic_nmpc),
+        "feasibility": feasibility,
+        "certified": _rho_solution_is_certified(solution.status, feasibility),
+        "solver_time_s": float(solution.real_time_to_optimize),
+    }
+    return solution, audit
+
+
 def _run_terminal_rho_counterfactuals(
     periodic_nmpc,
     prepared_primal_checkpoint,
@@ -20909,6 +20932,46 @@ def solve_case(
         args.calcium_initialization_regime = "finite_history_transient"
         args.calcium_post_stimulation_amplitude = None
         args.calcium_analytical_periodic_value = None
+    # PACE-RT is intentionally an internal process-runner option rather than
+    # a public benchmark CLI flag.  It must be created only after the exact
+    # Ding models and one-cycle physical task are known, so the fixed SX graph
+    # is provenance-bound to them.  The objective starts inactive; the
+    # asynchronous supervisor may only update its numerical parameter vector.
+    task_reserve_binding = (getattr(args, "experimental_task_reserve_binding", None)
+                            or getattr(args, "experimental_task_load_margin_binding", None))
+    if task_reserve_binding is None:
+        pace_rt = getattr(args, "experimental_pace_rt_config", None)
+        if pace_rt is not None:
+            from cocofest.optimization.pace_rt_ocp import PaceRtObjectiveBinding
+            from cocofest.optimization.task_reserve_ocp import TaskReserveStateCoordinate
+
+            if not isinstance(pace_rt, dict):
+                raise ValueError("experimental_pace_rt_config must be a mapping.")
+            coordinates = tuple(TaskReserveStateCoordinate(
+                f"A_{muscle.muscle_name}", scale=float(muscle.a_scale)
+            ) for muscle in muscle_models)
+            context = {
+                "coordinate_layout": [
+                    {"state_key": item.state_key, "index": item.index,
+                     "scale": item.scale, "offset": item.offset}
+                    for item in coordinates
+                ],
+                "cycle_period_s": float(cycle_duration), "cycle_len": int(args.stimulations_per_cycle),
+                "formulation": args.formulation, "mechanical_formulation": args.mechanical_formulation,
+                "nominal_work_j": float(isokinetic_config.energy_target_j),
+                "terminal_half_step_guard": bool(args.reduced_terminal_half_step_velocity_guard),
+            }
+            task_reserve_binding = PaceRtObjectiveBinding(
+                coordinates, task_context=context,
+                model_sha256=hashlib.sha256(Path(model_path).read_bytes()).hexdigest(),
+                target_fraction=float(pace_rt.get("target_fraction", .25)),
+                smoothing=float(pace_rt.get("smoothing", 1e-3)),
+                maximum_age_cycles=int(pace_rt.get("maximum_age_cycles", pace_rt.get("update_every_cycles", 20))),
+                normalize_shortage=bool(pace_rt.get("normalize_terminal_shortage", False)),
+                enforce_target_constraint=bool(pace_rt.get("enforce_terminal_target_constraint", False)),
+            )
+            args.experimental_task_reserve_binding = task_reserve_binding
+            args.experimental_task_reserve_model_path = str(model_path)
     fatigue_capacity_scales = {
         f"A_{muscle_model.muscle_name}": float(muscle_model.a_scale)
         for muscle_model in model.muscles_dynamics_model
@@ -20990,6 +21053,10 @@ def solve_case(
             "The RK4 internal cadence guard requires the reduced internal guard."
         )
     simulation_conditions = {
+        **({"task_reserve_binding": task_reserve_binding,
+            "task_reserve_model_path": getattr(args, "experimental_task_reserve_model_path", None)
+            or getattr(args, "experimental_task_load_margin_model_path", None)}
+           if task_reserve_binding is not None else {}),
         "n_cycles_simultaneous": args.cycles_per_window,
         "stimulation": total_stimulations,
         "minimize_force": "force" in objectives,

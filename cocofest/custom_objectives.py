@@ -22,6 +22,11 @@ class CustomObjective:
         return binding.objective(controller)
 
     @staticmethod
+    def terminal_task_reserve_target_constraint(controller: PenaltyController, binding):
+        """Return the PACE-RT terminal reserve residual constrained below zero."""
+        return binding.target_constraint(controller)
+
+    @staticmethod
     def minimize_terminal_projected_mechanical_reserve(controller: PenaltyController, binding):
         """Signed projected reserve proxy from the candidate terminal slow states."""
         from casadi import horzcat
