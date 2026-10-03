@@ -202,6 +202,31 @@ table(doc,
     ], [1.1, 1.45, 2.1, 1.35])
 paragraph(doc, "For the mechanics-only condition, bm is normalized mechanical Shapley work credit. It intentionally does not multiply alpha-A or a fatigue decrement: Ding fatigue is already propagated in A and the objective already squares normalized fatigue. Physio-U remains distinct because it does use the state-conditioned force challenge. Missing, invalid, zero-credit, out-of-domain, or uncertified envelopes hold the incumbent weights. At due boundaries, the live envelope uses the full local Ding state (Cn, F, A, Tau1, Km), pulse-width limits, reduced isokinetic geometry, and certified terminal work; the target is projected, smoothed, and log-step capped before the numeric parameter update.")
 
+paragraph(doc, "6.5 Isokinetic branch: prescribed kinematics before SX", "Heading 2")
+paragraph(doc, "The K0–K9 table is a dynamic-mechanics lineage and remains separate: switching to a prescribed cadence changes the task, so no timing factor is propagated from it into the isokinetic branch. In that branch, prescribed kinematics is introduced immediately after reduced mechanics and before SX: K3-I0 is the reduced MX state-kinematics reference and K3-I1 eliminates the prescribed theta/omega equalities. The intended continuation is K4-I periodic calcium, K5-I SX, then K6-I onward for the compiled Hessian, compact output, and control-regularity choices. This makes the structural elimination visible early rather than presenting it as a late consequence of compilation.")
+paragraph(doc, "The historical reduced isokinetic transcription keeps theta and omega as NLP states and enforces theta-dot = omega-reference and omega-dot = 0. The prescribed-kinematics alternative removes these equality-constrained variables and reconstructs them at every physical Radau or IRK stage from the same clock and phase origin.")
+equation(doc, "θ(t) = θ₀ + ωref(t − t₀),     ω(t) = ωref")
+paragraph(doc, "For four muscles, this changes the state dimension from 23 to 21: the 20 Ding states and Eprod remain. Fibre geometry, force-length, force-velocity, passive force, inverse load, and work rate are evaluated at the reconstructed exact stage angle. No lookup-table approximation or stage interpolation is introduced. The phase origin must be transferred consistently between RHO windows; resetting local time without the matching phase would change the Hill relations.")
+paragraph(doc, "This is an elimination of prescribed kinematic equalities within one isokinetic transcription. It is not a comparison with the isoresistive task. Bounds, seed transfer, result summaries, and dense audits reconstruct theta and omega from the physical clock; the mode is restricted to reduced isokinetic mechanics and does not use redundant free-cadence velocity guards.")
+paragraph(doc, "A new controlled pre-SX MX pair was run for 100 one-cycle windows. The current isokinetic driver uses periodic calcium, so it is a K4-I realization of the K3-I0/K3-I1 design: it establishes the kinematic elimination before SX, but does not isolate an interaction with the historical Ding representation. The cases were sequential, with 16 CasADi threads and single-thread numerical libraries, without explicit CPU pinning. They differ physically only in the kinematic representation.")
+table(doc,
+    ["Case", "Representation", "Certified", "Hot solve median / P90", "Complete RHO median / P90", "NLP variables"],
+    [
+        ["K3-I0 / K4-I reference", "MX, theta/omega states", "100/100", "4.631 / 5.487 s", "4.791 / 5.655 s", "4284"],
+        ["K3-I1 / K4-I", "MX, prescribed", "100/100", "3.275 / 3.917 s", "3.435 / 4.106 s", "3922"],
+    ], [1.0, 1.25, 0.65, 1.15, 1.3, 0.65])
+paragraph(doc, "Eliminating the two prescribed kinematic variables removes 362 NLP variables in this transcription. It reduced the MX hot median by 29.3 percent and the complete-iteration median by 28.3 percent. Over the 100 saved windows, maximum states-versus-prescribed differences were 8.33e-6 microseconds in pulse width, 3.95e-10 rad in reconstructed angle, 7.68e-12 rad/s in speed, 6.22e-9 J in energy, and 3.09e-11 in relative capacity. Both campaigns passed 100/100 isokinetic and mechanical audits; the state-kinematics maximum effective primal infeasibility was 9.09e-7. The evidence is therefore an exact equality elimination for these trajectories, not a change to the muscle or mechanical model.")
+table(doc,
+    ["Measure", "State kinematics", "Prescribed kinematics", "Interpretation"],
+    [
+        ["NLP states, four muscles", "23", "21", "Ding states and Eprod retained"],
+        ["IPOPT hot solve, median / P90", "0.707 / 0.808 s", "0.373 / 0.439 s", "100 windows, MA57 SX Radau-5"],
+        ["Complete RHO iteration, median / P90", "0.797 / 0.899 s", "0.452 / 0.519 s", "Transfer, solver, certification"],
+        ["IPOPT certification", "100 / 100", "100 / 100", "Isokinetic and mechanical audits passed"],
+        ["Acados prescribed IRK 4x5", "--", "100 / 100; 0.202 / 0.207 s solve", "0.236 / 0.242 s iteration; four SQP iterations; IPOPT cycle-1 seed"],
+    ], [1.15, 1.2, 1.75, 2.55])
+paragraph(doc, "The SX production pair is the later K5-I0/K5-I1 continuation: in the matched 100-window IPOPT campaign, prescribed kinematics reduced hot solve time by 47.2 percent and complete RHO iteration time by 43.3 percent. Objective sums differed by 7.83e-8 and executed fatigue by 7.58e-8. The maximum saved-trace differences were 1.40e-11 microseconds in pulse width, 1.83e-8 J in energy, and 3.95e-10 rad in reconstructed angle. Historical K6–K9 records remain labelled state kinematics; they must be repeated from K5-I1 before being claimed as a cumulative prescribed sequence. Acados also certified 100/100 windows, but its internal objective and fatigue differed materially from IPOPT (986.147 / 953.999 versus 1552.602 / 1502.703). Its timing establishes robust feasibility and execution, not cross-solver optimality equivalence; a matched Acados state-kinematics run or common dense replay remains required.")
+
 paragraph(doc, "7. References", "Heading 1")
 for reference in [
     "[1] Ding J, Wexler AS, Binder-Macleod SA. A predictive model of fatigue in human skeletal muscles. Journal of Applied Physiology. 2000;89(4):1322-1332. doi:10.1152/jappl.2000.89.4.1322.",
@@ -212,6 +237,9 @@ for reference in [
     "[6] De Groote F, Kinney AL, Rao AV, Fregly BJ. Evaluation of direct collocation optimal control problem formulations for solving the muscle redundancy problem. Annals of Biomedical Engineering. 2016;44(10):2922-2936. doi:10.1007/s10439-016-1591-9.",
     "[7] Co K, Puchaud P, Moissenet F, Begon M. Maximizing Task Endurance through Muscle Fatigue Minimization with Consideration of Muscle Fatigability and Task Contribution: an in-Silico FES Study of Handcycling. Manuscript. 2026.",
 ]:
-    paragraph(doc, reference)
+    reference_paragraph = paragraph(doc, reference)
+    reference_paragraph.paragraph_format.space_after = Pt(1)
+    for run in reference_paragraph.runs:
+        run.font.size = Pt(8.5)
 
 doc.save(OUT)

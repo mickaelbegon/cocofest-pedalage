@@ -187,6 +187,20 @@ In the isoresistive (free-speed) formulation, the applied resistance is prescrib
   [Two independent arms], [well defined with a common clock], [not a physical shared-crank model], [state the architecture]
 )
 
+=== F.1 Exact prescribed isokinetic kinematics
+
+The historical reduced isokinetic transcription keeps $theta$ and $omega$ as NLP states and enforces $dot(theta)=omega_"ref"$ and $dot(omega)=0$. The specialised alternative removes these two equality-constrained variables and reconstructs them at every physical collocation or IRK stage as
+
+$theta(t)=theta_0+omega_"ref"(t-t_0), quad omega(t)=omega_"ref".$
+
+For four muscles, the state dimension is therefore reduced from 23 to 21: the 20 Ding states and the work state $E_"prod"$ are retained. Fibre geometry, force-length, force-velocity, passive force, inverse load, and work rate are evaluated from the reconstructed angle at the exact stage time. No fitted lookup table or stage interpolation is introduced by this reduction. The physical phase origin must be transferred consistently between RHO windows; otherwise resetting local time would change the crank angle and hence the Hill relations.
+
+This is an elimination of prescribed kinematic equalities within the selected transcription, not a comparison between isokinetic and isoresistive tasks. Bounds and audits that formerly read $theta$ or $omega$ must reconstruct them from the same physical clock. The mode is consequently restricted to reduced isokinetic mechanics and disables redundant free-cadence velocity guards.
+
+A matched 100-window IPOPT/MA57 SX Radau IIA degree-five campaign certified every window in both formulations. The state and prescribed variants had hot solve median/P90 values of 0.707/0.808 s and 0.373/0.439 s, respectively; complete RHO iteration median/P90 values were 0.797/0.899 s and 0.452/0.519 s. Thus, eliminating the prescribed kinematic states reduced the hot solve time by 47.2 percent and the complete iteration time by 43.3 percent. Every window passed the isokinetic feasibility and mechanical-equivalence audits. The objective sums differed by $7.83 times 10^(-8)$ and the executed fatigue values by $7.58 times 10^(-8)$. Across the saved 100-cycle traces, the maximum pulse-width difference was $1.40 times 10^(-11)$ microseconds, the maximum energy difference was $1.83 times 10^(-8)$ J, and the reconstructed angle differed by at most $3.95 times 10^(-10)$ rad. This establishes the IPOPT reduction as a 100-cycle equivalence and timing result under this configuration.
+
+Acados SQP with IRK Gauss--Legendre 4-by-5 and full-condensing HPIPM was then initialised from a separately certified IPOPT prescribed cycle-1 seed and also certified 100 of 100 windows. Its hot solve median/P90 was 0.202/0.207 s, complete RHO iteration median/P90 was 0.236/0.242 s, and the SQP iteration median/P90 was four/four. Its isokinetic feasibility and mechanical-equivalence audits passed. However, its internal objective sum (986.147) and executed fatigue (953.999) differ materially from the corresponding IPOPT prescribed values (1552.602 and 1502.703); its minimum capacity ratio was 0.954 rather than 0.940. The Acados campaign therefore establishes robust execution, feasibility, and timing, but not cross-solver optimality equivalence. A matched Acados state-kinematics comparison or a common dense replay remains necessary for that claim.
+
 == G. Two independent arms and paced allocation
 
 Two independent unilateral isokinetic OCPs are used when the scientific question is allocation of a prescribed bilateral work budget, not bilateral contact mechanics. Each arm has four Ding muscle models, its own state history, pulse-width controls, and fatigue cost. The process-isolated coordinator imposes, at every certified cycle $k$,
@@ -272,21 +286,32 @@ The main conclusion is not that speedup factors should be multiplied. K3--K9 alt
 
 === H.2 Isokinetic replication and dynamic-consistency records
 
-The following independent isokinetic replication starts at K5 because reduced mechanics, periodic-node Ding calcium, Radau IIA degree five, and SX are already required by that branch. The prescribed cadence was $omega=-2 pi$ rad/s and the target work was equivalent to a mean torque of 0.2 N m, i.e. $E_"prod"(T)=1.256637$ J per turn. Every row solved 100 one-cycle IPOPT/MA57 windows on CPU 12--15 with single-thread numerical libraries. All 100 windows in every row converged, had primal infeasibility at most $10^(-5)$, and passed the dense isokinetic speed/load audit.
+The dynamic K0--K9 chain above and the following isokinetic branch answer different questions. Switching to a prescribed cadence changes the task, so no timing factor is propagated from the dynamic branch into this branch. Within the isokinetic branch, however, prescribed kinematics is introduced immediately after reduced mechanics and *before* SX: K3-I0 is the reduced MX state-kinematics reference and K3-I1 eliminates the prescribed $theta, omega$ equalities. The intended subsequent sequence is K4-I (periodic calcium), K5-I (SX), then K6-I onward (compiled Hessian, compact output, and control-regularity choices). This ordering makes the structural elimination visible before symbolic compilation rather than presenting it as a late optimization.
+
+The 100-window MX pair below uses the periodic-calcium implementation already required by the current isokinetic driver; it is consequently a controlled K4-I realization of the earlier K3-I0/K3-I1 design. It establishes the kinematic elimination before SX, but does not isolate an interaction with the historical Ding representation. The two cases were run sequentially with 16 CasADi threads and single-thread numerical libraries, without explicit CPU pinning. They differ physically only by the kinematics representation; their audits are reported below. The prescribed cadence was $omega=-2 pi$ rad/s and the target work was equivalent to a mean torque of 0.2 N m, i.e. $E_"prod"(T)=1.256637$ J per turn.
 
 #table(
   columns: 7,
-  [*Case*], [*Change from K5*], [*Valid*], [*Hot median / P90 (s)*], [*Solver sum (s)*], [*RHO solve-loop wall (s)*], [*Executed fatigue; min A*],
-  [K5], [SX reference], [100 / 100], [0.804 / 0.998], [85.205], [99.121], [1502.703; 0.940],
-  [K6], [compiled exact $"nlp"_"hess_l"$], [100 / 100], [0.644 / 0.779], [68.545], [219.117], [1502.703; 0.940],
-  [K7], [compact output], [100 / 100], [0.639 / 0.781], [68.190], [217.812], [1502.703; 0.940],
-  [K8], [hard 100 microsecond $Delta P_"W"$ lifting bound], [100 / 100], [0.719 / 0.814], [74.534], [222.063], [4164.343; 0.911],
-  [K9], [K8 plus normalized $Delta P_"W"$ penalty 0.01], [100 / 100], [0.693 / 0.829], [73.407], [223.673], [3167.562; 0.917],
+  [*Case*], [*Kinematic representation*], [*Valid*], [*Hot median / P90 (s)*], [*Complete RHO median / P90 (s)*], [*NLP variables*], [*Interpretation*],
+  [K3-I0 / K4-I reference], [MX, $theta, omega$ states], [100 / 100], [4.631 / 5.487], [4.791 / 5.655], [4284], [controlled pre-SX reference],
+  [K3-I1 / K4-I], [MX, prescribed], [100 / 100], [3.275 / 3.917], [3.435 / 4.106], [3922], [-29.3% median solve; -28.3% complete iteration],
 )
 
-The hot K6 median is 19.9 percent below K5, while K7 is statistically indistinguishable from K6 on this hardware. The column *RHO solve-loop wall* includes the one-off graph construction and C compilation before and within the RHO loop, but excludes the separate post-solve export/audit stage; it is not an end-to-end latency nor a per-cycle control latency. For K6--K9 it is about 218--224 s because each case used a distinct compilation cache, whereas K5 was 99.1 s without that generated-Hessian compilation. The exact cold compilation component is consequently not inferred by subtracting two different NLPs. K8 and K9 are not speed-only variants: their hard slew constraint changes the admissible controls, raising the executed fatigue and reducing the terminal capacity compared with K5--K7.
+The 362 removed NLP variables are the 2 prescribed kinematic variables over the 181 collocation-related nodes of this transcription. The maximum `states`--`prescribed` differences over the 100 saved windows were $8.33 times 10^(-6)$ microseconds in pulse width, $3.95 times 10^(-10)$ rad in reconstructed angle, $7.68 times 10^(-12)$ rad/s in speed, $6.22 times 10^(-9)$ J in energy, and $3.09 times 10^(-11)$ in relative capacity. Both runs had 100/100 isokinetic and mechanical audits; the maximum effective primal infeasibility was $9.09 times 10^(-7)$ for K3-I0/K4-I. Thus this is an exact equality elimination for the measured trajectories, not a change to the muscle or mechanical model.
 
-Dynamic consistency was requested as an observed quantity rather than a rejection gate. A two-cycle K5 DOP853 smoke replay gave a maximum optimized-trajectory versus DOP853 state discrepancy of 0.155110, while the independently constructed RK4 map versus DOP853 discrepancy was $1.63 times 10^(-4)$. The dense isokinetic speed audit itself had zero bound violation. A 100-cycle DOP853 post-processing attempt completed the 100 native NLP windows but terminated before writing its replay result; it is recorded as a post-processing failure, not as a DOP853 validation or as an NLP failure. K5--K9 native archives and their short DOP853 smoke record are retained under `local-results/isokinetic-k5-k9-dynamic-consistency-20260922`; a bounded, milestone-only DOP853 replay is required before making a cross-formulation cost ranking.
+The existing SX production records are retained as a later, separate continuation. They ran on CPU 12--15 with single-thread numerical libraries. All 100 windows in every row converged, had primal infeasibility at most $10^(-5)$, and passed the dense isokinetic speed/load audit.
+
+#table(
+  columns: 5,
+  [*Case*], [*SX continuation*], [*Valid*], [*Timing evidence*], [*Interpretation*],
+  [K5-I0], [SX, state kinematics], [100 / 100], [0.707 / 0.808 s hot; 0.797 / 0.899 s complete], [matched production reference in F.1],
+  [K5-I1], [SX, prescribed kinematics], [100 / 100], [0.373 / 0.439 s hot; 0.452 / 0.519 s complete], [same policy and physical trajectory family],
+  [K6--K9, states], [historical compiled/regularized continuation], [100 / 100 each], [0.644--0.719 s hot; 0.779--0.829 s P90], [not yet a prescribed cumulative sequence],
+)
+
+The SX states/prescribed pair confirms the same exact trajectory family after compilation: the `prescribed` run reduces the hot median from 0.707 to 0.373 s and complete iteration median from 0.797 to 0.452 s in the matched campaign reported in F.1. K6--K9 are intentionally labelled `states`: they must be repeated under K5-I1 before being claimed as a cumulative prescribed sequence. The column *RHO solve-loop wall* includes one-off graph construction and C compilation before and within the RHO loop, but excludes the separate post-solve export/audit stage; it is not an end-to-end latency nor a per-cycle control latency. The historical K6--K9 walls are not used to infer a cold-compilation component for K5-I1. K8 and K9 are not speed-only variants: their hard slew constraint changes the admissible controls.
+
+Dynamic consistency was requested as an observed quantity rather than a rejection gate. A two-cycle K5 state-kinematics DOP853 smoke replay gave a maximum optimized-trajectory versus DOP853 state discrepancy of 0.155110, while the independently constructed RK4 map versus DOP853 discrepancy was $1.63 times 10^(-4)$. The dense isokinetic speed audit itself had zero bound violation. A 100-cycle DOP853 post-processing attempt completed the 100 native NLP windows but terminated before writing its replay result; it is recorded as a post-processing failure, not as a DOP853 validation or as an NLP failure. K5--K9 state-kinematics native archives and their short DOP853 smoke record are retained under `local-results/isokinetic-k5-k9-dynamic-consistency-20260922`; a bounded, milestone-only DOP853 replay is required before making a cross-formulation cost ranking.
 
 === H.3 Radau s=3 at 50 Hz versus Radau s=5 at 30 Hz
 
