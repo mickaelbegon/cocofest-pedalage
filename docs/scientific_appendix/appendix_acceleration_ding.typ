@@ -311,6 +311,21 @@ The existing SX production records are retained as a later, separate continuatio
 
 The SX states/prescribed pair confirms the same exact trajectory family after compilation: the `prescribed` run reduces the hot median from 0.707 to 0.373 s and complete iteration median from 0.797 to 0.452 s in the matched campaign reported in F.1. K6--K9 are intentionally labelled `states`: they must be repeated under K5-I1 before being claimed as a cumulative prescribed sequence. The column *RHO solve-loop wall* includes one-off graph construction and C compilation before and within the RHO loop, but excludes the separate post-solve export/audit stage; it is not an end-to-end latency nor a per-cycle control latency. The historical K6--K9 walls are not used to infer a cold-compilation component for K5-I1. K8 and K9 are not speed-only variants: their hard slew constraint changes the admissible controls.
 
+==== H.2.1 Local Ding and post-reduction compiled-Hessian subbranch
+
+The following subbranch is deliberately separate from the historical K6--K9 `states` continuation. K5-I1-DL denotes the exact discrete reconstruction of the periodic calcium and linear Ding states $(C_n, tau_1, K_m)$ inside the prescribed-kinematics Radau-5 transcription; K6-I1-DL then compiles the exact Hessian *after* this reduction. It retains four muscles, a unit-fatigue objective, 30 stimulations per cycle, IPOPT/MA57, and one numerical thread. Thus it is a new prescribed-kinematics condition, not a multiplicative extension of any dynamic K6--K9 timing factor.
+
+#table(
+  columns: 6,
+  [*Case*], [*Change from K5-I1*], [*Autonomous certified cycles*], [*Hot IPOPT median (s)*], [*Complete RHO median (s)*], [*Interpretation*],
+  [K5-I1], [full Ding SX reference], [100 / 100], [0.3797], [0.4662], [controlled propagated reference],
+  [K6-I1-DL], [discrete local Ding + Hessian compiled after reduction], [100 / 100], [0.0756], [0.1715], [prescribed local subbranch],
+)
+
+Each formulation propagated its own solution for 100 cycles; no reference input or solution was frozen. The complete reduced NLP violation was at most $7.39 times 10^(-7)$ and its discrete reconstruction certificate at most $7.71 times 10^(-15)$. The work residual was at most $1.49 times 10^(-13)$ J in the native quadrature and the DOP853 work mismatch was at most $0.001219$ J. The reduced and full candidates are not identical minima: the largest PW difference was $13.45$ microseconds, while the final accumulated fatigue differed by $0.059$ percent. Accordingly, this is a certified autonomous performance condition, not an exact trajectory-equivalence claim. Compilation is a startup cost (about $4.50$ s in the measured cold case); cached reload was about $0.118$ s and is excluded from the hot percentiles.
+
+Two persistent copies of K6-I1-DL on CPU 12 and CPU 13 also certified 100/100 cycles each. Their paired NLP-to-audit median latency was $0.0920$ s (P90 $0.1047$ s), with a $0.563$ ms median barrier skew. Both copies used the same muscle parameters, so this establishes process contention, cache reuse, and synchronization only; it is not a bilateral physiological-asymmetry experiment. The dense DOP853 checks include calcium, force, capacity, work, and bounds. No solver outcome is interpreted here as an endurance or physiological-failure certificate.
+
 Dynamic consistency was requested as an observed quantity rather than a rejection gate. A two-cycle K5 state-kinematics DOP853 smoke replay gave a maximum optimized-trajectory versus DOP853 state discrepancy of 0.155110, while the independently constructed RK4 map versus DOP853 discrepancy was $1.63 times 10^(-4)$. The dense isokinetic speed audit itself had zero bound violation. A 100-cycle DOP853 post-processing attempt completed the 100 native NLP windows but terminated before writing its replay result; it is recorded as a post-processing failure, not as a DOP853 validation or as an NLP failure. K5--K9 state-kinematics native archives and their short DOP853 smoke record are retained under `local-results/isokinetic-k5-k9-dynamic-consistency-20260922`; a bounded, milestone-only DOP853 replay is required before making a cross-formulation cost ranking.
 
 === H.3 Radau s=3 at 50 Hz versus Radau s=5 at 30 Hz

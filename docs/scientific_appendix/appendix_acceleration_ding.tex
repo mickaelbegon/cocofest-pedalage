@@ -233,6 +233,24 @@ The hot K6 median is 19.9\% below K5, while K7 is statistically indistinguishabl
 
 Dynamic consistency was requested as an observed quantity rather than a rejection gate. A two-cycle K5 DOP853 smoke replay gave a maximum optimized-trajectory versus DOP853 state discrepancy of 0.155110, while the independently constructed RK4 map versus DOP853 discrepancy was $1.63\times10^{-4}$. The dense isokinetic speed audit itself had zero bound violation. A 100-cycle DOP853 post-processing attempt completed the 100 native NLP windows but terminated before writing its replay result; it is recorded as a post-processing failure, not as a DOP853 validation or as an NLP failure. K5--K9 native archives and their short DOP853 smoke record are retained under \texttt{local-results/isokinetic-k5-k9-dynamic-consistency-20260922}; a bounded, milestone-only DOP853 replay is required before making a cross-formulation cost ranking.
 
+\subsubsection{Local Ding and post-reduction compiled-Hessian subbranch}
+
+The following subbranch is deliberately separate from the historical K6--K9 state-kinematics continuation. K5-I1-DL denotes exact discrete reconstruction of periodic calcium and the linear Ding states $(C_n,\tau_1,K_m)$ inside the prescribed-kinematics Radau-5 transcription; K6-I1-DL then compiles the exact Hessian \emph{after} that reduction. It retains four muscles, unit fatigue, 30 stimulations per cycle, IPOPT/MA57, and one numerical thread. It is therefore a new prescribed-kinematics condition, not a multiplicative extension of a dynamic K6--K9 timing factor.
+
+\begin{longtable}{@{}p{0.13\textwidth}p{0.24\textwidth}p{0.14\textwidth}p{0.14\textwidth}p{0.15\textwidth}p{0.20\textwidth}@{}}
+\toprule
+Case & Change from K5-I1 & Autonomous certified cycles & Hot IPOPT median (s) & Complete RHO median (s) & Interpretation\\
+\midrule
+\endhead
+K5-I1 & Full Ding SX reference & 100/100 & 0.3797 & 0.4662 & Controlled propagated reference\\
+K6-I1-DL & Discrete local Ding plus Hessian compiled after reduction & 100/100 & 0.0756 & 0.1715 & Prescribed local subbranch\\
+\bottomrule
+\end{longtable}
+
+Each formulation propagated its own solution for 100 cycles; no reference input or solution was frozen. The maximum complete reduced-NLP violation was $7.39\times10^{-7}$ and the discrete reconstruction certificate was $7.71\times10^{-15}$. The native work residual was at most $1.49\times10^{-13}$ J and the DOP853 work mismatch was at most $0.001219$ J. The reduced and full candidates are not identical minima: the largest PW difference was $13.45\,\mu$s, while final accumulated fatigue differed by 0.059\%. This is therefore a certified autonomous performance condition, not an exact trajectory-equivalence claim. Compilation is a startup cost (about 4.50 s in the measured cold case); cached reload was about 0.118 s and is excluded from hot percentiles.
+
+Two persistent copies of K6-I1-DL on CPU 12 and CPU 13 also certified 100/100 cycles each. Their paired NLP-to-audit median latency was 0.0920 s (P90 0.1047 s), with a 0.563 ms median barrier skew. The copies used identical muscle parameters, so this establishes process contention, cache reuse, and synchronization only; it is not a bilateral physiological-asymmetry experiment. Dense DOP853 checks include calcium, force, capacity, work, and bounds. No solver outcome is interpreted here as an endurance or physiological-failure certificate.
+
 \subsection{Radau $s=3$ at 50 Hz versus Radau $s=5$ at 30 Hz}
 
 This comparison is deliberately \emph{not factorial}. The 50 Hz case is the historical full-mechanics, MX, finite-history Ding baseline; K5 at 30 Hz uses reduced mechanics, periodic-node Ding calcium, and SX. It answers whether the historical configuration remains dynamically viable at its native 50 Hz setting, not the isolated effect of changing collocation order.
