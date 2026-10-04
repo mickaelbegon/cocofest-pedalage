@@ -5,7 +5,9 @@ import casadi as ca
 from types import SimpleNamespace as NS
 
 from scripts.benchmark_ding_radau5_local_ab import (intersect_affine_bounds, build_local_map, frozen_limits,
-                                                     recorded_outer_solution)
+                                                     recorded_outer_solution,
+                                                     intersect_affine_bounds_vectorized,
+                                                     reconstruct_bound_duals_vectorized)
 from scripts.validate_ding_radau5_condensation import radau5_tableau
 
 
@@ -26,6 +28,52 @@ def test_impossible_intersection_and_calcium_are_rejected():
         intersect_affine_bounds([0.], [1.], [0], [1.], [0.], [2.], [3.])
     with pytest.raises(ValueError, match="Fixed reconstructed"):
         intersect_affine_bounds([0.], [1.], [0], [0.], [2.], [0.], [1.])
+
+
+def test_vectorized_bounds_and_duals_match_scalar_with_repeated_targets_and_ties():
+    rng = np.random.default_rng(824)
+    for trial in range(30):
+        n, nz = 32, 150
+        r, z = np.arange(n), np.arange(n, n+nz)
+        target = rng.integers(n, size=nz)
+        c = rng.choice([-2., -.5, 0., .3, 1.], size=nz)
+        offset = rng.normal(size=nz)
+        center = rng.normal(size=n)
+        full_center = np.r_[center, c*center[target]+offset]
+        lo = full_center - rng.uniform(.01, 2., size=n+nz)
+        hi = full_center + rng.uniform(.01, 2., size=n+nz)
+        # Exercise ties: retained and reconstructed bounds at the same point.
+        if trial % 2 == 0:
+            lo = full_center.copy()
+        if trial % 3 == 0:
+            hi = full_center.copy()
+        scalar = intersect_affine_bounds(lo[r], hi[r], target, c, offset, lo[z], hi[z])
+        vector = intersect_affine_bounds_vectorized(lo[r], hi[r], target, c, offset, lo[z], hi[z])
+        for a, b in zip(scalar, vector):
+            np.testing.assert_array_equal(a, b)
+        old = np.r_[rng.choice([-2., 0., 3.], size=n), np.zeros(nz)]
+        expected, actual = old.copy(), old.copy()
+        for i in np.unique(target):
+            candidates = np.flatnonzero((target == i) & (c != 0))
+            lower_side = expected[r[i]] < 0
+            effective = scalar[0 if lower_side else 1]
+            bound_vector = lo if lower_side else hi
+            if abs(float(effective[i]) - bound_vector[r[i]]) < 1e-10:
+                continue
+            for q in candidates:
+                bound = lo[z[q]] if lower_side == (c[q] > 0) else hi[z[q]]
+                if abs((bound-offset[q])/c[q]-effective[i]) < 1e-9:
+                    expected[z[q]], expected[r[i]] = expected[r[i]]/c[q], 0.
+                    break
+        reconstruct_bound_duals_vectorized(actual, r, z, target, c, offset, lo, hi, *vector)
+        np.testing.assert_array_equal(actual, expected)
+
+
+def test_vectorized_impossible_intersections_are_still_rejected():
+    with pytest.raises(ValueError, match="Infeasible"):
+        intersect_affine_bounds_vectorized([0.], [1.], [0], [1.], [0.], [2.], [3.])
+    with pytest.raises(ValueError, match="Fixed reconstructed"):
+        intersect_affine_bounds_vectorized([0.], [1.], [0], [0.], [2.], [0.], [1.])
 
 
 def test_frozen_limits_replace_only_recorded_solver_inputs(tmp_path):

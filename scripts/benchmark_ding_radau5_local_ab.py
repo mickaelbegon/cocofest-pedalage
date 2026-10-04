@@ -80,6 +80,46 @@ def intersect_affine_bounds(lower, upper, target, coefficient, offset, zlo, zhi)
     return lower, upper
 
 
+def intersect_affine_bounds_vectorized(lower, upper, target, coefficient, offset, zlo, zhi):
+    """The same intersection, retaining repeated-target and sign semantics."""
+    lower, upper = np.array(lower, copy=True), np.array(upper, copy=True)
+    target = np.asarray(target, dtype=int)
+    coefficient, offset, zlo, zhi = map(np.asarray, (coefficient, offset, zlo, zhi))
+    variable = coefficient != 0
+    fixed = ~variable
+    if np.any((offset[fixed] < zlo[fixed] - 1e-9) | (offset[fixed] > zhi[fixed] + 1e-9)):
+        raise ValueError("Fixed reconstructed state violates its original bounds")
+    a = (zlo[variable] - offset[variable]) / coefficient[variable]
+    b = (zhi[variable] - offset[variable]) / coefficient[variable]
+    np.maximum.at(lower, target[variable], np.minimum(a, b))
+    np.minimum.at(upper, target[variable], np.maximum(a, b))
+    if np.any(lower > upper + 1e-10):
+        raise ValueError("Infeasible intersection of A,Tau1,Km bounds")
+    return lower, np.maximum(upper, lower)
+
+
+def reconstruct_bound_duals_vectorized(lx, r, z, target, coefficient, offsets,
+                                       lower, upper, reduced_lower, reduced_upper):
+    """Move bound duals to the first original bound inducing the intersection.
+
+    The deterministic first-match rule is identical to the scalar audit path,
+    including ties with a retained bound and zero multipliers.
+    """
+    lower_side = lx[r] < 0
+    effective = np.where(lower_side, reduced_lower, reduced_upper)
+    retained = np.where(lower_side, lower[r], upper[r])
+    needs_source = np.abs(effective - retained) >= 1e-10
+    q = np.flatnonzero((coefficient != 0) & needs_source[target])
+    bound = np.where(lower_side[target[q]] == (coefficient[q] > 0), lower[z[q]], upper[z[q]])
+    candidate = (bound - offsets[q]) / coefficient[q]
+    q = q[np.abs(candidate - effective[target[q]]) < 1e-9]
+    first = np.full(len(r), len(z), dtype=int)
+    np.minimum.at(first, target[q], q)
+    source = first[first < len(z)]
+    lx[z[source]] = lx[r[target[source]]] / coefficient[source]
+    lx[r[target[source]]] = 0.
+
+
 def build_local_map(nlp, interface):
     x, g = nlp["x"], nlp["g"]
     if not isinstance(x, ca.SX):
@@ -203,6 +243,7 @@ class LocalSolver:
         self.frozen_input_dir = Path(frozen).resolve() if frozen else None
         self.frozen_input_offset = int(os.environ.get("DING_FROZEN_CALL_OFFSET", "0"))
         self.frozen_return_recorded = os.environ.get("DING_FROZEN_RETURN_RECORDED") == "1"
+        self.vectorized = os.environ.get("DING_LOCAL_VECTORIZED", "1") != "0"
         print("DING_LOCAL_BUILD", self.mode, self.nnz, flush=True)
 
     def stats(self):
@@ -227,7 +268,8 @@ class LocalSolver:
                 m["reconstruct"](limits["x0"], offsets)))), initial=0)
             if certificate_error > 1e-8:
                 raise ValueError(f"Discrete local reconstruction certificate failed: {certificate_error}")
-            limits["lbx"], limits["ubx"] = intersect_affine_bounds(lo[r], hi[r], target, c, offsets, lo[z], hi[z])
+            intersect = intersect_affine_bounds_vectorized if self.vectorized else intersect_affine_bounds
+            limits["lbx"], limits["ubx"] = intersect(lo[r], hi[r], target, c, offsets, lo[z], hi[z])
             for key in ("lbg", "ubg"):
                 limits[key] = flat(original[key])[kept]
             if "lam_x0" in original:
@@ -238,35 +280,44 @@ class LocalSolver:
                 limits["lam_g0"] = flat(original["lam_g0"])[kept]
         preparation = time.perf_counter() - tic
         tic = time.perf_counter(); sol = self.native.call(limits); wall = time.perf_counter() - tic
+        tic = time.perf_counter()
         if m:
             full = m["reconstruct"](sol["x"], offsets)
             lx, lg = np.zeros(self.original["x"].numel()), np.zeros(self.original["g"].numel())
             lx[r], lg[kept] = flat(sol["lam_x"]), flat(sol["lam_g"])
             # Assign each effective A-bound multiplier to the physical bound
             # that actually generated it, so repeated bound warm starts agree.
-            for i in np.unique(target):
-                candidates = np.flatnonzero((target == i) & (c != 0))
-                direction = "lbx" if lx[r[i]] < 0 else "ubx"
-                if abs(float(limits[direction][i]) - flat(original[direction])[r[i]]) < 1e-10:
-                    continue
-                for q in candidates:
-                    bound = lo[z[q]] if (direction == "lbx") == (c[q] > 0) else hi[z[q]]
-                    if abs((bound - offsets[q]) / c[q] - limits[direction][i]) < 1e-9:
-                        lx[z[q]], lx[r[i]] = lx[r[i]] / c[q], 0.; break
+            if self.vectorized:
+                reconstruct_bound_duals_vectorized(lx, r, z, target, c, offsets,
+                                                  lo, hi, limits["lbx"], limits["ubx"])
+            else:
+                for i in np.unique(target):
+                    candidates = np.flatnonzero((target == i) & (c != 0))
+                    direction = "lbx" if lx[r[i]] < 0 else "ubx"
+                    if abs(float(limits[direction][i]) - flat(original[direction])[r[i]]) < 1e-10:
+                        continue
+                    for q in candidates:
+                        bound = lo[z[q]] if (direction == "lbx") == (c[q] > 0) else hi[z[q]]
+                        if abs((bound - offsets[q]) / c[q] - limits[direction][i]) < 1e-9:
+                            lx[z[q]], lx[r[i]] = lx[r[i]] / c[q], 0.; break
             rhs = -flat(m["stationarity"](full, lg[kept])) - lx[z]
             dual = m["dual_factor"].solve(rhs, trans="T")
             lg[m["removed"]] = dual[:len(m["removed"])]; lx[m["initial_z"]] += dual[len(m["removed"]):]
             sol.update(x=full, lam_x=ca.DM(lx), lam_g=ca.DM(lg))
+        reconstruction = time.perf_counter() - tic
+        tic = time.perf_counter()
         f, g = self.fg(sol["x"]); sol["g"] = g
         violation = max(np.max(np.maximum(flat(original[lo]) - flat(value), 0), initial=0)
             for value, lo in ((sol["x"], "lbx"), (g, "lbg")))
         violation = max(violation, *(np.max(np.maximum(flat(value) - flat(original[hi]), 0), initial=0)
             for value, hi in ((sol["x"], "ubx"), (g, "ubg"))))
         stats = self.native.stats()
+        audit = time.perf_counter() - tic
         metric = dict(mode=self.mode, call=self.calls, original_nx=self.original["x"].numel(),
             original_ng=self.original["g"].numel(), solver_nx=len(flat(limits["x0"])),
             solver_ng=len(flat(limits["lbg"])), nnz=self.nnz, mapping_s=self.mapping_s,
             solver_build_s=self.build_s, input_mapping_s=preparation, call_wall_s=wall,
+            reconstruction_s=reconstruction, original_audit_s=audit, vectorized=self.vectorized,
             original_max_bound_constraint_violation=violation, objective=float(f),
             discrete_equivalence_certificate_max=certificate_error if m else None,
             frozen_original_input=str(frozen_path) if frozen_path else None,
@@ -274,9 +325,11 @@ class LocalSolver:
             iterations=stats.get("iter_count"), timings={k:v for k,v in stats.items()
                 if k.startswith(("t_wall_", "t_proc_", "n_call_"))})
         self.output.mkdir(parents=True, exist_ok=True)
+        tic = time.perf_counter()
         np.savez(self.output / f"nlp{self.index}_call{self.calls}.npz", x=flat(sol["x"]), g=flat(g),
                  lam_x=flat(sol["lam_x"]), lam_g=flat(sol["lam_g"]),
                  **{k:flat(v) for k,v in original.items() if k in ("x0", "lbx", "ubx", "lbg", "ubg", "lam_x0", "lam_g0")})
+        metric["archive_npz_s"] = time.perf_counter() - tic
         self.metrics.append(metric)
         (self.output / f"nlp{self.index}_metrics.json").write_text(json.dumps(self.metrics, indent=2)+"\n")
         print("DING_LOCAL_RESULT " + json.dumps(metric), flush=True)
