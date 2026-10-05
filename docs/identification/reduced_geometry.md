@@ -82,6 +82,23 @@ non physique, `apply` bloque la campagne d'identification, tandis que
 `unit_force_gains` et l'audit restent disponibles pour diagnostiquer la
 géométrie mécanique sans contourner cette garde.
 
+Avant toute campagne bilatérale, lancer le gate explicite suivant (avec un
+profil réduit construit depuis le même bioMod) :
+
+```bash
+python scripts/audit_bilateral_biomod_geometry.py \
+  --reduced-profile /chemin/vers/reduced-bilateral.npz \
+  --biomod examples/msk_models/Wu/Modified_Wu_Shoulder_Model_Cycling_Bilateral.bioMod \
+  --output /tmp/bilateral-fibre-audit.json \
+  --require-positive
+```
+
+Le code de sortie 2 signifie qu'au moins une fibre est non positive et bloque
+la campagne. Dans l'état actuel du bioMod bilatéral, ce gate met en évidence
+`right_Delt_post`, `right_Biceps`, `left_Delt_post` et `left_Biceps` : il faut
+restaurer et valider leurs chemins anatomiques (notamment les via-points) avant
+d'employer la dynamique Ding bilatérale pour identifier un participant.
+
 La grille des coefficients est celle de l'essai; le simulateur les interpole
 linéairement entre mesures. Vérifier la convergence en densifiant cette grille
 avant une campagne d'identification. La provenance fournit le hash bioMod

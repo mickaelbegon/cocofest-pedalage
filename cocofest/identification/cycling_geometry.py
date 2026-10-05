@@ -437,6 +437,50 @@ class PlanarEndpointForceAdapter:
             "provenance": gains["provenance"],
         }
 
+    def audit_fibre_lengths(self, angle_rad: np.ndarray) -> dict:
+        """Audit actual bioMod fibre lengths along the reduced crank manifold.
+
+        A negative fibre length is a model/path error, not a value to clip or
+        take the absolute value of: doing so would change both force--length
+        and the derivative used by the Ding ODE.  This audit makes that gate
+        explicit before a two-arm identification campaign is launched.
+        """
+        angle = np.asarray(angle_rad, dtype=float).reshape(-1)
+        if angle.size < 2 or not np.all(np.isfinite(angle)):
+            raise ValueError("angle_rad must contain at least two finite samples.")
+        model, _, _, _, names, _ = self._model_and_indices()
+        lengths = np.empty((angle.size, len(names)))
+        optimal = np.empty(len(names))
+        for sample, value in enumerate(angle + self.geometry.angle_offset_rad):
+            q = self.geometry.profile.kinematics.q(float(value))
+            kinematics = model.UpdateKinematicsCustom(q)
+            for index in range(len(names)):
+                muscle = model.muscle(index)
+                lengths[sample, index] = float(self._array(muscle.length(kinematics, q, True)).reshape(-1)[0])
+                if sample == 0:
+                    optimal[index] = float(self._array(muscle.characteristics().optimalLength()).reshape(-1)[0])
+        if np.any(~np.isfinite(lengths)) or np.any(~np.isfinite(optimal)) or np.any(optimal <= 0):
+            raise ValueError("bioMod returned a non-finite or nonpositive optimal muscle length.")
+        normalized = lengths / optimal
+        per_muscle = {
+            name: {
+                "minimum_fibre_length_m": float(np.min(lengths[:, index])),
+                "maximum_fibre_length_m": float(np.max(lengths[:, index])),
+                "minimum_normalized_fibre_length": float(np.min(normalized[:, index])),
+                "maximum_normalized_fibre_length": float(np.max(normalized[:, index])),
+                "strictly_positive": bool(np.all(lengths[:, index] > 0.0)),
+            }
+            for index, name in enumerate(names)
+        }
+        invalid = [name for name, entry in per_muscle.items() if not entry["strictly_positive"]]
+        return {
+            "samples": int(angle.size),
+            "all_fibre_lengths_strictly_positive": not invalid,
+            "invalid_muscles": invalid,
+            "per_muscle": per_muscle,
+            "provenance": self.provenance,
+        }
+
     def apply(
         self,
         spec: CyclingTrialSpec,
