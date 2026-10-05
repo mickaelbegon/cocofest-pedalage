@@ -59,12 +59,28 @@ spec_2d = endpoint.apply(spec, omega_rad_s=-2 * 3.141592653589793)
 
 La résolution est refusée près d'une singularité du bras. Elle s'applique à
 une chaîne de bras indépendante (deux DDL, deux axes). Pour la version
-bilatérale, instancier un adaptateur par bras en indiquant explicitement les
-deux DDL et le marqueur de la main correspondants. Les baselines de force
-totale restent à mesurer ou à calculer avec `force_from_full_dynamics` à partir
-de **toutes** les forces musculaires et de la cinématique connue; un couple
-résiduel inconnu ne doit pas être absorbé artificiellement dans la force de
-contact.
+bilatérale Wu, utiliser les constructeurs non ambigus :
+
+```python
+right = PlanarEndpointForceAdapter.bilateral_arm_from_paths(profile, biomod, side="right")
+left = PlanarEndpointForceAdapter.bilateral_arm_from_paths(profile, biomod, side="left")
+right_audit = right.audit_unit_force_gains("right_Biceps", angles, omega_rad_s=omega)
+```
+
+Ils fixent respectivement `right_hand/(0, 1)` et `left_hand/(2, 3)` et
+empêchent de mélanger un muscle, une main et des DDL de côtés opposés. Les
+baselines de force totale restent à mesurer ou à calculer avec
+`force_from_full_dynamics` à partir de **toutes** les forces musculaires et de
+la cinématique connue; un couple résiduel inconnu ne doit pas être absorbé
+artificiellement dans la force de contact.
+
+L'audit compare `F_t * r` au bras de levier du profil réduit. Sur un profil
+Fourier peu dense, un petit écart révèle l'erreur d'approximation de la
+cinématique; il faut densifier et revalider ce profil avant l'identification.
+Indépendamment, si les longueurs musculaires du bioMod produisent un gain Ding
+non physique, `apply` bloque la campagne d'identification, tandis que
+`unit_force_gains` et l'audit restent disponibles pour diagnostiquer la
+géométrie mécanique sans contourner cette garde.
 
 La grille des coefficients est celle de l'essai; le simulateur les interpole
 linéairement entre mesures. Vérifier la convergence en densifiant cette grille

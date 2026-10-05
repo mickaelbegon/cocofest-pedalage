@@ -8,7 +8,9 @@ import pytest
 from cocofest.dynamics.reduced_cycling import (
     PeriodicFourierSeries, ReducedCyclingDynamics, ReducedCyclingKinematics,
 )
-from cocofest.identification.cycling_geometry import ReducedGeometryAdapter, planar_endpoint_force
+from cocofest.identification.cycling_geometry import (
+    PlanarEndpointForceAdapter, ReducedGeometryAdapter, planar_endpoint_force,
+)
 from cocofest.identification.synthetic_cycling import generate_trial, simple_mono_muscle_spec
 
 
@@ -106,3 +108,12 @@ def test_planar_endpoint_force_recovers_tangential_and_radial_components():
 def test_planar_endpoint_force_rejects_ambiguous_or_singular_maps(jacobian, torque, message):
     with pytest.raises(ValueError, match=message):
         planar_endpoint_force(jacobian, torque)
+
+
+def test_bilateral_endpoint_constructor_rejects_unsafe_side_or_override():
+    with pytest.raises(ValueError, match="side"):
+        PlanarEndpointForceAdapter.bilateral_arm_from_paths("unused.npz", "unused.bioMod", side="centre")
+    with pytest.raises(ValueError, match="fixes"):
+        PlanarEndpointForceAdapter.bilateral_arm_from_paths(
+            "unused.npz", "unused.bioMod", side="right", endpoint_marker="another_hand"
+        )

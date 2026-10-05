@@ -205,6 +205,36 @@ class PlanarEndpointForceAdapter:
             **kwargs,
         )
 
+    @classmethod
+    def bilateral_arm_from_paths(
+        cls,
+        profile_path: str | Path,
+        model_path: str | Path,
+        *,
+        side: str,
+        **kwargs,
+    ) -> "PlanarEndpointForceAdapter":
+        """Build the safe endpoint mapping for one arm of the bilateral Wu model.
+
+        The mapping is intentionally explicit: it prevents a right-hand
+        Jacobian being combined with a left-arm muscle or the shared crank DoF.
+        The caller must still use a profile created from the same bioMod.
+        """
+        if side not in ("right", "left"):
+            raise ValueError("side must be 'right' or 'left'.")
+        defaults = {
+            "endpoint_marker": f"{side}_hand",
+            "center_marker": "wheel_center",
+            "arm_dof_indices": (0, 1) if side == "right" else (2, 3),
+        }
+        overlap = set(defaults) & set(kwargs)
+        if overlap:
+            raise ValueError(
+                "bilateral_arm_from_paths fixes " + ", ".join(sorted(overlap))
+                + "; instantiate PlanarEndpointForceAdapter directly for a custom bioMod."
+            )
+        return cls.from_paths(profile_path, model_path, **defaults, **kwargs)
+
     @property
     def provenance(self) -> dict:
         return {
@@ -321,40 +351,39 @@ class PlanarEndpointForceAdapter:
         inverse_dynamics = inverse_dynamics_full[list(arm_indices)]
         return marker_jacobian, length_jacobian, tangent, radial, radius, inverse_dynamics
 
-    def apply(
+    def unit_force_gains(
         self,
-        spec: CyclingTrialSpec,
+        muscle_name: str,
+        angle_rad: np.ndarray,
         *,
         omega_rad_s: float | np.ndarray,
         theta_acceleration_rad_s2: float | np.ndarray = 0.0,
-        include_radial: bool = True,
-    ) -> CyclingTrialSpec:
-        """Add model-derived two-axis gains to a single-muscle trial.
+    ) -> dict:
+        """Return the two endpoint-force gains for one bioMod muscle.
 
-        The tangential gain replaces the torque/radius surrogate in the
-        synthetic observation, while the radial gain is calculated from the
-        same endpoint force vector.  No inertial baseline is invented: fit or
-        subtract the no-stimulation trace for the subject separately.
+        This method needs only the mechanical Jacobians.  It therefore remains
+        useful for diagnosing a bioMod whose Ding force--length geometry is
+        invalid; :meth:`apply` still refuses such a profile before it can be
+        used for parameter identification.
         """
-        base = self.geometry.apply(spec, omega_rad_s=omega_rad_s, radial_gain=np.zeros_like(spec.time_s))
+        angle = np.asarray(angle_rad, dtype=float).reshape(-1)
         omega = np.asarray(omega_rad_s, dtype=float)
         alpha = np.asarray(theta_acceleration_rad_s2, dtype=float)
         if omega.ndim == 0:
-            omega = np.full(spec.time_s.shape, omega)
+            omega = np.full(angle.shape, omega)
         if alpha.ndim == 0:
-            alpha = np.full(spec.time_s.shape, alpha)
-        if omega.shape != spec.time_s.shape or alpha.shape != spec.time_s.shape or not np.all(np.isfinite(omega)) or not np.all(np.isfinite(alpha)):
-            raise ValueError("omega_rad_s and theta_acceleration_rad_s2 must be finite scalars or align with time_s.")
-        if spec.muscle_name not in self.geometry.muscle_map:
-            raise ValueError(f"No explicit profile mapping for {spec.muscle_name}.")
+            alpha = np.full(angle.shape, alpha)
+        if (angle.size == 0 or omega.shape != angle.shape or alpha.shape != angle.shape
+                or not all(np.all(np.isfinite(value)) for value in (angle, omega, alpha))):
+            raise ValueError("angle_rad, omega_rad_s and theta_acceleration_rad_s2 must be finite and aligned.")
+        if muscle_name not in self.geometry.muscle_map:
+            raise ValueError(f"No explicit profile mapping for {muscle_name}.")
         model, endpoint_index, center_index, arm_indices, muscle_names, evaluator = self._model_and_indices()
-        muscle_index = muscle_names.index(self.geometry.muscle_map[spec.muscle_name])
+        muscle_index = muscle_names.index(self.geometry.muscle_map[muscle_name])
         tangent_gain, radial_gain, radii = (
-            np.empty(spec.time_s.size),
-            np.empty(spec.time_s.size),
-            np.empty(spec.time_s.size),
+            np.empty(angle.size), np.empty(angle.size), np.empty(angle.size),
         )
-        for index, (theta, speed, acceleration) in enumerate(zip(base.angle_rad + self.geometry.angle_offset_rad, omega, alpha)):
+        for index, (theta, speed, acceleration) in enumerate(zip(angle + self.geometry.angle_offset_rad, omega, alpha)):
             jacobian, length_jacobian, tangent, radial, radii[index], _ = self._sample_maps(
                 float(theta), float(speed), float(acceleration), model=model,
                 endpoint_index=endpoint_index, center_index=center_index,
@@ -365,15 +394,79 @@ class PlanarEndpointForceAdapter:
             endpoint_force = planar_endpoint_force(jacobian, -length_jacobian[muscle_index], condition_limit=self.condition_limit)
             tangent_gain[index] = float(tangent @ endpoint_force)
             radial_gain[index] = float(radial @ endpoint_force)
+        return {
+            "tangential_gain_n_per_n": tangent_gain,
+            "radial_gain_n_per_n": radial_gain,
+            "endpoint_radius_m": radii,
+            "crank_radius_m": float(np.mean(radii)),
+            "provenance": self.provenance,
+        }
+
+    def audit_unit_force_gains(
+        self,
+        muscle_name: str,
+        angle_rad: np.ndarray,
+        *,
+        omega_rad_s: float | np.ndarray,
+    ) -> dict:
+        """Check endpoint virtual work against the saved reduced torque map."""
+        angle = np.asarray(angle_rad, dtype=float).reshape(-1)
+        gains = self.unit_force_gains(
+            muscle_name, angle, omega_rad_s=omega_rad_s,
+        )
+        profile_name = self.geometry.muscle_map.get(muscle_name)
+        if profile_name is None:
+            raise ValueError(f"No explicit profile mapping for {muscle_name}.")
+        index = self.geometry.profile.muscle_names.index(profile_name)
+        reference = np.array(
+            [
+                self.geometry.profile.coefficient_values(value + self.geometry.angle_offset_rad)["muscle_effectiveness"][index]
+                for value in angle
+            ],
+            dtype=float,
+        )
+        endpoint_torque = gains["tangential_gain_n_per_n"] * gains["endpoint_radius_m"]
+        error = endpoint_torque - reference
+        return {
+            "muscle_name": muscle_name,
+            "samples": int(angle.size),
+            "maximum_absolute_torque_error_nm_per_n": float(np.max(np.abs(error))),
+            "root_mean_square_torque_error_nm_per_n": float(np.sqrt(np.mean(error**2))),
+            "endpoint_torque_nm_per_n": endpoint_torque,
+            "reduced_profile_torque_nm_per_n": reference,
+            "provenance": gains["provenance"],
+        }
+
+    def apply(
+        self,
+        spec: CyclingTrialSpec,
+        *,
+        omega_rad_s: float | np.ndarray,
+        theta_acceleration_rad_s2: float | np.ndarray = 0.0,
+        include_radial: bool = True,
+    ) -> CyclingTrialSpec:
+        """Add model-derived two-axis gains to a Ding-identification trial.
+
+        The tangential gain replaces the torque/radius surrogate in the
+        synthetic observation, while the radial gain is calculated from the
+        same endpoint force vector.  No inertial baseline is invented: fit or
+        subtract the no-stimulation trace for the subject separately.
+        """
+        base = self.geometry.apply(spec, omega_rad_s=omega_rad_s, radial_gain=np.zeros_like(spec.time_s))
+        gains = self.unit_force_gains(
+            spec.muscle_name, spec.angle_rad, omega_rad_s=omega_rad_s,
+            theta_acceleration_rad_s2=theta_acceleration_rad_s2,
+        )
+        radii = gains["endpoint_radius_m"]
         if not np.allclose(radii, radii[0], atol=1e-9, rtol=1e-7):
             raise ValueError("bioMod endpoint radius changes along the trial; a fixed crank-radius observation is invalid.")
         return replace(
             base,
             # Use the physical radius, not the generic synthetic default.  It
             # keeps Ft * r == muscle torque by construction.
-            crank_radius_m=float(radii[0]),
-            moment_arm_m=tangent_gain * radii,
-            radial_gain=radial_gain if include_radial else None,
+            crank_radius_m=gains["crank_radius_m"],
+            moment_arm_m=gains["tangential_gain_n_per_n"] * gains["crank_radius_m"],
+            radial_gain=gains["radial_gain_n_per_n"] if include_radial else None,
         )
 
     def force_from_full_dynamics(
@@ -410,7 +503,7 @@ class PlanarEndpointForceAdapter:
         for index, values in enumerate(zip(theta, omega, alpha, forces)):
             angle, speed, acceleration, sample_forces = values
             jacobian, length_jacobian, tangent, radial, _, inverse_dynamics = self._sample_maps(
-                float(angle), float(speed), float(acceleration), model=model,
+                float(angle + self.geometry.angle_offset_rad), float(speed), float(acceleration), model=model,
                 endpoint_index=endpoint_index, center_index=center_index,
                 arm_indices=arm_indices, muscle_names=names, evaluator=evaluator,
             )
