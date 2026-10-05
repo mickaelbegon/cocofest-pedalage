@@ -39,12 +39,32 @@ Ding non positifs sont rejetés. Les bras signés ou nuls sont physiquement
 possibles et conservés. Le terme passif légèrement négatif à certaines
 longueurs est conservé pour reproduire exactement la loi du dépôt.
 
-Le profil réduit décrit le couple musculaire généralisé. Il ne suffit pas à
-déterminer les réactions radiales au capteur ni les efforts provenant du
-support, de la gravité ou du moteur. Fournir séparément une calibration de
-`radial_gain` (ou un modèle de réactions), ainsi que les baselines mesurées.
-Un essai synthétique deux axes exige cette projection radiale explicite : le
-gain constant de démonstration n'est pas réutilisé automatiquement.
+Le profil réduit décrit le couple musculaire généralisé. Pour le modèle
+unilatéral à deux DDL de bras, `PlanarEndpointForceAdapter` complète ce profil
+avec la Jacobienne du marqueur `hand` et l'inverse dynamique du bioMod. Il
+résout `J_hand.T F = tau` et fournit donc directement la force tangentielle et
+radiale appliquée par le bras au pédalier :
+
+```python
+from cocofest.identification.cycling_geometry import PlanarEndpointForceAdapter
+
+endpoint = PlanarEndpointForceAdapter.from_paths(
+    "reduced-cycling-fourier12.npz",
+    "examples/msk_models/Wu/Modified_Wu_Shoulder_Model_Cycling.bioMod",
+    # nécessaire si le profil unilatéral emploie les noms sans préfixe
+    muscle_map={"right_Biceps": "Biceps"},
+)
+spec_2d = endpoint.apply(spec, omega_rad_s=-2 * 3.141592653589793)
+```
+
+La résolution est refusée près d'une singularité du bras. Elle s'applique à
+une chaîne de bras indépendante (deux DDL, deux axes). Pour la version
+bilatérale, instancier un adaptateur par bras en indiquant explicitement les
+deux DDL et le marqueur de la main correspondants. Les baselines de force
+totale restent à mesurer ou à calculer avec `force_from_full_dynamics` à partir
+de **toutes** les forces musculaires et de la cinématique connue; un couple
+résiduel inconnu ne doit pas être absorbé artificiellement dans la force de
+contact.
 
 La grille des coefficients est celle de l'essai; le simulateur les interpole
 linéairement entre mesures. Vérifier la convergence en densifiant cette grille

@@ -8,7 +8,7 @@ import pytest
 from cocofest.dynamics.reduced_cycling import (
     PeriodicFourierSeries, ReducedCyclingDynamics, ReducedCyclingKinematics,
 )
-from cocofest.identification.cycling_geometry import ReducedGeometryAdapter
+from cocofest.identification.cycling_geometry import ReducedGeometryAdapter, planar_endpoint_force
 from cocofest.identification.synthetic_cycling import generate_trial, simple_mono_muscle_spec
 
 
@@ -84,3 +84,25 @@ def test_corrupt_or_nonphysical_profile_rejected(fault):
         reduced.muscle_geometry.offset[2] = 1e8
     with pytest.raises(ValueError, match="geometry|gain"):
         ReducedGeometryAdapter(reduced).apply(simple_mono_muscle_spec("right_Biceps"), omega_rad_s=-2)
+
+
+def test_planar_endpoint_force_recovers_tangential_and_radial_components():
+    # Columns are the two arm DoFs; J.T maps the Cartesian endpoint force to
+    # the generalized torque balanced by inverse dynamics.
+    jacobian = np.array([[0.20, -0.10], [0.05, 0.30]])
+    expected_force = np.array([12.0, -7.0])
+    recovered = planar_endpoint_force(jacobian, jacobian.T @ expected_force)
+    np.testing.assert_allclose(recovered, expected_force, atol=1e-13)
+
+
+@pytest.mark.parametrize(
+    "jacobian, torque, message",
+    [
+        (np.ones((2, 3)), np.ones(3), "exactly two"),
+        (np.array([[1.0, 2.0], [2.0, 4.0]]), np.ones(2), "singular"),
+        (np.ones((3, 2)), np.ones(2), "shape"),
+    ],
+)
+def test_planar_endpoint_force_rejects_ambiguous_or_singular_maps(jacobian, torque, message):
+    with pytest.raises(ValueError, match=message):
+        planar_endpoint_force(jacobian, torque)

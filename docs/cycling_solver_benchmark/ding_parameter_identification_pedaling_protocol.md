@@ -133,8 +133,10 @@ Le prototype versionné sépare quatre composants :
   borné, puis bloque les paramètres de force avant l'ajustement fatigue.
 - `cocofest.identification.cycling_geometry` convertit un profil réduit du
   bioMod en bras de levier signé et gain force--longueur/vitesse à chaque
-  phase; la force radiale reste une observation du capteur, pas une grandeur
-  déductible du couple.
+  phase. Son adaptateur `PlanarEndpointForceAdapter` utilise aussi la
+  Jacobienne du marqueur de la main et la dynamique inverse des deux DDL du
+  bras pour obtenir les composantes tangentielle et radiale au pédalier, dans
+  la convention « force appliquée par le bras au pédalier ».
 - `cocofest.identification.uncertainty` rééchantillonne des essais/blocs
   complets et propage les réajustements force vers fatigue avant de former un
   ensemble de paramètres pour le design suivant.
@@ -148,7 +150,9 @@ temporelle mal modélisée. Les données corrélées doivent être préblanchies
 sous-échantillonnées avant l'ajustement. De même, le générateur conserve une
 géométrie constante par défaut uniquement pour les démos : les essais réels
 doivent utiliser l'adaptateur du profil réduit, avec une cadence cohérente avec
-l'horloge et l'orientation du pédalage.
+l'horloge et l'orientation du pédalage. Pour une mesure radiale, employer
+l'adaptateur de force terminale et vérifier son conditionnement; il ne faut
+pas remplacer des couples résiduels inconnus par une force de contact fictive.
 
 ## Livrables par participant
 

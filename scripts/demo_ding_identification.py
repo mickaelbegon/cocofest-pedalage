@@ -4,8 +4,8 @@ Example:
     python scripts/demo_ding_identification.py --two-axis --output /tmp/ding-demo.json
 
 The default mechanical projection is constant and illustrative. Supply a saved
-reduced cycling profile to exercise task-dependent tangential geometry; radial
-gain in the two-axis mode remains a separately supplied example calibration.
+reduced cycling profile to exercise task-dependent geometry. Supplying its
+source bioMod derives the two-axis endpoint-force map by inverse dynamics.
 """
 
 from __future__ import annotations
@@ -30,6 +30,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="Saved reduced cycling geometry profile (.npz)")
     parser.add_argument("--profile-muscle-name",
                         help="Explicit name in a unilateral profile, e.g. Biceps")
+    parser.add_argument("--biomod", type=Path,
+                        help="Source bioMod matching --reduced-profile; enables endpoint-force geometry")
     parser.add_argument("--output", type=Path, required=True, help="New JSON report path")
     args = parser.parse_args(argv)
     if args.output.exists():
@@ -37,6 +39,7 @@ def main(argv: list[str] | None = None) -> int:
     result = run_demo(
         muscle=args.muscle, two_axis=args.two_axis, seed=args.seed,
         profile_path=args.reduced_profile, profile_muscle_name=args.profile_muscle_name,
+        model_path=args.biomod,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2, allow_nan=False) + "\n", encoding="utf-8")

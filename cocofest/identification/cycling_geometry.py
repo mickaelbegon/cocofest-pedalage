@@ -113,3 +113,316 @@ class ReducedGeometryAdapter:
                 raise ValueError(f"Nonphysical Ding mechanical gain at sample {sample}.")
             moment_arm[sample] = effectiveness[index]
         return replace(spec, moment_arm_m=moment_arm, mechanical_gain=gain, radial_gain=radial_gain)
+
+
+def planar_endpoint_force(
+    endpoint_jacobian_xy: np.ndarray,
+    generalized_torque: np.ndarray,
+    *,
+    condition_limit: float = 1e8,
+) -> np.ndarray:
+    """Recover a planar endpoint force from the corresponding joint torque.
+
+    ``endpoint_jacobian_xy`` maps the selected joint velocity to the endpoint
+    x/y velocity.  Consequently ``J.T @ force == generalized_torque``.  The
+    helper deliberately rejects an under-determined endpoint instead of
+    silently applying a pseudo-inverse: the radial component is meaningful
+    only when the two arm DoFs span the two measured Cartesian components.
+    """
+    jacobian = np.asarray(endpoint_jacobian_xy, dtype=float)
+    torque = np.asarray(generalized_torque, dtype=float).reshape(-1)
+    if jacobian.ndim != 2 or jacobian.shape[0] != 2:
+        raise ValueError("endpoint_jacobian_xy must have shape (2, selected_dofs).")
+    if jacobian.shape[1] != torque.size or not np.all(np.isfinite(jacobian)) or not np.all(np.isfinite(torque)):
+        raise ValueError("Endpoint Jacobian and generalized torque must be finite and aligned.")
+    if not np.isfinite(condition_limit) or condition_limit <= 1:
+        raise ValueError("condition_limit must be finite and greater than one.")
+    map_to_torque = jacobian.T
+    if map_to_torque.shape != (2, 2):
+        raise ValueError(
+            "A two-axis endpoint force requires exactly two selected arm DoFs; "
+            "use a constrained inverse-dynamics model for redundant arms."
+        )
+    condition = np.linalg.cond(map_to_torque)
+    if not np.isfinite(condition) or condition > condition_limit:
+        raise ValueError(f"Endpoint Jacobian is singular or ill-conditioned (condition={condition:.3g}).")
+    force = np.linalg.solve(map_to_torque, torque)
+    if not np.all(np.isfinite(force)):
+        raise ValueError("Endpoint-force solve returned non-finite values.")
+    return force
+
+
+@dataclass(frozen=True)
+class PlanarEndpointForceAdapter:
+    """Derive tangential and radial pedal-force observations from a bioMod.
+
+    The full bioMod supplies the hand-marker Jacobian and the muscle-length
+    Jacobian.  For each point on the reduced contact manifold, a unit muscle
+    force generates a joint torque ``-dL/dq``.  Solving ``J_hand.T F = tau``
+    over the two arm DoFs yields the force *applied by the arm to the pedal*.
+    This is a physical two-axis observation map, unlike a free radial gain.
+
+    It is intentionally limited to an independently identified arm (two arm
+    DoFs and one planar endpoint).  For the bilateral coupled model, create a
+    dedicated adapter per arm with the matching two DoFs and hand marker.  A
+    dynamic total contact force additionally requires all muscle forces and
+    residual torques; ``force_from_full_dynamics`` exposes that calculation.
+    """
+
+    geometry: ReducedGeometryAdapter
+    model_path: Path
+    endpoint_marker: str = "hand"
+    center_marker: str = "global_wheel_center"
+    arm_dof_indices: tuple[int, int] | None = None
+    condition_limit: float = 1e8
+
+    def __post_init__(self) -> None:
+        path = Path(self.model_path)
+        if not path.is_file():
+            raise ValueError(f"bioMod model does not exist: {path}")
+        if not np.isfinite(self.condition_limit) or self.condition_limit <= 1:
+            raise ValueError("condition_limit must be finite and greater than one.")
+        # Fail early if a profile from another bioMod is accidentally paired
+        # with this endpoint geometry.
+        self.geometry.profile.validate_source_model(path)
+        object.__setattr__(self, "model_path", path)
+
+    @classmethod
+    def from_paths(
+        cls,
+        profile_path: str | Path,
+        model_path: str | Path,
+        **kwargs,
+    ) -> "PlanarEndpointForceAdapter":
+        geometry_kwargs = {
+            name: kwargs.pop(name)
+            for name in ("muscle_map", "angle_offset_rad")
+            if name in kwargs
+        }
+        return cls(
+            ReducedGeometryAdapter.load(profile_path, **geometry_kwargs),
+            Path(model_path),
+            **kwargs,
+        )
+
+    @property
+    def provenance(self) -> dict:
+        return {
+            **self.geometry.provenance,
+            "kind": "biomod_planar_endpoint_inverse_dynamics",
+            "model_path": str(self.model_path),
+            "endpoint_marker": self.endpoint_marker,
+            "center_marker": self.center_marker,
+            "arm_dof_indices": None if self.arm_dof_indices is None else list(self.arm_dof_indices),
+            "force_convention": "force applied by arm to pedal",
+            "radial_gain": "derived from endpoint Jacobian and muscle torque",
+        }
+
+    def _model_and_indices(self):
+        try:
+            import biorbd
+        except ImportError:  # source-built Linux uses the CasADi backend
+            import biorbd_casadi as biorbd
+        model = biorbd.Model(str(self.model_path))
+        marker_names = [model.markerNames()[index].to_string() for index in range(model.nbMarkers())]
+        if self.endpoint_marker not in marker_names or self.center_marker not in marker_names:
+            raise ValueError(
+                f"bioMod must contain endpoint '{self.endpoint_marker}' and centre '{self.center_marker}'."
+            )
+        arm_indices = (
+            tuple(index for index in range(model.nbQ()) if index != self.geometry.profile.crank_torque_dof_index)
+            if self.arm_dof_indices is None
+            else tuple(self.arm_dof_indices)
+        )
+        if len(arm_indices) != 2 or len(set(arm_indices)) != 2 or min(arm_indices) < 0 or max(arm_indices) >= model.nbQ():
+            raise ValueError("arm_dof_indices must identify exactly two valid, distinct arm DoFs.")
+        if self.geometry.profile.crank_torque_dof_index in arm_indices:
+            raise ValueError("arm_dof_indices must not include the crank DoF.")
+        names = [model.muscle(index).name().to_string() for index in range(model.nbMuscles())]
+        profile_names = self.geometry.profile.muscle_names
+        missing = set(self.geometry.muscle_map.values()) - set(names)
+        if missing:
+            raise ValueError(f"Profile muscles missing from bioMod: {', '.join(sorted(missing))}.")
+        evaluator = None
+        # biorbd_casadi otherwise rebuilds the same expression graph for every
+        # measurement.  Compile the four required quantities once; retaining a
+        # numerical-biorbd fallback keeps this module usable in both setups.
+        try:
+            from casadi import Function, MX
+
+            q = MX.sym("endpoint_q", model.nbQ())
+            qdot = MX.sym("endpoint_qdot", model.nbQdot())
+            qddot = MX.sym("endpoint_qddot", model.nbQddot())
+
+            def symbolic(value):
+                return value.to_mx() if hasattr(value, "to_mx") else value
+
+            markers = model.markers(q)
+            jacobian = model.markersJacobian(q)[marker_names.index(self.endpoint_marker)]
+            evaluator = Function(
+                "planar_endpoint_geometry",
+                [q, qdot, qddot],
+                [
+                    symbolic(markers[marker_names.index(self.endpoint_marker)]),
+                    symbolic(markers[marker_names.index(self.center_marker)]),
+                    symbolic(jacobian),
+                    symbolic(model.musclesLengthJacobian(q)),
+                    symbolic(model.InverseDynamics(q, qdot, qddot)),
+                ],
+            )
+        except (ImportError, AttributeError, RuntimeError, TypeError):
+            pass
+        return (
+            model,
+            marker_names.index(self.endpoint_marker),
+            marker_names.index(self.center_marker),
+            arm_indices,
+            names,
+            evaluator,
+        )
+
+    @staticmethod
+    def _array(value) -> np.ndarray:
+        if hasattr(value, "to_array"):
+            value = value.to_array()
+        elif hasattr(value, "to_mx"):
+            from casadi import evalf
+            value = evalf(value.to_mx())
+        return np.asarray(value, dtype=float)
+
+    def _sample_maps(self, theta: float, omega: float, theta_acceleration: float, *, model, endpoint_index: int,
+                     center_index: int, arm_indices: tuple[int, int], muscle_names: list[str], evaluator=None):
+        q, qdot, qddot = self.geometry.profile.kinematics.generalized_kinematics(theta, omega, theta_acceleration)
+        if evaluator is None:
+            markers = model.markers(q)
+            endpoint = self._array(markers[endpoint_index]).reshape(-1)[:2]
+            centre = self._array(markers[center_index]).reshape(-1)[:2]
+            full_marker_jacobian = self._array(model.markersJacobian(q)[endpoint_index])
+            full_length_jacobian = self._array(model.musclesLengthJacobian(q))
+            inverse_dynamics_full = self._array(model.InverseDynamics(q, qdot, qddot)).reshape(-1)
+        else:
+            endpoint, centre, full_marker_jacobian, full_length_jacobian, inverse_dynamics_full = (
+                self._array(value) for value in evaluator(q, qdot, qddot)
+            )
+            endpoint = endpoint.reshape(-1)[:2]
+            centre = centre.reshape(-1)[:2]
+        radial = endpoint - centre
+        radius = float(np.linalg.norm(radial))
+        if not np.isfinite(radius) or radius <= 1e-9:
+            raise ValueError("Endpoint and crank centre coincide; radial force is undefined.")
+        radial /= radius
+        marker_jacobian = full_marker_jacobian[:2, list(arm_indices)]
+        endpoint_velocity_per_theta = full_marker_jacobian[:2, :] @ self.geometry.profile.kinematics.tangent(theta)
+        tangent_norm = float(np.linalg.norm(endpoint_velocity_per_theta))
+        if not np.isfinite(tangent_norm) or tangent_norm <= 1e-9:
+            raise ValueError("Endpoint has zero crank-tangent velocity; tangential force is undefined.")
+        tangent = endpoint_velocity_per_theta / tangent_norm
+        length_jacobian = full_length_jacobian[:, list(arm_indices)]
+        inverse_dynamics = inverse_dynamics_full[list(arm_indices)]
+        return marker_jacobian, length_jacobian, tangent, radial, radius, inverse_dynamics
+
+    def apply(
+        self,
+        spec: CyclingTrialSpec,
+        *,
+        omega_rad_s: float | np.ndarray,
+        theta_acceleration_rad_s2: float | np.ndarray = 0.0,
+        include_radial: bool = True,
+    ) -> CyclingTrialSpec:
+        """Add model-derived two-axis gains to a single-muscle trial.
+
+        The tangential gain replaces the torque/radius surrogate in the
+        synthetic observation, while the radial gain is calculated from the
+        same endpoint force vector.  No inertial baseline is invented: fit or
+        subtract the no-stimulation trace for the subject separately.
+        """
+        base = self.geometry.apply(spec, omega_rad_s=omega_rad_s, radial_gain=np.zeros_like(spec.time_s))
+        omega = np.asarray(omega_rad_s, dtype=float)
+        alpha = np.asarray(theta_acceleration_rad_s2, dtype=float)
+        if omega.ndim == 0:
+            omega = np.full(spec.time_s.shape, omega)
+        if alpha.ndim == 0:
+            alpha = np.full(spec.time_s.shape, alpha)
+        if omega.shape != spec.time_s.shape or alpha.shape != spec.time_s.shape or not np.all(np.isfinite(omega)) or not np.all(np.isfinite(alpha)):
+            raise ValueError("omega_rad_s and theta_acceleration_rad_s2 must be finite scalars or align with time_s.")
+        if spec.muscle_name not in self.geometry.muscle_map:
+            raise ValueError(f"No explicit profile mapping for {spec.muscle_name}.")
+        model, endpoint_index, center_index, arm_indices, muscle_names, evaluator = self._model_and_indices()
+        muscle_index = muscle_names.index(self.geometry.muscle_map[spec.muscle_name])
+        tangent_gain, radial_gain, radii = (
+            np.empty(spec.time_s.size),
+            np.empty(spec.time_s.size),
+            np.empty(spec.time_s.size),
+        )
+        for index, (theta, speed, acceleration) in enumerate(zip(base.angle_rad + self.geometry.angle_offset_rad, omega, alpha)):
+            jacobian, length_jacobian, tangent, radial, radii[index], _ = self._sample_maps(
+                float(theta), float(speed), float(acceleration), model=model,
+                endpoint_index=endpoint_index, center_index=center_index,
+                arm_indices=arm_indices, muscle_names=muscle_names, evaluator=evaluator,
+            )
+            # tau_muscle = -dL/dq * F.  This is the action exerted by the arm
+            # on the pedal, so its sign agrees with the sensor convention.
+            endpoint_force = planar_endpoint_force(jacobian, -length_jacobian[muscle_index], condition_limit=self.condition_limit)
+            tangent_gain[index] = float(tangent @ endpoint_force)
+            radial_gain[index] = float(radial @ endpoint_force)
+        if not np.allclose(radii, radii[0], atol=1e-9, rtol=1e-7):
+            raise ValueError("bioMod endpoint radius changes along the trial; a fixed crank-radius observation is invalid.")
+        return replace(
+            base,
+            # Use the physical radius, not the generic synthetic default.  It
+            # keeps Ft * r == muscle torque by construction.
+            crank_radius_m=float(radii[0]),
+            moment_arm_m=tangent_gain * radii,
+            radial_gain=radial_gain if include_radial else None,
+        )
+
+    def force_from_full_dynamics(
+        self,
+        theta_rad: np.ndarray,
+        omega_rad_s: np.ndarray,
+        muscle_forces_n: np.ndarray,
+        *,
+        theta_acceleration_rad_s2: np.ndarray | float = 0.0,
+    ) -> dict:
+        """Recover total two-axis pedal force from a measured/modelled muscle trace.
+
+        The returned force uses the ``arm -> pedal`` convention.  It includes
+        the inertial/gravitational baseline from inverse dynamics and should be
+        used for comparing an actual two-axis sensor trace.  All muscles in
+        the bioMod must be supplied; unmodelled voluntary/residual torques are
+        deliberately not hidden in the result.
+        """
+        theta = np.asarray(theta_rad, dtype=float).reshape(-1)
+        omega = np.asarray(omega_rad_s, dtype=float)
+        alpha = np.asarray(theta_acceleration_rad_s2, dtype=float)
+        if omega.ndim == 0:
+            omega = np.full(theta.shape, omega)
+        if alpha.ndim == 0:
+            alpha = np.full(theta.shape, alpha)
+        model, endpoint_index, center_index, arm_indices, names, evaluator = self._model_and_indices()
+        forces = np.asarray(muscle_forces_n, dtype=float)
+        if theta.size == 0 or omega.shape != theta.shape or alpha.shape != theta.shape or forces.shape != (theta.size, len(names)):
+            raise ValueError("theta, omega, acceleration and all bioMod muscle forces must align by sample.")
+        if not all(np.all(np.isfinite(value)) for value in (theta, omega, alpha, forces)):
+            raise ValueError("Dynamics inputs must be finite.")
+        cartesian = np.empty((theta.size, 2))
+        tangent_values, radial_values = np.empty(theta.size), np.empty(theta.size)
+        for index, values in enumerate(zip(theta, omega, alpha, forces)):
+            angle, speed, acceleration, sample_forces = values
+            jacobian, length_jacobian, tangent, radial, _, inverse_dynamics = self._sample_maps(
+                float(angle), float(speed), float(acceleration), model=model,
+                endpoint_index=endpoint_index, center_index=center_index,
+                arm_indices=arm_indices, muscle_names=names, evaluator=evaluator,
+            )
+            muscle_torque = -length_jacobian.T @ sample_forces
+            cartesian[index] = planar_endpoint_force(
+                jacobian, muscle_torque - inverse_dynamics, condition_limit=self.condition_limit
+            )
+            tangent_values[index] = tangent @ cartesian[index]
+            radial_values[index] = radial @ cartesian[index]
+        return {
+            "force_arm_on_pedal_n": cartesian,
+            "tangential_n": tangent_values,
+            "radial_n": radial_values,
+            "provenance": self.provenance,
+        }

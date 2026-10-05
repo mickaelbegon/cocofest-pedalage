@@ -1,8 +1,9 @@
 """Small, reproducible end-to-end demonstration of staged Ding identification.
 
-The default geometry and noise are synthetic.  A saved reduced bioMod profile
-can replace the tangential projection and Ding mechanical gain, while the
-radial sensor map remains an independently supplied calibration.
+The default geometry and noise are synthetic. A saved reduced bioMod profile
+can replace the tangential projection and Ding mechanical gain. Supplying the
+source bioMod additionally derives the two-axis endpoint-force map from the
+hand Jacobian and inverse dynamics.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from pathlib import Path
 import numpy as np
 
 from .cycling_design import design_trial_catalogue
-from .cycling_geometry import ReducedGeometryAdapter
+from .cycling_geometry import PlanarEndpointForceAdapter, ReducedGeometryAdapter
 from .sequential import ParameterSpec, TrialObservation, fit_parameters
 from .synthetic_cycling import (
     CyclingTrialSpec, SensorNoise, default_ding_parameters, generate_trial,
@@ -40,7 +41,8 @@ def _fatigue_spec(muscle: str, *, drive_s: float, recovery_s: float,
 
 def run_demo(*, muscle: str = "right_Biceps", two_axis: bool = False,
              seed: int = 7, profile_path: str | Path | None = None,
-             profile_muscle_name: str | None = None) -> dict:
+             profile_muscle_name: str | None = None,
+             model_path: str | Path | None = None) -> dict:
     """Design, synthesize, estimate and validate one muscle's force and fatigue.
 
     The local D-optimal design uses an approximate parameter ensemble, never
@@ -53,11 +55,23 @@ def run_demo(*, muscle: str = "right_Biceps", two_axis: bool = False,
     adapter = None
     if profile_path is not None:
         mapping = {muscle: profile_muscle_name} if profile_muscle_name else None
-        adapter = ReducedGeometryAdapter.load(profile_path, muscle_map=mapping)
+        adapter = (
+            PlanarEndpointForceAdapter.from_paths(
+                profile_path, model_path, muscle_map=mapping,
+            )
+            if model_path is not None
+            else ReducedGeometryAdapter.load(profile_path, muscle_map=mapping)
+        )
+    elif model_path is not None:
+        raise ValueError("model_path requires profile_path so source-model provenance can be checked.")
 
     def geometry(spec: CyclingTrialSpec) -> CyclingTrialSpec:
         if adapter is None:
             return spec
+        if isinstance(adapter, PlanarEndpointForceAdapter):
+            return adapter.apply(
+                spec, omega_rad_s=2 * np.pi / 4, include_radial=two_axis,
+            )
         return adapter.apply(spec, omega_rad_s=2 * np.pi / 4,
                              radial_gain=spec.radial_gain)
 
@@ -160,6 +174,10 @@ def run_demo(*, muscle: str = "right_Biceps", two_axis: bool = False,
             "local Fisher information; independent Gaussian sensor samples",
             "each selected fatigue block starts fully recovered",
             "fatigue covariance is conditional on the frozen force estimate",
-            "radial gain requires separate sensor or reaction-force calibration",
+            (
+                "radial gain comes from the bioMod endpoint inverse dynamics"
+                if isinstance(adapter, PlanarEndpointForceAdapter)
+                else "radial gain requires separate sensor or reaction-force calibration"
+            ),
         ],
     }
