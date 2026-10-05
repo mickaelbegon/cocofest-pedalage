@@ -175,6 +175,7 @@ class PlanarEndpointForceAdapter:
     center_marker: str = "global_wheel_center"
     arm_dof_indices: tuple[int, int] | None = None
     condition_limit: float = 1e8
+    radius_relative_tolerance: float = 1e-4
 
     def __post_init__(self) -> None:
         path = Path(self.model_path)
@@ -182,6 +183,8 @@ class PlanarEndpointForceAdapter:
             raise ValueError(f"bioMod model does not exist: {path}")
         if not np.isfinite(self.condition_limit) or self.condition_limit <= 1:
             raise ValueError("condition_limit must be finite and greater than one.")
+        if not np.isfinite(self.radius_relative_tolerance) or not 0 < self.radius_relative_tolerance < 1:
+            raise ValueError("radius_relative_tolerance must lie strictly between zero and one.")
         # Fail early if a profile from another bioMod is accidentally paired
         # with this endpoint geometry.
         self.geometry.profile.validate_source_model(path)
@@ -244,6 +247,7 @@ class PlanarEndpointForceAdapter:
             "endpoint_marker": self.endpoint_marker,
             "center_marker": self.center_marker,
             "arm_dof_indices": None if self.arm_dof_indices is None else list(self.arm_dof_indices),
+            "radius_relative_tolerance": float(self.radius_relative_tolerance),
             "force_convention": "force applied by arm to pedal",
             "radial_gain": "derived from endpoint Jacobian and muscle torque",
         }
@@ -502,14 +506,19 @@ class PlanarEndpointForceAdapter:
             theta_acceleration_rad_s2=theta_acceleration_rad_s2,
         )
         radii = gains["endpoint_radius_m"]
-        if not np.allclose(radii, radii[0], atol=1e-9, rtol=1e-7):
-            raise ValueError("bioMod endpoint radius changes along the trial; a fixed crank-radius observation is invalid.")
+        mean_radius = float(np.mean(radii))
+        radius_variation = float(np.max(np.abs(radii - mean_radius)) / mean_radius)
+        if radius_variation > self.radius_relative_tolerance:
+            raise ValueError(
+                "bioMod endpoint radius changes along the trial beyond the "
+                f"allowed {self.radius_relative_tolerance:.3g} relative fit error."
+            )
         return replace(
             base,
             # Use the physical radius, not the generic synthetic default.  It
             # keeps Ft * r == muscle torque by construction.
-            crank_radius_m=gains["crank_radius_m"],
-            moment_arm_m=gains["tangential_gain_n_per_n"] * gains["crank_radius_m"],
+            crank_radius_m=mean_radius,
+            moment_arm_m=gains["tangential_gain_n_per_n"] * mean_radius,
             radial_gain=gains["radial_gain_n_per_n"] if include_radial else None,
         )
 

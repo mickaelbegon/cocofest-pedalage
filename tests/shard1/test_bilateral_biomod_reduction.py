@@ -7,6 +7,8 @@ from cocofest.dynamics.reduced_cycling import (
     build_reduced_cycling_dynamics,
     solve_bilateral_cycling_kinematics,
 )
+from cocofest.identification.cycling_geometry import PlanarEndpointForceAdapter
+from cocofest.identification.synthetic_cycling import simple_mono_muscle_spec
 
 
 MODEL = (
@@ -30,7 +32,7 @@ def test_bilateral_biomod_reduces_two_hands_on_one_crank():
     np.testing.assert_allclose(q[4, -1] - q[4, 0], -2.0 * np.pi, atol=1e-12)
 
 
-def test_bilateral_biomod_profile_contains_eight_physical_muscles():
+def test_bilateral_biomod_profile_contains_eight_physical_muscles_and_positive_fibres(tmp_path):
     pytest.importorskip("biorbd_casadi")
     reduced, audit = build_reduced_cycling_dynamics(
         MODEL, sample_count=41, kinematic_order=8, dynamics_order=8
@@ -44,3 +46,22 @@ def test_bilateral_biomod_profile_contains_eight_physical_muscles():
     }
     assert reduced.crank_torque_dof_index == 4
     assert reduced.coefficient_values(0.0)["effective_inertia"] > 0.0
+    profile_path = reduced.save(tmp_path / "bilateral-reduced.npz")
+    adapter = PlanarEndpointForceAdapter.bilateral_arm_from_paths(
+        profile_path, MODEL, side="right"
+    )
+    angles = np.linspace(
+        reduced.kinematics.theta_origin,
+        reduced.kinematics.theta_origin + reduced.kinematics.direction * 2 * np.pi,
+        31,
+    )
+    fibre_audit = adapter.audit_fibre_lengths(angles)
+    assert fibre_audit["all_fibre_lengths_strictly_positive"]
+    assert fibre_audit["invalid_muscles"] == []
+
+    mapped = adapter.apply(
+        simple_mono_muscle_spec("right_Biceps", duration_s=0.1, sample_rate_hz=25),
+        omega_rad_s=-2.0 * np.pi,
+    )
+    assert np.all(mapped.mechanical_gain > 0.0)
+    assert mapped.radial_gain is not None

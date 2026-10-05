@@ -154,6 +154,13 @@ muscle right_Delt_ant
     pennationAngle 0.383972435439
 endmuscle
 
+viapoint right_Delt_ant_P3
+    parent thorax
+    muscle right_Delt_ant
+    musclegroup right_shoulder_to_humerus
+    position 0.0065313002029060031 -0.0094779193120770842 0.13982975906663883
+endviapoint
+
 muscle right_Delt_post
     type degroote
     statetype degroote
@@ -165,6 +172,20 @@ muscle right_Delt_post
     tendonSlackLength 0.0975
     pennationAngle 0.314159265359
 endmuscle
+
+viapoint right_Delt_post_P2
+    parent thorax
+    muscle right_Delt_post
+    musclegroup right_shoulder_to_humerus
+    position -0.062898647187902362 -0.030163357415442696 0.0059772801399230954
+endviapoint
+
+viapoint right_Delt_post_P2_0
+    parent right_humerus
+    muscle right_Delt_post
+    musclegroup right_shoulder_to_humerus
+    position -0.01858449942332752 -0.049701999661954994 0.012320282465481228
+endviapoint
 
 musclegroup right_shoulder_to_ulna
     OriginParent thorax
@@ -183,11 +204,53 @@ muscle right_Biceps
     pennationAngle 0
 endmuscle
 
-viapoint right_Biceps_elbow
+viapoint right_Biceps_P2
     parent right_humerus
     muscle right_Biceps
     musclegroup right_shoulder_to_ulna
-    position -0.025 -0.19 0
+    position 0.0116344 0.029984 -0.0026990899999999999
+endviapoint
+viapoint right_Biceps_P3
+    parent right_humerus
+    muscle right_Biceps
+    musclegroup right_shoulder_to_ulna
+    position 0.0223001 0.018556300000000001 0.00039180299999999998
+endviapoint
+viapoint right_Biceps_P4
+    parent right_humerus
+    muscle right_Biceps
+    musclegroup right_shoulder_to_ulna
+    position 0.029886099999999999 2.17669e-05 0.00016325199999999999
+endviapoint
+viapoint right_Biceps_P5
+    parent right_humerus
+    muscle right_Biceps
+    musclegroup right_shoulder_to_ulna
+    position 0.013506300000000001 -0.041444099999999998 -0.0048757799999999997
+endviapoint
+viapoint right_Biceps_P6
+    parent right_humerus
+    muscle right_Biceps
+    musclegroup right_shoulder_to_ulna
+    position 0.012570400000000001 -0.084564200000000006 -0.0025902500000000001
+endviapoint
+viapoint right_Biceps_P7
+    parent right_humerus
+    muscle right_Biceps
+    musclegroup right_shoulder_to_ulna
+    position 0.018534399999999999 -0.13196099999999999 0.000261203
+endviapoint
+viapoint right_Biceps_P8
+    parent right_humerus
+    muscle right_Biceps
+    musclegroup right_shoulder_to_ulna
+    position 0.0248144 -0.19089400000000001 -0.0068565700000000002
+endviapoint
+viapoint right_Biceps_P9
+    parent right_humerus
+    muscle right_Biceps
+    musclegroup right_shoulder_to_ulna
+    position 0.023584999999999998 -0.29429899999999998 -0.0112797
 endviapoint
 
 musclegroup right_humerus_to_ulna
@@ -207,11 +270,17 @@ muscle right_Triceps
     pennationAngle 0.2094
 endmuscle
 
-viapoint right_Triceps_elbow
+viapoint right_Triceps_P2
     parent right_humerus
     muscle right_Triceps
     musclegroup right_humerus_to_ulna
-    position 0.025 -0.25 0
+    position -0.020547800000000001 -0.26594699999999999 -0.0091203099999999995
+endviapoint
+viapoint right_Triceps_P3
+    parent right_humerus
+    muscle right_Triceps
+    musclegroup right_humerus_to_ulna
+    position -0.018969799999999998 -0.29120699999999999 -0.0131472
 endviapoint
 
 // Left-muscle geometry is the y-reflection of the right chain.
@@ -232,6 +301,13 @@ muscle left_Delt_ant
     pennationAngle 0.383972435439
 endmuscle
 
+viapoint left_Delt_ant_P3
+    parent thorax
+    muscle left_Delt_ant
+    musclegroup left_shoulder_to_humerus
+    position 0.0065313002029060031 0.0094779193120770842 0.13982975906663883
+endviapoint
+
 muscle left_Delt_post
     type degroote
     statetype degroote
@@ -243,6 +319,20 @@ muscle left_Delt_post
     tendonSlackLength 0.0975
     pennationAngle 0.314159265359
 endmuscle
+
+viapoint left_Delt_post_P2
+    parent thorax
+    muscle left_Delt_post
+    musclegroup left_shoulder_to_humerus
+    position -0.062898647187902362 0.030163357415442696 0.0059772801399230954
+endviapoint
+
+viapoint left_Delt_post_P2_0
+    parent left_humerus
+    muscle left_Delt_post
+    musclegroup left_shoulder_to_humerus
+    position -0.01858449942332752 0.049701999661954994 0.012320282465481228
+endviapoint
 
 musclegroup left_shoulder_to_ulna
     OriginParent thorax
@@ -261,11 +351,53 @@ muscle left_Biceps
     pennationAngle 0
 endmuscle
 
-viapoint left_Biceps_elbow
+viapoint left_Biceps_P2
     parent left_humerus
     muscle left_Biceps
     musclegroup left_shoulder_to_ulna
-    position -0.025 0.19 0
+    position 0.0116344 -0.029984 -0.0026990899999999999
+endviapoint
+viapoint left_Biceps_P3
+    parent left_humerus
+    muscle left_Biceps
+    musclegroup left_shoulder_to_ulna
+    position 0.0223001 -0.018556300000000001 0.00039180299999999998
+endviapoint
+viapoint left_Biceps_P4
+    parent left_humerus
+    muscle left_Biceps
+    musclegroup left_shoulder_to_ulna
+    position 0.029886099999999999 -2.17669e-05 0.00016325199999999999
+endviapoint
+viapoint left_Biceps_P5
+    parent left_humerus
+    muscle left_Biceps
+    musclegroup left_shoulder_to_ulna
+    position 0.013506300000000001 0.041444099999999998 -0.0048757799999999997
+endviapoint
+viapoint left_Biceps_P6
+    parent left_humerus
+    muscle left_Biceps
+    musclegroup left_shoulder_to_ulna
+    position 0.012570400000000001 0.084564200000000006 -0.0025902500000000001
+endviapoint
+viapoint left_Biceps_P7
+    parent left_humerus
+    muscle left_Biceps
+    musclegroup left_shoulder_to_ulna
+    position 0.018534399999999999 0.13196099999999999 0.000261203
+endviapoint
+viapoint left_Biceps_P8
+    parent left_humerus
+    muscle left_Biceps
+    musclegroup left_shoulder_to_ulna
+    position 0.0248144 0.19089400000000001 -0.0068565700000000002
+endviapoint
+viapoint left_Biceps_P9
+    parent left_humerus
+    muscle left_Biceps
+    musclegroup left_shoulder_to_ulna
+    position 0.023584999999999998 0.29429899999999998 -0.0112797
 endviapoint
 
 musclegroup left_humerus_to_ulna
@@ -285,9 +417,15 @@ muscle left_Triceps
     pennationAngle 0.2094
 endmuscle
 
-viapoint left_Triceps_elbow
+viapoint left_Triceps_P2
     parent left_humerus
     muscle left_Triceps
     musclegroup left_humerus_to_ulna
-    position 0.025 0.25 0
+    position -0.020547800000000001 0.26594699999999999 -0.0091203099999999995
+endviapoint
+viapoint left_Triceps_P3
+    parent left_humerus
+    muscle left_Triceps
+    musclegroup left_humerus_to_ulna
+    position -0.018969799999999998 0.29120699999999999 -0.0131472
 endviapoint

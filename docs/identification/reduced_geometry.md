@@ -94,10 +94,32 @@ python scripts/audit_bilateral_biomod_geometry.py \
 ```
 
 Le code de sortie 2 signifie qu'au moins une fibre est non positive et bloque
-la campagne. Dans l'état actuel du bioMod bilatéral, ce gate met en évidence
-`right_Delt_post`, `right_Biceps`, `left_Delt_post` et `left_Biceps` : il faut
-restaurer et valider leurs chemins anatomiques (notamment les via-points) avant
-d'employer la dynamique Ding bilatérale pour identifier un participant.
+la campagne.
+
+## Via-points symétriques du modèle bilatéral Wu
+
+Les raccourcis génériques au coude du bioMod bilatéral ont été remplacés par
+les via-points détaillés du modèle Wu unilatéral pour le biceps et le triceps.
+Les points du deltoïde antérieur et postérieur qui manquaient ont aussi été
+restaurés. Le côté gauche est la réflexion exacte du côté droit par rapport au
+plan sagittal : seule la coordonnée latérale `y` change de signe. Comme ce
+bioMod bilatéral compact ne possède ni segment clavicule ni segment scapula,
+les points correspondants du modèle unilatéral sont rattachés au thorax.
+
+Avec 61 positions de manivelle, le gate est maintenant valide : les huit
+longueurs de fibres sont strictement positives. À titre de contrôle, les
+longueurs normalisées parcourent environ `0.70–0.71` (triceps), `1.38–1.49`
+(biceps), `1.67–1.84` (deltoïde antérieur) et `1.71–1.96` (deltoïde
+postérieur). Cette correction rend la géométrie exploitable par la garde Ding,
+mais elle ne constitue pas une calibration anatomique individuelle : origines,
+insertions, longueurs tendineuses et bras de levier doivent encore être validés
+contre des données expérimentales avant toute interprétation physiologique.
+
+Un profil Fourier ajuste nécessairement le cercle de pédalage avec une erreur
+numérique très faible. `PlanarEndpointForceAdapter` accepte donc une variation
+relative de rayon bornée (`1e-4` par défaut), tout en rejetant une variation
+physique du rayon : le rayon moyen est utilisé pour conserver l'identité
+`F_t r = couple musculaire`.
 
 La grille des coefficients est celle de l'essai; le simulateur les interpole
 linéairement entre mesures. Vérifier la convergence en densifiant cette grille
