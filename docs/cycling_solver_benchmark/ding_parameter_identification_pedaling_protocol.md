@@ -131,17 +131,24 @@ Le prototype versionné sépare quatre composants :
   (PW × fréquence) et fatigue (train, récupération, sonde);
 - `cocofest.identification.sequential` réalise l'ajustement MAP gaussien
   borné, puis bloque les paramètres de force avant l'ajustement fatigue.
+- `cocofest.identification.cycling_geometry` convertit un profil réduit du
+  bioMod en bras de levier signé et gain force--longueur/vitesse à chaque
+  phase; la force radiale reste une observation du capteur, pas une grandeur
+  déductible du couple.
+- `cocofest.identification.uncertainty` rééchantillonne des essais/blocs
+  complets et propage les réajustements force vers fatigue avant de former un
+  ensemble de paramètres pour le design suivant.
 
 Le prototype utilise actuellement une résolution moindres carrés bornée et
 des différences finies pour les sensibilités. Son information Fisher est
-locale, fondée sur les données et sur un bruit temporel indépendant. La
-covariance retournée est conditionnelle aux paramètres de force fixés et ne
-doit pas être interprétée comme une incertitude clinique complète. Un bootstrap
-par essai et une propagation de l'incertitude force vers fatigue restent à
-ajouter avant toute estimation sur participant. De même, la géométrie du
-générateur synthétique est constante et seulement démonstrative : une étude
-réelle doit fournir les gains muscle–pédalier dépendants de l'angle et de la
-vitesse depuis le bioMod.
+locale, fondée sur les données et sur un bruit temporel indépendant. Le
+bootstrap par blocs fournit une dispersion empirique et un ensemble à injecter
+dans le design fatigue, mais ne corrige ni un biais de modèle ni une dépendance
+temporelle mal modélisée. Les données corrélées doivent être préblanchies ou
+sous-échantillonnées avant l'ajustement. De même, le générateur conserve une
+géométrie constante par défaut uniquement pour les démos : les essais réels
+doivent utiliser l'adaptateur du profil réduit, avec une cadence cohérente avec
+l'horloge et l'orientation du pédalage.
 
 ## Livrables par participant
 
