@@ -121,6 +121,29 @@ relative de rayon bornée (`1e-4` par défaut), tout en rejetant une variation
 physique du rayon : le rayon moyen est utilisé pour conserver l'identité
 `F_t r = couple musculaire`.
 
+## Prototype bilatéral sagittal
+
+`Modified_Wu_Shoulder_Model_Cycling_Bilateral_Sagittal.bioMod` est un nouveau
+prototype à utiliser explicitement pendant la migration : il ne remplace pas
+le bioMod bilatéral historique ni les profils et benchmarks déjà produits.
+Son repère est `x` avant--arrière, `y` latéral et `z` vertical. Les deux bras
+évoluent dans les plans parallèles `x-z` à `y = -0.10 m` et `y = +0.10 m`; les
+épaules sont donc à la même hauteur. La manivelle, les épaules et les coudes
+tournent autour de `y` (`wheel_rotation_RotY`).
+
+La réduction reconnaît désormais automatiquement cet axe de manivelle et
+projette le moment externe sur `y`. `PlanarEndpointForceAdapter` choisit de la
+même manière les deux composantes de contact orthogonales à cet axe (`x-z`),
+au lieu de supposer `x-y`. Le contact bilatéral ferme à moins de `1e-9 m`; les
+ratios `L_fibre/L_opt` des huit muscles du prototype sont compris entre environ
+`0.59` et `1.23` sur un tour, avec symétrie numérique droite/gauche.
+
+Les origines, insertions et via-points de ce prototype sont une géométrie
+fonctionnelle de transition : ils ont été réglés pour retrouver une plage de
+longueurs comparable au Wu unilatéral. Ils doivent encore être confrontés à
+une géométrie 3D anatomique et à des mesures sujet-spécifiques avant de devenir
+le modèle de production pour l'identification ou les benchmarks.
+
 La grille des coefficients est celle de l'essai; le simulateur les interpole
 linéairement entre mesures. Vérifier la convergence en densifiant cette grille
 avant une campagne d'identification. La provenance fournit le hash bioMod

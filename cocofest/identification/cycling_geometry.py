@@ -259,6 +259,7 @@ class PlanarEndpointForceAdapter:
             import biorbd_casadi as biorbd
         model = biorbd.Model(str(self.model_path))
         marker_names = [model.markerNames()[index].to_string() for index in range(model.nbMarkers())]
+        dof_names = [model.nameDof()[index].to_string() for index in range(model.nbQ())]
         if self.endpoint_marker not in marker_names or self.center_marker not in marker_names:
             raise ValueError(
                 f"bioMod must contain endpoint '{self.endpoint_marker}' and centre '{self.center_marker}'."
@@ -272,6 +273,19 @@ class PlanarEndpointForceAdapter:
             raise ValueError("arm_dof_indices must identify exactly two valid, distinct arm DoFs.")
         if self.geometry.profile.crank_torque_dof_index in arm_indices:
             raise ValueError("arm_dof_indices must not include the crank DoF.")
+        crank_index = self.geometry.profile.crank_torque_dof_index
+        if not 0 <= crank_index < len(dof_names):
+            raise ValueError("The reduced profile has an invalid crank DoF index.")
+        crank_axis = dof_names[crank_index].rsplit("Rot", maxsplit=1)[-1].lower()
+        axis_indices = {"x": 0, "y": 1, "z": 2}
+        if crank_axis not in axis_indices:
+            raise ValueError(
+                "The endpoint-force adapter requires a Cartesian rotational "
+                f"crank DoF, received '{dof_names[crank_index]}'."
+            )
+        plane_indices = tuple(
+            index for index in range(3) if index != axis_indices[crank_axis]
+        )
         names = [model.muscle(index).name().to_string() for index in range(model.nbMuscles())]
         profile_names = self.geometry.profile.muscle_names
         missing = set(self.geometry.muscle_map.values()) - set(names)
@@ -311,6 +325,7 @@ class PlanarEndpointForceAdapter:
             marker_names.index(self.endpoint_marker),
             marker_names.index(self.center_marker),
             arm_indices,
+            plane_indices,
             names,
             evaluator,
         )
@@ -325,12 +340,12 @@ class PlanarEndpointForceAdapter:
         return np.asarray(value, dtype=float)
 
     def _sample_maps(self, theta: float, omega: float, theta_acceleration: float, *, model, endpoint_index: int,
-                     center_index: int, arm_indices: tuple[int, int], muscle_names: list[str], evaluator=None):
+                     center_index: int, arm_indices: tuple[int, int], plane_indices: tuple[int, int], muscle_names: list[str], evaluator=None):
         q, qdot, qddot = self.geometry.profile.kinematics.generalized_kinematics(theta, omega, theta_acceleration)
         if evaluator is None:
             markers = model.markers(q)
-            endpoint = self._array(markers[endpoint_index]).reshape(-1)[:2]
-            centre = self._array(markers[center_index]).reshape(-1)[:2]
+            endpoint = self._array(markers[endpoint_index]).reshape(-1)[list(plane_indices)]
+            centre = self._array(markers[center_index]).reshape(-1)[list(plane_indices)]
             full_marker_jacobian = self._array(model.markersJacobian(q)[endpoint_index])
             full_length_jacobian = self._array(model.musclesLengthJacobian(q))
             inverse_dynamics_full = self._array(model.InverseDynamics(q, qdot, qddot)).reshape(-1)
@@ -338,15 +353,15 @@ class PlanarEndpointForceAdapter:
             endpoint, centre, full_marker_jacobian, full_length_jacobian, inverse_dynamics_full = (
                 self._array(value) for value in evaluator(q, qdot, qddot)
             )
-            endpoint = endpoint.reshape(-1)[:2]
-            centre = centre.reshape(-1)[:2]
+            endpoint = endpoint.reshape(-1)[list(plane_indices)]
+            centre = centre.reshape(-1)[list(plane_indices)]
         radial = endpoint - centre
         radius = float(np.linalg.norm(radial))
         if not np.isfinite(radius) or radius <= 1e-9:
             raise ValueError("Endpoint and crank centre coincide; radial force is undefined.")
         radial /= radius
-        marker_jacobian = full_marker_jacobian[:2, list(arm_indices)]
-        endpoint_velocity_per_theta = full_marker_jacobian[:2, :] @ self.geometry.profile.kinematics.tangent(theta)
+        marker_jacobian = full_marker_jacobian[list(plane_indices), :][:, list(arm_indices)]
+        endpoint_velocity_per_theta = full_marker_jacobian[list(plane_indices), :] @ self.geometry.profile.kinematics.tangent(theta)
         tangent_norm = float(np.linalg.norm(endpoint_velocity_per_theta))
         if not np.isfinite(tangent_norm) or tangent_norm <= 1e-9:
             raise ValueError("Endpoint has zero crank-tangent velocity; tangential force is undefined.")
@@ -382,7 +397,7 @@ class PlanarEndpointForceAdapter:
             raise ValueError("angle_rad, omega_rad_s and theta_acceleration_rad_s2 must be finite and aligned.")
         if muscle_name not in self.geometry.muscle_map:
             raise ValueError(f"No explicit profile mapping for {muscle_name}.")
-        model, endpoint_index, center_index, arm_indices, muscle_names, evaluator = self._model_and_indices()
+        model, endpoint_index, center_index, arm_indices, plane_indices, muscle_names, evaluator = self._model_and_indices()
         muscle_index = muscle_names.index(self.geometry.muscle_map[muscle_name])
         tangent_gain, radial_gain, radii = (
             np.empty(angle.size), np.empty(angle.size), np.empty(angle.size),
@@ -391,7 +406,8 @@ class PlanarEndpointForceAdapter:
             jacobian, length_jacobian, tangent, radial, radii[index], _ = self._sample_maps(
                 float(theta), float(speed), float(acceleration), model=model,
                 endpoint_index=endpoint_index, center_index=center_index,
-                arm_indices=arm_indices, muscle_names=muscle_names, evaluator=evaluator,
+                arm_indices=arm_indices, plane_indices=plane_indices,
+                muscle_names=muscle_names, evaluator=evaluator,
             )
             # tau_muscle = -dL/dq * F.  This is the action exerted by the arm
             # on the pedal, so its sign agrees with the sensor convention.
@@ -452,7 +468,7 @@ class PlanarEndpointForceAdapter:
         angle = np.asarray(angle_rad, dtype=float).reshape(-1)
         if angle.size < 2 or not np.all(np.isfinite(angle)):
             raise ValueError("angle_rad must contain at least two finite samples.")
-        model, _, _, _, names, _ = self._model_and_indices()
+        model, _, _, _, _, names, _ = self._model_and_indices()
         lengths = np.empty((angle.size, len(names)))
         optimal = np.empty(len(names))
         for sample, value in enumerate(angle + self.geometry.angle_offset_rad):
@@ -545,7 +561,7 @@ class PlanarEndpointForceAdapter:
             omega = np.full(theta.shape, omega)
         if alpha.ndim == 0:
             alpha = np.full(theta.shape, alpha)
-        model, endpoint_index, center_index, arm_indices, names, evaluator = self._model_and_indices()
+        model, endpoint_index, center_index, arm_indices, plane_indices, names, evaluator = self._model_and_indices()
         forces = np.asarray(muscle_forces_n, dtype=float)
         if theta.size == 0 or omega.shape != theta.shape or alpha.shape != theta.shape or forces.shape != (theta.size, len(names)):
             raise ValueError("theta, omega, acceleration and all bioMod muscle forces must align by sample.")
@@ -558,7 +574,8 @@ class PlanarEndpointForceAdapter:
             jacobian, length_jacobian, tangent, radial, _, inverse_dynamics = self._sample_maps(
                 float(angle + self.geometry.angle_offset_rad), float(speed), float(acceleration), model=model,
                 endpoint_index=endpoint_index, center_index=center_index,
-                arm_indices=arm_indices, muscle_names=names, evaluator=evaluator,
+                arm_indices=arm_indices, plane_indices=plane_indices,
+                muscle_names=names, evaluator=evaluator,
             )
             muscle_torque = -length_jacobian.T @ sample_forces
             cartesian[index] = planar_endpoint_force(

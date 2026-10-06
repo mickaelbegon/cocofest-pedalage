@@ -67,6 +67,39 @@ def _model_dof_names(model) -> list[str]:
     ]
 
 
+def _infer_crank_torque_dof(dof_names: Sequence[str]) -> str:
+    """Return the unique rotational degree of freedom of ``wheel_rotation``.
+
+    Legacy cycling models rotate their crank about ``z`` while anatomical
+    sagittal models rotate it about the lateral ``y`` axis. Inferring this
+    coordinate prevents a sagittal model from silently receiving a vertical
+    external moment.
+    """
+
+    candidates = [
+        name for name in dof_names if name.startswith("wheel_rotation_Rot")
+    ]
+    if len(candidates) != 1:
+        found = ", ".join(candidates) if candidates else "none"
+        raise ValueError(
+            "Expected exactly one rotational wheel_rotation DoF; found "
+            f"{found}."
+        )
+    return candidates[0]
+
+
+def _axis_from_rotational_dof(dof_name: str) -> np.ndarray:
+    """Map a biorbd rotational DoF suffix to a unit global moment axis."""
+
+    axis_name = dof_name.rsplit("Rot", maxsplit=1)[-1].lower()
+    indices = {"x": 0, "y": 1, "z": 2}
+    if axis_name not in indices:
+        raise ValueError(f"Cannot infer a Cartesian axis from DoF '{dof_name}'.")
+    axis = np.zeros(3)
+    axis[indices[axis_name]] = 1.0
+    return axis
+
+
 def global_segment_moment_generalized_vector(
     model, segment_name: str = "wheel", moment_global=(0.0, 0.0, 1.0)
 ) -> np.ndarray:
@@ -660,7 +693,7 @@ def solve_bilateral_cycling_kinematics(
     left_hand_marker: str = "left_hand",
     right_handle_marker: str = "right_handle",
     left_handle_marker: str = "left_handle",
-    crank_torque_dof: str = "wheel_rotation_RotZ",
+    crank_torque_dof: str | None = None,
     residual_tolerance: float = 1e-9,
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     """Solve a bilateral hand-to-crank kinematic manifold offline.
@@ -695,6 +728,7 @@ def solve_bilateral_cycling_kinematics(
             "The bilateral reduced model requires markers "
             f"{', '.join(sorted(missing))}."
         )
+    crank_torque_dof = crank_torque_dof or _infer_crank_torque_dof(dof_names)
     if crank_torque_dof not in dof_names:
         raise ValueError(
             f"The bilateral reduced model requires crank DoF "
@@ -825,7 +859,7 @@ class ReducedCyclingDynamics:
         sample_count: int = 181,
         order: int = 12,
         muscle_names: Sequence[str] | None = None,
-        crank_torque_dof: str = "wheel_rotation_RotZ",
+        crank_torque_dof: str | None = None,
     ) -> "ReducedCyclingDynamics":
         """Sample and fit the projected mass, bias and muscle effectiveness."""
 
@@ -845,6 +879,7 @@ class ReducedCyclingDynamics:
         muscle_indices = [available_muscles.index(name) for name in selected_muscles]
 
         dof_names = _model_dof_names(model)
+        crank_torque_dof = crank_torque_dof or _infer_crank_torque_dof(dof_names)
         if crank_torque_dof not in dof_names:
             raise ValueError(
                 f"Unknown crank torque DoF '{crank_torque_dof}'. "
@@ -907,7 +942,13 @@ class ReducedCyclingDynamics:
                 )
             )
             muscle_effectiveness = -(muscle_jacobian @ tangent)
-            external_effectiveness = float(tangent @ global_segment_moment_generalized_vector(model))
+            external_effectiveness = float(
+                tangent
+                @ global_segment_moment_generalized_vector(
+                    model,
+                    moment_global=_axis_from_rotational_dof(crank_torque_dof),
+                )
+            )
             coefficient_samples[:, index] = np.concatenate(
                 (
                     np.array(

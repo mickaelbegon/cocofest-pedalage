@@ -52,7 +52,7 @@ def _marker_map(model, q: np.ndarray) -> dict[str, np.ndarray]:
 
 def _segment_origins(model, q: np.ndarray) -> dict[str, np.ndarray]:
     return {
-        model.segment(index).name().to_string(): _array(model.globalJCS(q, index))[:2, 3]
+        model.segment(index).name().to_string(): _array(model.globalJCS(q, index))[:3, 3]
         for index in range(model.nbSegment())
     }
 
@@ -63,19 +63,33 @@ def _muscle_paths(model, q: np.ndarray) -> dict[str, np.ndarray]:
     for index in range(model.nbMuscles()):
         name = model.muscle(index).name().to_string()
         paths[name] = np.asarray(
-            [_array(point).reshape(-1)[:2] for point in model.muscle(index).musclesPointsInGlobal(kinematics, q)]
+            [_array(point).reshape(-1)[:3] for point in model.muscle(index).musclesPointsInGlobal(kinematics, q)]
         )
     return paths
 
 
-def _draw_bones(axis, origins: dict[str, np.ndarray], markers: dict[str, np.ndarray]) -> None:
-    center = markers["wheel_center"][:2]
+def _projection_from_crank_axis(model) -> tuple[tuple[int, int], str, str]:
+    dof_names = [model.nameDof()[index].to_string() for index in range(model.nbQ())]
+    crank_dofs = [name for name in dof_names if name.startswith("wheel_rotation_Rot")]
+    if crank_dofs == ["wheel_rotation_RotY"]:
+        return (0, 2), "x (m)", "z — hauteur (m)"
+    if crank_dofs == ["wheel_rotation_RotZ"]:
+        return (0, 1), "x (m)", "y (m)"
+    raise ValueError("The model must expose exactly one wheel_rotation rotational DoF.")
+
+
+def _project(points: np.ndarray, indices: tuple[int, int]) -> np.ndarray:
+    return np.asarray(points, dtype=float)[..., indices]
+
+
+def _draw_bones(axis, origins: dict[str, np.ndarray], markers: dict[str, np.ndarray], indices: tuple[int, int]) -> None:
+    center = _project(markers["wheel_center"], indices)
     axis.add_patch(plt.Circle(center, 0.1, fill=False, color="0.35", linewidth=1.4))
     for side in ("right", "left"):
-        shoulder = origins[f"{side}_humerus"]
-        elbow = origins[f"{side}_ulna"]
-        hand = markers[f"{side}_hand"][:2]
-        handle = markers[f"{side}_handle"][:2]
+        shoulder = _project(origins[f"{side}_humerus"], indices)
+        elbow = _project(origins[f"{side}_ulna"], indices)
+        hand = _project(markers[f"{side}_hand"], indices)
+        handle = _project(markers[f"{side}_handle"], indices)
         axis.plot(*np.vstack((shoulder, elbow, hand)).T, color="0.12", linewidth=4.0, solid_capstyle="round")
         axis.plot([center[0], handle[0]], [center[1], handle[1]], color="0.12", linewidth=2.2)
         axis.scatter(*np.vstack((shoulder, elbow, hand, handle)).T, color="0.12", s=16, zorder=4)
@@ -85,15 +99,17 @@ def plot_postures(model_path: Path, output: Path) -> None:
     """Create four exact contact postures, at 0°, 90°, 180° and 270°."""
     theta, q, _ = solve_bilateral_cycling_kinematics(model_path, sample_count=5)
     model = _biorbd().Model(str(model_path))
+    indices, x_label, y_label = _projection_from_crank_axis(model)
     figure, axes = plt.subplots(2, 2, figsize=(11, 8), sharex=True, sharey=True)
     for phase_deg, sample, axis in zip((0, 90, 180, 270), range(4), axes.flat):
         coordinates = q[:, sample]
-        _draw_bones(axis, _segment_origins(model, coordinates), _marker_map(model, coordinates))
+        _draw_bones(axis, _segment_origins(model, coordinates), _marker_map(model, coordinates), indices)
         for name, points in _muscle_paths(model, coordinates).items():
             side, muscle = name.split("_", 1)
+            projected = _project(points, indices)
             axis.plot(
-                points[:, 0],
-                points[:, 1],
+                projected[:, 0],
+                projected[:, 1],
                 color=MUSCLE_COLORS[muscle],
                 linestyle=SIDES[side],
                 linewidth=1.5,
@@ -105,9 +121,9 @@ def plot_postures(model_path: Path, output: Path) -> None:
         axis.set_ylim(-0.43, 0.43)
         axis.grid(alpha=0.2)
     for axis in axes[-1, :]:
-        axis.set_xlabel("x (m)")
+        axis.set_xlabel(x_label)
     for axis in axes[:, 0]:
-        axis.set_ylabel("y (m)")
+        axis.set_ylabel(y_label)
     legend = [Line2D([0], [0], color="0.12", linewidth=4, label="os / manivelle")]
     legend.extend(Line2D([0], [0], color=color, linewidth=2, label=name) for name, color in MUSCLE_COLORS.items())
     legend.extend(

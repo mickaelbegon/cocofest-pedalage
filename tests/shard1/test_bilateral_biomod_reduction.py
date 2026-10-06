@@ -15,6 +15,10 @@ MODEL = (
     Path(__file__).resolve().parents[2]
     / "examples/msk_models/Wu/Modified_Wu_Shoulder_Model_Cycling_Bilateral.bioMod"
 )
+SAGITTAL_MODEL = (
+    Path(__file__).resolve().parents[2]
+    / "examples/msk_models/Wu/Modified_Wu_Shoulder_Model_Cycling_Bilateral_Sagittal.bioMod"
+)
 
 
 def test_bilateral_biomod_reduces_two_hands_on_one_crank():
@@ -65,3 +69,31 @@ def test_bilateral_biomod_profile_contains_eight_physical_muscles_and_positive_f
     )
     assert np.all(mapped.mechanical_gain > 0.0)
     assert mapped.radial_gain is not None
+
+
+def test_sagittal_bilateral_biomod_has_parallel_arm_planes_and_a_valid_reduction(tmp_path):
+    pytest.importorskip("biorbd_casadi")
+    reduced, audit = build_reduced_cycling_dynamics(
+        SAGITTAL_MODEL, sample_count=25, kinematic_order=8, dynamics_order=8
+    )
+
+    assert audit["maximum_hand_handle_residual_m"] < 1e-9
+    assert audit["maximum_cycle_closure_error"] < 1e-9
+    profile_path = reduced.save(tmp_path / "bilateral-sagittal-reduced.npz")
+    adapter = PlanarEndpointForceAdapter.bilateral_arm_from_paths(
+        profile_path, SAGITTAL_MODEL, side="right"
+    )
+    angles = np.linspace(
+        reduced.kinematics.theta_origin,
+        reduced.kinematics.theta_origin + reduced.kinematics.direction * 2 * np.pi,
+        21,
+    )
+    fibre_audit = adapter.audit_fibre_lengths(angles)
+    assert fibre_audit["all_fibre_lengths_strictly_positive"]
+    for entry in fibre_audit["per_muscle"].values():
+        assert entry["minimum_normalized_fibre_length"] > 0.5
+        assert entry["maximum_normalized_fibre_length"] < 1.3
+    gains_audit = adapter.audit_unit_force_gains(
+        "right_Biceps", angles, omega_rad_s=-2.0 * np.pi
+    )
+    assert gains_audit["maximum_absolute_torque_error_nm_per_n"] < 2e-6
