@@ -1,0 +1,34 @@
+{
+  "schema": "conditional_nhat_validation_v1",
+  "cases": [
+    {
+      "id": "T1-prescribed-case",
+      "dataset": "T1",
+      "horizon_cycles": null,
+      "oracle": {
+        "kind": "cycle",
+        "receipt": {"path": "T1/result.json", "sha256": null},
+        "cycle": null,
+        "side": "left",
+        "muscles": ["Delt_ant", "Delt_post", "Biceps", "Triceps"]
+      },
+      "bounds": {"path": "prescribed-bounds.json", "sha256": null},
+      "force_profiles": {"path": "T1/force-profiles.json", "sha256": null},
+      "continuation_label": {"path": "T1/continuation-label.json", "sha256": null}
+    },
+    {
+      "id": "T3-prescribed-case",
+      "dataset": "T3",
+      "horizon_cycles": null,
+      "oracle": {
+        "kind": "checkpoint",
+        "receipt": {"path": "T3/checkpoint-receipt.json", "sha256": null},
+        "side": "left",
+        "muscles": ["Delt_ant", "Delt_post", "Biceps", "Triceps"]
+      },
+      "bounds": {"path": "prescribed-bounds.json", "sha256": null},
+      "force_profiles": {"path": "T3/force-profiles.json", "sha256": null},
+      "continuation_label": {"path": "T3/continuation-label.json", "sha256": null}
+    }
+  ]
+}
