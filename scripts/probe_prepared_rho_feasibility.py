@@ -18,6 +18,8 @@ from pathlib import Path
 import sys
 from time import perf_counter
 
+import numpy as np
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -59,11 +61,16 @@ def _load_margin_binding(source, args, model_path: Path):
 
 
 def run(*, receipt: Path, checkpoint: Path, side: str, output_directory: Path,
-        experimental_load_margin_graph: bool, max_iterations: int = 4000) -> dict:
+        experimental_load_margin_graph: bool, max_iterations: int = 4000,
+        experimental_pw_tracking_scale_s: float | None = None) -> dict:
     from cocofest.optimization.configured_cycling_model import configured_model_factories
     from examples.fes_multibody.cycling import cycling_pulse_width_mhe_acados_periodic as driver
 
     source, payload = _load_arm(receipt, side)
+    if experimental_pw_tracking_scale_s is not None:
+        if not np.isfinite(experimental_pw_tracking_scale_s) or experimental_pw_tracking_scale_s <= 0.:
+            raise ValueError("PW-tracking scale must be finite and positive")
+        payload["experimental_pw_tracking"] = {"scale_s": float(experimental_pw_tracking_scale_s)}
     args = copy(_driver_arguments(payload, side))
     args.nlp_ipopt_recovery = args.nlp_ipopt_recovery_ma57_tuned = False
     configured = _configured_payload_model(payload, side)
@@ -98,6 +105,7 @@ def run(*, receipt: Path, checkpoint: Path, side: str, output_directory: Path,
         "source_receipt": str(Path(receipt).resolve()), "checkpoint": str(checkpoint),
         "side": side, "completed_cycles_at_boundary": completed,
         "experimental_load_margin_graph": experimental_load_margin_graph,
+        "experimental_pw_tracking_scale_s": experimental_pw_tracking_scale_s,
         "restored": restored, "probe": probe, "wall_time_s": perf_counter() - start,
         "next_cycle_feasible_witness": bool(probe.get("feasible_witness")),
         "physiological_failure_certified": False,
@@ -119,6 +127,7 @@ def main():
     parser.add_argument("--side", choices=("left", "right"), required=True)
     parser.add_argument("--output-directory", type=Path, required=True)
     parser.add_argument("--experimental-load-margin-graph", action="store_true")
+    parser.add_argument("--experimental-pw-tracking-scale-s", type=float)
     parser.add_argument("--max-iterations", type=int, default=4000)
     parser.add_argument("--cpu", type=int, required=True)
     args = parser.parse_args()
@@ -128,7 +137,8 @@ def main():
     report = run(receipt=args.receipt, checkpoint=args.checkpoint, side=args.side,
                  output_directory=args.output_directory,
                  experimental_load_margin_graph=args.experimental_load_margin_graph,
-                 max_iterations=args.max_iterations)
+                 max_iterations=args.max_iterations,
+                 experimental_pw_tracking_scale_s=args.experimental_pw_tracking_scale_s)
     print(json.dumps({key: report[key] for key in ("next_cycle_feasible_witness", "wall_time_s")}, indent=2))
 
 
