@@ -52,8 +52,9 @@ def build_launch_plan(config: SimulationConfig | dict, prefix: Path, root: Path 
         if data.get("solver") == "acados" and "integration" not in data:
             data["integration"] = "irk"
         config = SimulationConfig.from_dict(data)
-    CapabilityRegistry.require_valid(config)
     resolved = resolve_config(config, root=root)
+    config = resolved.config
+    CapabilityRegistry.require_valid(config)
     typed_config = config
     config = config.to_dict()
     prefix, root = Path(prefix).expanduser().absolute(), Path(root).expanduser().absolute()

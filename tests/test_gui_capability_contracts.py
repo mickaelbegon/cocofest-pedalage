@@ -5,6 +5,7 @@ import pytest
 
 from cocofest.simulation import CapabilityRegistry, ConfigurationError, SimulationConfig, build_launch_plan
 from cocofest.simulation.gui_model import config_from_form, scientific_summary
+from cocofest.simulation.resolved_config import resolve_config
 from cocofest.simulation.independent_arms_gui_model import (
     IndependentArmsGuiConfig, PROCESS_FACTORY, independent_solver_choices,
 )
@@ -108,6 +109,27 @@ def test_prescribed_isokinetic_kinematics_reaches_solver_and_provenance(tmp_path
     effective = plan.resolved_config.to_dict()["effective"]
     assert effective["transcription"]["isokinetic_kinematics"] == "prescribed"
     assert "cinématique prescribed" in scientific_summary(config)
+
+
+@pytest.mark.parametrize("solver", ["ipopt", "acados"])
+def test_isokinetic_kinematics_default_is_prescribed_for_both_solvers(tmp_path, solver):
+    config = SimulationConfig(
+        solver=solver,
+        formulation="isokinetic",
+        integration="irk" if solver == "acados" else "radau",
+        acados_ipopt_cycle1_seed="cycle1.npz" if solver == "acados" else None,
+    )
+    resolved = resolve_config(config, root=tmp_path)
+    assert resolved.config.isokinetic_kinematics == "prescribed"
+    plan = build_launch_plan(config, tmp_path / "env", tmp_path)
+    if solver == "ipopt":
+        assert plan.environment_updates["BENCHMARK_ISOKINETIC_KINEMATICS"] == "prescribed"
+    else:
+        assert plan.argv[plan.argv.index("--isokinetic-kinematics") + 1] == "prescribed"
+
+
+def test_dynamic_default_keeps_crank_kinematics_as_states():
+    assert resolve_config(SimulationConfig()).config.isokinetic_kinematics == "states"
 
 
 @pytest.mark.parametrize("change", [

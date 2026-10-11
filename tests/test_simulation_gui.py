@@ -362,7 +362,7 @@ def test_ipopt_local_ding_option_is_explicit_persisted_and_forwarded(tmp_path):
 @pytest.mark.parametrize("changes,expected", [
     ({"solver": "madnlp"}, "solver"),
     ({"mechanics": "full"}, "mechanics"),
-    ({"formulation": "isokinetic"}, "formulation"),
+    ({"formulation": "unsupported"}, "formulation"),
     ({"integration": "irk"}, "integration"),
     ({"collocation_degree": 3}, "collocation_degree"),
     ({"cycles_per_window": 2}, "cycles_per_window"),
@@ -383,6 +383,18 @@ def test_ipopt_local_ding_bilateral_plan_is_supported(tmp_path):
     extras = json.loads(plan.environment_updates["BENCHMARK_EXTRA_ARGUMENTS_JSON"])
     assert plan.environment_updates["BENCHMARK_IPOPT_DING_LOCAL_REDUCTION"] == "true"
     assert "--bilateral-reduced" in extras
+
+
+def test_ipopt_local_ding_is_supported_for_isokinetic_rho(tmp_path):
+    config = local_ipopt_config(
+        formulation="isokinetic",
+        isokinetic_kinematics="prescribed",
+        reduced_internal_crank_velocity_guard="auto",
+    )
+    plan = build_launch_plan(config, tmp_path, tmp_path)
+    assert plan.environment_updates["BENCHMARK_IPOPT_DING_LOCAL_REDUCTION"] == "true"
+    assert plan.environment_updates["BENCHMARK_ISOKINETIC_KINEMATICS"] == "prescribed"
+    assert "isocinétiques" in scientific_summary(config)
 
 
 @pytest.mark.parametrize("mode,adaptation", [("rho-physio", False), ("rho-pace", True)])

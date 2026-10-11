@@ -7,7 +7,7 @@ to the runtime scientific audit. Resolving a configuration never loads a solver.
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from functools import lru_cache
 import hashlib
 import json
@@ -111,6 +111,13 @@ def resolve_config(config: SimulationConfig | Mapping | None = None, *, profile:
     if conflicts:
         raise ValueError(f"Profile {profile} conflicts with explicit fields: {', '.join(sorted(conflicts))}")
     value = SimulationConfig.from_dict({**preset, **explicit})
+    if value.isokinetic_kinematics == "auto":
+        value = replace(
+            value,
+            isokinetic_kinematics=(
+                "prescribed" if value.formulation == "isokinetic" else "states"
+            ),
+        )
     CapabilityRegistry.require_valid(value)
     unknown = [token.split("=", 1)[0] for token in value.extra_arguments
                if token.startswith("--") and token.split("=", 1)[0] not in _known_advanced_options()]

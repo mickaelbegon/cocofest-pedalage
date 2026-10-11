@@ -32,7 +32,7 @@ class CapabilityRegistry:
         "solver": ("ipopt", "madnlp", "fatrop", "acados"),
         "mechanics": ("reduced", "full"),
         "formulation": ("dynamic", "isokinetic"),
-        "isokinetic_kinematics": ("states", "prescribed"),
+        "isokinetic_kinematics": ("auto", "states", "prescribed"),
         "integration": ("radau", "irk"),
         "pulse_width_slew_formulation": ("lifting", "direct_constraints"),
         "reduced_internal_crank_velocity_guard": ("auto", "on", "off"),
@@ -45,7 +45,7 @@ class CapabilityRegistry:
     }
     FIELD_HELP = {
         "formulation": "Dynamic: free crank dynamics; isokinetic: prescribed angular velocity.",
-        "isokinetic_kinematics": "states conserve theta/omega comme états du NLP ; prescribed les élimine par la trajectoire isocinétique exacte.",
+        "isokinetic_kinematics": "auto choisit prescribed en isocinétique et states en cadence libre ; prescribed élimine theta/omega par la trajectoire isocinétique exacte.",
         "pulse_width_max_step_us": "Hard ΔPW bound between successive controls, including executed RHO boundaries (µs).",
         "pulse_width_slew_formulation": "lifting adds previous-PW states; direct_constraints bounds successive controls without extra states (IPOPT/MadNLP only). Both enforce the executed RHO seam.",
         "pulse_width_slew_weight": "Weight of mean squared normalized intra-window ΔPW; requires a hard bound. Executed RHO seams are only bounded.",
@@ -58,7 +58,7 @@ class CapabilityRegistry:
         "reduced_terminal_half_step_velocity_guard": "Bounds an Euler half-step cadence prediction from the terminal state before the next RHO window. Requires reduced dynamic mechanics and an active internal guard. This local predictor does not certify all next-cycle constraints.",
         "acados_qp_solver": "ACADOS QP backend: auto uses full-condensing HPIPM with a ΔPW bound or prescribed isokinetic kinematics, and partial-condensing HPIPM otherwise.",
         "acados_ding_local_reduction": "Experimental local Ding reconstruction: ACADOS retains F and A as NLP states and reconstructs Cn, Tau1 and Km from the fixed initial state and the current pulse-width profile. It requires SQP IRK Gauss-Legendre 4×5, reduced dynamic mechanics, 50 stimulations/cycle, an active cadence guard and no slew constraint. Fixed initial states are checked by the engine; full NLP duals are not reconstructed.",
-        "ipopt_ding_local_reduction": "Experimental IPOPT local Ding reconstruction: F and A remain decision states while Cn, Tau1 and Km are reconstructed with the original discrete Radau-5 operator. It requires the interpreted SX IPOPT path, one-cycle dynamic reduced RHO windows, 30 stimulations/cycle and no pulse-width slew constraint. The complete NLP is audited after each solve.",
+        "ipopt_ding_local_reduction": "Experimental IPOPT local Ding reconstruction: F and A remain decision states while Cn, Tau1 and Km are reconstructed with the original discrete Radau-5 operator. It supports interpreted SX IPOPT, one-cycle reduced-mechanics RHO windows in dynamic or isokinetic kinematics, 30 stimulations/cycle and no pulse-width slew constraint. The complete NLP is audited after each solve.",
         "cycles": "Number of executed cycles; FHO optimizes these cycles in one window.",
         "ipopt_enforce_start_constraints": "Whether IPOPT imposes historical start constraints. A common seed must use the same setting.",
         "threads": "Solver worker threads; independent from numerical library threads.",
@@ -246,7 +246,7 @@ class CapabilityRegistry:
         if config.ipopt_ding_local_reduction:
             requirements = {
                 "solver": "ipopt", "mode": "rho", "mechanics": "reduced",
-                "formulation": "dynamic", "integration": "radau", "collocation_degree": 5,
+                "integration": "radau", "collocation_degree": 5,
                 "cycles_per_window": 1, "stimulations_per_cycle": 30,
                 "pulse_width_max_step_us": None, "pulse_width_slew_weight": 0.0,
                 "compile_evaluators": False, "model_config": None,
@@ -254,10 +254,16 @@ class CapabilityRegistry:
             for field, expected in requirements.items():
                 if getattr(config, field) != expected:
                     issue(field, f"Réduction Ding IPOPT expérimentale : exige {expected!r}.", "unsupported")
-            if config.reduced_internal_crank_velocity_guard != "off":
+            if config.formulation not in ("dynamic", "isokinetic"):
+                issue(
+                    "formulation",
+                    "Réduction Ding IPOPT : exige la formulation dynamique ou isocinétique.",
+                    "unsupported",
+                )
+            if cls.effective_reduced_velocity_guard(config):
                 issue(
                     "reduced_internal_crank_velocity_guard",
-                    "Réduction Ding IPOPT expérimentale : le pilote validé exige le guard vitesse interne désactivé.",
+                    "Réduction Ding IPOPT : le guard vitesse interne doit être inactif.",
                     "unsupported",
                 )
         if config.mode in ("rho-physio", "rho-pace"):

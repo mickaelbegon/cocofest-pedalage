@@ -1080,6 +1080,11 @@ def _driver_arguments(payload, side):
         if payload.get("experimental_pace_vr", {}).get("application_mode")
         == "terminal_reserve_target_experimental" else None
     )
+    pw_tracking = payload.get("experimental_pw_tracking")
+    if pw_tracking is not None:
+        if not isinstance(pw_tracking, dict) or set(pw_tracking) - {"scale_s"}:
+            raise ValueError("experimental_pw_tracking accepts only scale_s")
+        args.experimental_pw_tracking_config = dict(pw_tracking)
     terminal_costate = payload.get("experimental_terminal_costate")
     if terminal_costate is not None:
         if (not isinstance(terminal_costate, dict)

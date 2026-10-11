@@ -135,9 +135,12 @@ def config_from_form(values: Mapping[str, str | bool], base: SimulationConfig | 
 
 def scientific_summary(config: SimulationConfig) -> str:
     window = config.cycles if config.mode == "fho" else config.cycles_per_window
+    isokinetic_kinematics = config.isokinetic_kinematics
+    if isokinetic_kinematics == "auto":
+        isokinetic_kinematics = "prescribed" if config.formulation == "isokinetic" else "states"
     dynamics = "cadence libre" if config.formulation == "dynamic" else f"ω = {config.isokinetic_omega:g} rad/s"
     if config.formulation == "isokinetic":
-        dynamics += f" · cinématique {config.isokinetic_kinematics}"
+        dynamics += f" · cinématique {isokinetic_kinematics}"
     slew = "aucune borne ΔPW" if config.pulse_width_max_step_us is None else f"|u[k+1] − u[k]| ≤ {config.pulse_width_max_step_us:g} µs"
     reduction = (
         "\nRéduction Ding ACADOS expérimentale activée : F,A conservés ; Cn,Tau1,Km reconstruits avec IRK Gauss-Legendre 4×5. "
@@ -147,8 +150,8 @@ def scientific_summary(config: SimulationConfig) -> str:
     ipopt_reduction = (
         "\nRéduction Ding IPOPT expérimentale activée : F,A restent des états de collocation ; "
         "Cn,Tau1,Km sont reconstruits par l'opérateur discret Radau-5, avec audit dans le NLP complet. "
-        "Cette voie SX interprétée est validée pour le RHO unilatéral ; le smoke bilatéral passe, "
-        "mais une campagne longue reste requise avant un usage de référence."
+        "Cette voie SX interprétée a passé des validations RHO unilatérales dynamiques et isocinétiques ; "
+        "elle reste expérimentale et demande une validation d'endurance pour chaque configuration."
         if config.ipopt_ding_local_reduction else ""
     )
     sides = " · bilatéral" if config.bilateral_reduced else ""

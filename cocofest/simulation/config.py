@@ -20,7 +20,9 @@ class SimulationConfig:
     mechanics: str = "reduced"
     bilateral_reduced: bool = False
     formulation: str = "dynamic"
-    isokinetic_kinematics: str = "states"
+    # ``auto`` resolves to prescribed only for the isokinetic formulation;
+    # free-crank dynamics keep theta/omega as states.
+    isokinetic_kinematics: str = "auto"
     cycles: int = 100
     cycles_per_window: int = 1
     stimulations_per_cycle: int = 30
