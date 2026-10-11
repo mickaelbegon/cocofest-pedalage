@@ -71,6 +71,9 @@ def main(argv=None):
     parser.add_argument("mode", choices=("baseline", "local"))
     parser.add_argument("comparison_arguments", nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
+    # The comparison entry point changes cwd before constructing the NLP.
+    # Resolve caller-owned paths now, before delegating to that entry point.
+    args.cache_dir = args.cache_dir.resolve()
     comparison_args = args.comparison_arguments
     if comparison_args and comparison_args[0] == "--":
         comparison_args = comparison_args[1:]

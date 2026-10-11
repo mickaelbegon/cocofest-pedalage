@@ -11,11 +11,17 @@ from .models.ding2007.ding2007 import DingModelPulseWidthFrequency
 from .models.hmed2018.hmed2018 import DingModelPulseIntensityFrequency
 from .optimization.muscle_reserve import (
     DEFAULT_SMOOTH_MIN_TEMPERATURE,
+    fatigue_imbalance_penalty_casadi,
     smooth_minimum_capacity_penalty_casadi,
 )
 
 
 class CustomObjective:
+    @staticmethod
+    def minimize_parameterized_pulse_width_tracking(controller: PenaltyController, binding):
+        """Offline causal PW intervention; activation defaults to zero."""
+        return binding.objective(controller)
+
     @staticmethod
     def minimize_terminal_task_reserve(controller: PenaltyController, binding):
         """Experimental smooth shortage of the locally witnessed task reserve."""
@@ -207,6 +213,28 @@ class CustomObjective:
             capacity_scales,
             temperature=temperature,
         )
+
+    @staticmethod
+    def minimize_terminal_fatigue_imbalance(controller: PenaltyController) -> MX:
+        """Penalize variance in normalized muscle fatigue at the horizon end.
+
+        Unlike total-fatigue costs, this term only changes allocation between
+        muscles.  A separate total-fatigue or task objective must remain active.
+        """
+        muscle_models = controller.model.muscles_dynamics_model
+        capacities = vertcat(*[
+            controller.states[f"A_{model.muscle_name}"].cx for model in muscle_models
+        ])
+        scales = []
+        for model in muscle_models:
+            try:
+                scale = float(model.a_scale)
+            except (TypeError, ValueError) as error:
+                raise ValueError("Every muscle a_scale must be numeric for fatigue balance.") from error
+            if not math.isfinite(scale) or scale <= 0.0:
+                raise ValueError("Every muscle a_scale must be finite and strictly positive.")
+            scales.append(scale)
+        return fatigue_imbalance_penalty_casadi(capacities, scales)
 
     @staticmethod
     def minimize_overall_muscle_force_production(controller: PenaltyController) -> MX:

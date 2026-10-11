@@ -11,6 +11,8 @@ from cocofest.optimization.muscle_reserve import (
     DEFAULT_SMOOTH_MIN_TEMPERATURE,
     capacity_ratios,
     capacity_reserve_metrics,
+    fatigue_imbalance_penalty,
+    fatigue_imbalance_penalty_casadi,
     physiological_capacity_ratios,
     smooth_minimum_capacity_ratio,
     smooth_minimum_capacity_penalty,
@@ -101,6 +103,42 @@ def test_metrics_report_hard_minimum_and_smoothing_gap():
     assert metrics.optimism_gap == pytest.approx(metrics.smooth_minimum_ratio - metrics.minimum_ratio)
     assert 0.0 <= metrics.optimism_gap <= metrics.maximum_optimism_gap
     assert metrics.penalty == pytest.approx(1.0 - metrics.smooth_minimum_ratio)
+
+
+def test_fatigue_imbalance_penalty_is_permutation_invariant_and_zero_when_balanced():
+    scales = np.array([100.0, 50.0, 200.0, 75.0])
+    balanced_ratios = np.array([0.8, 0.8, 0.8, 0.8])
+    imbalanced_ratios = np.array([0.9, 0.8, 0.7, 0.8])
+    balanced = fatigue_imbalance_penalty(balanced_ratios * scales, scales)
+    imbalanced = fatigue_imbalance_penalty(imbalanced_ratios * scales, scales)
+
+    assert balanced == pytest.approx(0.0, abs=1e-16)
+    assert imbalanced > balanced
+    assert fatigue_imbalance_penalty(
+        (imbalanced_ratios * scales)[[2, 0, 3, 1]], scales[[2, 0, 3, 1]]
+    ) == pytest.approx(imbalanced)
+
+
+def test_fatigue_imbalance_casadi_gradient_matches_finite_difference():
+    ca = pytest.importorskip("casadi")
+    capacities = ca.MX.sym("A", 4)
+    scales = np.array([100.0, 50.0, 200.0, 75.0])
+    objective = fatigue_imbalance_penalty_casadi(capacities, scales)
+    function = ca.Function("fatigue_imbalance", [capacities], [objective, ca.gradient(objective, capacities)])
+    point = np.array([92.0, 36.0, 130.0, 55.0])
+    value, gradient = function(point)
+    assert float(value) == pytest.approx(fatigue_imbalance_penalty(point, scales), abs=1e-14)
+
+    step = 1e-5
+    finite_difference = np.empty(4)
+    for index in range(4):
+        perturbation = np.zeros(4)
+        perturbation[index] = step
+        finite_difference[index] = (
+            fatigue_imbalance_penalty(point + perturbation, scales)
+            - fatigue_imbalance_penalty(point - perturbation, scales)
+        ) / (2.0 * step)
+    np.testing.assert_allclose(np.asarray(gradient).ravel(), finite_difference, rtol=2e-6, atol=2e-8)
 
 
 def test_numpy_implementation_remains_finite_for_extreme_ratios():
@@ -202,6 +240,57 @@ def test_custom_objective_adapter_uses_capacity_states():
         )
     )
     assert np.all(np.isfinite(np.asarray(derivative, dtype=float)))
+
+
+def test_custom_terminal_fatigue_balance_is_differentiable_and_uses_normalized_capacity():
+    ca = pytest.importorskip("casadi")
+    capacities = ca.MX.sym("A", 3)
+    muscles = [
+        SimpleNamespace(muscle_name="m1", a_scale=100.0),
+        SimpleNamespace(muscle_name="m2", a_scale=80.0),
+        SimpleNamespace(muscle_name="m3", a_scale=120.0),
+    ]
+    controller = SimpleNamespace(
+        model=SimpleNamespace(muscles_dynamics_model=muscles),
+        states={f"A_{muscle.muscle_name}": SimpleNamespace(cx=capacities[index])
+                for index, muscle in enumerate(muscles)},
+    )
+    expression = CustomObjective.minimize_terminal_fatigue_imbalance(controller)
+    point = np.array([90.0, 72.0, 108.0])  # equal normalized reserve, exactly balanced
+    value, gradient = ca.Function(
+        "custom_fatigue_balance", [capacities], [expression, ca.gradient(expression, capacities)]
+    )(point)
+    assert float(value) == pytest.approx(0.0, abs=1e-16)
+    assert np.all(np.isfinite(np.asarray(gradient, dtype=float)))
+
+
+def test_bioptim_objective_wiring_omits_zero_fatigue_balance_and_adds_mayer_term():
+    muscles = [
+        SimpleNamespace(muscle_name="m1", a_scale=100.0),
+        SimpleNamespace(muscle_name="m2", a_scale=80.0),
+    ]
+    common = dict(
+        model=SimpleNamespace(muscles_dynamics_model=muscles),
+        minimize_force=False,
+        minimize_fatigue=True,
+        minimize_control=False,
+        cost_fun_weight=[0.0, 1.0, 0.0],
+        target=2.0 * np.pi,
+        terminal_wheel_regularization_weight=0.0,
+    )
+    without = mhe_example.set_objective_functions(**common, fatigue_balance_weight=0.0)
+    with_balance = mhe_example.set_objective_functions(**common, fatigue_balance_weight=0.2)
+
+    def balance_entries(objectives):
+        return [entry for phase in objectives for entry in phase
+                if entry.custom_function is CustomObjective.minimize_terminal_fatigue_imbalance]
+
+    assert balance_entries(without) == []
+    entries = balance_entries(with_balance)
+    assert len(entries) == 1
+    assert entries[0].node.name == "END"
+    assert entries[0].quadratic is False
+    assert float(entries[0].weight[0]) == pytest.approx(2000.0)
 
 
 def test_bioptim_objective_wiring_omits_zero_reserve_weight():

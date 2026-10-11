@@ -1,5 +1,50 @@
 # Temps hors IPOPT du RHO Ding local prescrit — 4 octobre 2026
 
+## Mise à jour : cache de layout numérique Bioptim et journal différé
+
+Le gain ci-dessous est distinct de la vectorisation interne de l'adaptateur
+Ding documentée dans les sections suivantes. Le cache Bioptim conserve
+uniquement la géométrie immuable des vecteurs numériques (indices de
+variables, blocs de nœuds et indices d'interpolation). Les valeurs de bornes,
+d'initialisation et d'échelle restent relues à chaque appel. Les conditions
+constantes, premier/intérieur/dernier, linéaires, par-frame et tous-points
+utilisent ce chemin ; les conditions spline ou personnalisées reviennent au
+chemin scalaire.
+
+Le protocole répété est K6-I1-DL unilatéral prescrit, 30 Hz, Radau-5, fatigue
+unitaire, IPOPT/MA57, un thread numérique, CPU 13 fixé. Chaque condition a
+propagé ses propres 100 cycles ; le premier cycle est exclu des statistiques
+chaudes. Deux répétitions séquentielles ont donné les résultats suivants :
+
+| Quantité chaude | Scalaire | Cache layout | Changement |
+|---|---:|---:|---:|
+| RHO complet, médiane groupée | 248.2 ms | 152.7 ms | -38.5 % |
+| IPOPT seul, médiane groupée | 115.1 ms | 121.0 ms | +5.0 % |
+| RHO complet, P90 cache | -- | 187.2 ms | -- |
+
+Dans les deux répétitions, les archives `x`, `g`, `lam_x` et `lam_g` sont
+identiques bit à bit aux 100 appels. Le changement ne modifie donc ni NLP,
+ni Hessienne, ni factorisation MA57, ni règle d'arrêt. La petite variation du
+temps IPOPT est une variabilité de mesure ; le gain attribuable est le
+dispatch Python hors solveur.
+
+Le benchmark active `COCOFEST_DEFERRED_RHO_SUMMARY=1` et
+`DING_ONLINE_JOURNAL=1`. Pendant le RHO, un enregistrement JSONL par appel et
+les archives NPZ sont écrits ; l'ancien tableau JSON est matérialisé seulement
+après la boucle par `scripts/materialize_rho_online_journal.py`. Le mode
+différé ne décode ni traces complètes, ni audit mécanique, ni DOP853, et
+déclare explicitement `physical_success=false`. Il ne peut donc jamais être
+utilisé comme certificat mécanique, physiologique ou d'endurance. Le
+finaliseur hors ligne est obligatoire avant toute telle conclusion.
+
+Commande reproductible :
+
+```bash
+"/home/mickaelbegon/miniforge3/envs/cocofest-rho32/bin/python" \
+  scripts/benchmark_numeric_vector_dispatch_ab.py \
+  --output /tmp/numeric-vector-dispatch-ab-100 --replicates 2 --cycles 100 --cpu 13
+```
+
 ## Résultat mesuré
 
 Même RHO unilatéral prescrit, 30 Hz, Radau-5, objectif fatigue unitaire,

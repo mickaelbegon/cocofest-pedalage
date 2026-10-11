@@ -218,3 +218,27 @@ def smooth_minimum_capacity_penalty_casadi(
     """Differentiable CasADi expression for :func:`smooth_minimum_capacity_penalty`."""
     ratios = capacity_ratios_casadi(capacities, capacity_scales)
     return 1.0 - smooth_minimum_capacity_ratio_casadi(ratios, temperature=temperature)
+
+
+def fatigue_imbalance_penalty(
+    capacities: Sequence[float] | np.ndarray,
+    capacity_scales: Sequence[float] | np.ndarray,
+) -> float:
+    """Return the variance of normalized muscle fatigue across muscles.
+
+    ``fatigue_i = 1 - A_i / A_scale_i``.  The cost is invariant to muscle
+    ordering and to a common rescaling of each capacity and its scale; it is
+    zero when every muscle has the same normalized fatigue.  This is an
+    allocation regularizer, not a total-fatigue or endurance measure.
+    """
+    ratios = capacity_ratios(capacities, capacity_scales)
+    fatigue = 1.0 - ratios
+    return float(np.mean((fatigue - np.mean(fatigue)) ** 2))
+
+
+def fatigue_imbalance_penalty_casadi(capacities, capacity_scales):
+    """CasADi counterpart of :func:`fatigue_imbalance_penalty`."""
+    ca = _casadi_module()
+    fatigue = 1.0 - capacity_ratios_casadi(capacities, capacity_scales)
+    centered = fatigue - ca.sum1(fatigue) / fatigue.numel()
+    return ca.sum1(centered**2) / fatigue.numel()

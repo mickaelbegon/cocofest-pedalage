@@ -147,3 +147,34 @@ limite d'âge et domaine de confiance du modèle. La question décisive est
 double : une marge prédite plus grande devient-elle une marge effectivement
 témoignée plus grande, et cette amélioration conserve-t-elle davantage de
 cycles nominaux ? Seule cette étape justifie ensuite un essai d'endurance.
+
+## Exécution locale c140 du 4 octobre 2026 : rejet informatif
+
+Le protocole a été exécuté au checkpoint gauche c140 depuis un reçu restauré
+exactement. Il comprend sept branches d'apprentissage (unitaire et trois
+contrastes de poids dans les deux sens) et deux combinaisons de holdout. Les
+branches ont produit leurs endpoints déclarés, puis chacun des neuf endpoints
+a reçu la même grille gelée de travail `1.00, 1.025, ..., 1.20` avec
+restauration complète de l'état, des bornes et de l'historique avant chaque
+sonde.
+
+Le design est algébriquement exploitable : le fit affine a rang 5 (intercept
+plus quatre coordonnées) et un conditionnement de 126.4 ; ses erreurs train
+et holdout sont nulles à la précision numérique. Il est néanmoins **rejeté**
+par la règle déclarée `no_observed_reserve_contrast_for_directional_cost`.
+Tous les endpoints ont le même témoin de réserve `+0.15` : les facteurs
+jusqu'à 1.15 sont audités, tandis que 1.175 et 1.20 ne passent pas l'audit
+indépendant du NLP complet. Un ajustement qui a une pente nulle parce que la
+grille sature ne doit pas être injecté dans le RHO, même avec un holdout nul.
+
+Les non-validations à 1.175 et 1.20 sont des résultats **indéterminés** : elles
+ne bornent pas la capacité et ne certifient pas un échec physiologique. La
+prochaine expérience doit modifier la mesure, pas contourner la règle : élargir
+la grille au-dessus de 1.20 avec des démarrages alternatifs, ou travailler à
+un checkpoint plus tardif / une résistance plus élevée qui donne une vraie
+variation de témoins sous les branches atteignables. Le même partitionnement
+train/holdout doit alors être régénéré avant de regarder les nouvelles données.
+
+Artefacts temporaires de cette exécution :
+`/tmp/task-reserve-local-left-c140-20261004/plan.json` et
+`/tmp/task-reserve-local-left-c140-20261004/calibration/calibration-audit.json`.

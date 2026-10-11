@@ -23,7 +23,7 @@ dual_warm_start="${DUAL_WARM_START:-${13:-auto}}"
 target_refinement="${14:-auto}"
 workspace="${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is required}"
 benchmark_formulation="${BENCHMARK_FORMULATION:-dynamic}"
-isokinetic_kinematics="${BENCHMARK_ISOKINETIC_KINEMATICS:-states}"
+isokinetic_kinematics="${BENCHMARK_ISOKINETIC_KINEMATICS:-auto}"
 energy_equivalent_torque="${BENCHMARK_ENERGY_EQUIVALENT_TORQUE:-0.2}"
 isokinetic_omega="${BENCHMARK_ISOKINETIC_OMEGA:--6.283185307179586}"
 load_torque_min="${BENCHMARK_LOAD_TORQUE_MIN:--3.0}"
@@ -73,8 +73,15 @@ case "$benchmark_formulation" in
   *) echo "BENCHMARK_FORMULATION must be dynamic or isokinetic, got '$benchmark_formulation'." >&2; exit 2 ;;
 esac
 case "$isokinetic_kinematics" in
+  auto)
+    if [[ "$benchmark_formulation" == "isokinetic" ]]; then
+      isokinetic_kinematics="prescribed"
+    else
+      isokinetic_kinematics="states"
+    fi
+    ;;
   states|prescribed) ;;
-  *) echo "BENCHMARK_ISOKINETIC_KINEMATICS must be states or prescribed, got '$isokinetic_kinematics'." >&2; exit 2 ;;
+  *) echo "BENCHMARK_ISOKINETIC_KINEMATICS must be auto, states or prescribed, got '$isokinetic_kinematics'." >&2; exit 2 ;;
 esac
 if [[ "$isokinetic_kinematics" == "prescribed" && ( "$benchmark_formulation" != "isokinetic" || "$mechanics" != "reduced" ) ]]; then
   echo "Prescribed isokinetic kinematics require reduced isokinetic mechanics." >&2
@@ -243,8 +250,8 @@ case "$use_common_initial_solution" in
   *) echo "BENCHMARK_USE_COMMON_INITIAL_SOLUTION must be true or false." >&2; exit 2 ;;
 esac
 if [[ "$ipopt_ding_local_reduction" == "true" ]]; then
-  if [[ "$solver" != "ipopt" || "$mechanics" != "reduced" || "$benchmark_formulation" != "dynamic" || "$ode_solver" != "collocation" || "$collocation_degree" != "5" || "$compile_mode" != "false" || "$stimulations_per_cycle" != "30" || "${BENCHMARK_CYCLES_PER_WINDOW:-}" != "1" ]]; then
-    echo "The experimental IPOPT Ding reduction requires IPOPT/SX, reduced dynamic one-cycle Radau-5, 30 controls and no C compilation." >&2
+  if [[ "$solver" != "ipopt" || "$mechanics" != "reduced" || ( "$benchmark_formulation" != "dynamic" && "$benchmark_formulation" != "isokinetic" ) || "$ode_solver" != "collocation" || "$collocation_degree" != "5" || "$compile_mode" != "false" || "$stimulations_per_cycle" != "30" || "${BENCHMARK_CYCLES_PER_WINDOW:-}" != "1" ]]; then
+    echo "The experimental IPOPT Ding reduction requires IPOPT/SX, reduced dynamic or isokinetic one-cycle Radau-5, 30 controls and no C compilation." >&2
     exit 2
   fi
 fi

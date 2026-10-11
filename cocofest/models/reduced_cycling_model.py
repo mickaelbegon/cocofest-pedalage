@@ -148,7 +148,7 @@ class ReducedFesCyclingModel(StateDynamics):
         external_crank_torque: float = 0.0,
         isokinetic: bool = False,
         isokinetic_omega: float = -2.0 * math.pi,
-        isokinetic_kinematics: str = "states",
+        isokinetic_kinematics: str = "auto",
         isokinetic_theta0: float | None = None,
         isokinetic_time_origin: float = 0.0,
         activate_force_length_relationship: bool = True,
@@ -169,8 +169,10 @@ class ReducedFesCyclingModel(StateDynamics):
         self.isokinetic = bool(isokinetic)
         self.isokinetic_omega = float(isokinetic_omega)
         self.isokinetic_kinematics = str(isokinetic_kinematics)
+        if self.isokinetic_kinematics == "auto":
+            self.isokinetic_kinematics = "prescribed" if self.isokinetic else "states"
         if self.isokinetic_kinematics not in ("states", "prescribed"):
-            raise ValueError("isokinetic_kinematics must be 'states' or 'prescribed'.")
+            raise ValueError("isokinetic_kinematics must be 'auto', 'states' or 'prescribed'.")
         if self.isokinetic_kinematics == "prescribed" and not self.isokinetic:
             raise ValueError("Prescribed kinematics requires isokinetic=True.")
         self.activate_force_length_relationship = bool(

@@ -121,6 +121,8 @@ BENCHMARK_CONFIGURATION_FIELDS = (
     "terminal_reserve_weight",
     "terminal_reserve_effective_weight",
     "terminal_reserve_temperature",
+    "fatigue_balance_weight",
+    "fatigue_balance_effective_weight",
     "experimental_muscle_horizon",
     "muscle_horizon_weight",
     "muscle_horizon_source",
@@ -1713,6 +1715,7 @@ def _solver_config(
     objective_shape: str,
     terminal_reserve_weight: float,
     terminal_reserve_temperature: float,
+    fatigue_balance_weight: float,
     cycles_per_window: int,
     stimulations_per_cycle: int,
     n_windows: int,
@@ -1844,6 +1847,8 @@ def _solver_config(
             objective_shape=objective_shape,
             terminal_reserve_weight=terminal_reserve_weight,
             terminal_reserve_temperature=terminal_reserve_temperature,
+            fatigue_balance_weight=fatigue_balance_weight,
+            fatigue_balance_effective_weight=10000.0 * fatigue_balance_weight,
             constant_crank_torque=resistive_torque,
             max_ipopt_iterations=ipopt_max_iter,
             ipopt_linear_solver=ipopt_linear_solver,
@@ -2013,6 +2018,8 @@ def _solver_config(
             objective_shape=objective_shape,
             terminal_reserve_weight=terminal_reserve_weight,
             terminal_reserve_temperature=terminal_reserve_temperature,
+            fatigue_balance_weight=fatigue_balance_weight,
+            fatigue_balance_effective_weight=10000.0 * fatigue_balance_weight,
             constant_crank_torque=resistive_torque,
             max_acados_iterations=acados_max_iter,
             acados_assisted_hot_start=acados_assisted_hot_start,
@@ -3848,6 +3855,20 @@ def solver_overview_rows(results: dict[str, dict]) -> list[dict]:
                 "terminal_capacity_reserve": result.get(
                     "terminal_capacity_reserve"
                 ),
+                # Compact BO-only screening metrics. These are deliberately
+                # unvalidated ranking hints, not scientific success criteria.
+                "bo_screen_cycles_unvalidated": result.get(
+                    "bo_screen_cycles_unvalidated"
+                ),
+                "bo_screen_terminal_capacity_ratios_unvalidated": result.get(
+                    "bo_screen_terminal_capacity_ratios_unvalidated"
+                ),
+                "bo_screen_terminal_min_capacity_ratio_unvalidated": result.get(
+                    "bo_screen_terminal_min_capacity_ratio_unvalidated"
+                ),
+                "bo_screen_terminal_capacity_error": result.get(
+                    "bo_screen_terminal_capacity_error"
+                ),
                 "error": result.get("error"),
                 "runtime_preflight": result.get("runtime_preflight"),
             }
@@ -4000,6 +4021,7 @@ def main(
     objective_shape: str = "quadratic",
     terminal_reserve_weight: float = 0.0,
     terminal_reserve_temperature: float = DEFAULT_SMOOTH_MIN_TEMPERATURE,
+    fatigue_balance_weight: float = 0.0,
     experimental_endurance_rollout: bool = False,
     endurance_rollout_weight: float = 0.0,
     endurance_rollout_profile: str | Path | None = None,
@@ -4025,7 +4047,7 @@ def main(
     mechanical_formulation: str = "reduced",
     bilateral_reduced: bool = False,
     formulation: str = "dynamic",
-    isokinetic_kinematics: str = "states",
+    isokinetic_kinematics: str = "auto",
     enforce_isokinetic_work_per_cycle: bool = False,
     reduced_dynamic_residual: str = "direct",
     energy_equivalent_torque: float = 0.2,
@@ -4432,6 +4454,7 @@ def main(
         objective_shape=objective_shape,
         terminal_reserve_weight=terminal_reserve_weight,
         terminal_reserve_temperature=terminal_reserve_temperature,
+        fatigue_balance_weight=fatigue_balance_weight,
         cycles_per_window=cycles_per_window,
         stimulations_per_cycle=stimulations_per_cycle,
         n_windows=n_windows,
@@ -4553,6 +4576,7 @@ def main(
         objective_shape=objective_shape,
         terminal_reserve_weight=terminal_reserve_weight,
         terminal_reserve_temperature=terminal_reserve_temperature,
+        fatigue_balance_weight=fatigue_balance_weight,
         cycles_per_window=cycles_per_window,
         stimulations_per_cycle=stimulations_per_cycle,
         n_windows=n_windows,
@@ -5329,6 +5353,8 @@ def main(
         raise ValueError(
             "The isokinetic formulation currently requires reduced mechanics."
         )
+    if isokinetic_kinematics == "auto":
+        isokinetic_kinematics = "prescribed" if formulation == "isokinetic" else "states"
     if isokinetic_kinematics not in ("states", "prescribed"):
         raise ValueError("isokinetic_kinematics must be 'states' or 'prescribed'.")
     if isokinetic_kinematics == "prescribed" and (
@@ -5458,6 +5484,15 @@ def build_cli() -> argparse.ArgumentParser:
         default=DEFAULT_SMOOTH_MIN_TEMPERATURE,
         help="Dimensionless smooth-min temperature for terminal muscle reserve.",
     )
+    parser.add_argument(
+        "--fatigue-balance-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Dimensionless Mayer weight on terminal variance of normalized muscle "
+            "fatigue; effective penalty weight is 10000 times this value."
+        ),
+    )
     add_endurance_rollout_cli(parser)
     add_muscle_horizon_cli(parser)
     add_pulse_width_slew_cli(parser)
@@ -5530,9 +5565,9 @@ def build_cli() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--isokinetic-kinematics",
-        choices=("states", "prescribed"),
-        default="states",
-        help="Keep theta/omega as NLP states or prescribe their exact isokinetic trajectory.",
+        choices=("auto", "states", "prescribed"),
+        default="auto",
+        help="auto prescribes theta/omega for isokinetic runs; states remains available explicitly.",
     )
     parser.add_argument(
         "--enforce-isokinetic-work-per-cycle",
@@ -7197,6 +7232,7 @@ if __name__ == "__main__":
         objective_shape=args.objective_shape,
         terminal_reserve_weight=args.terminal_reserve_weight,
         terminal_reserve_temperature=args.terminal_reserve_temperature,
+        fatigue_balance_weight=args.fatigue_balance_weight,
         experimental_endurance_rollout=args.experimental_endurance_rollout,
         endurance_rollout_weight=args.endurance_rollout_weight,
         endurance_rollout_profile=args.endurance_rollout_profile,

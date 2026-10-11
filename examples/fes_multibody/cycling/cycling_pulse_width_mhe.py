@@ -1309,6 +1309,7 @@ def prepare_nmpc(
     terminal_reserve_temperature = simulation_conditions.get(
         "terminal_reserve_temperature", DEFAULT_SMOOTH_MIN_TEMPERATURE
     )
+    fatigue_balance_weight = simulation_conditions.get("fatigue_balance_weight", 0.0)
     endurance_rollout_options = simulation_conditions.get("endurance_rollout_options")
     rollout_binding = None
     muscle_horizon_options = simulation_conditions.get("muscle_horizon_options")
@@ -1318,6 +1319,7 @@ def prepare_nmpc(
     task_reserve_binding = simulation_conditions.get("task_reserve_binding")
     max_pw_work_binding = simulation_conditions.get("max_pw_work_binding")
     mechanical_reserve_binding = simulation_conditions.get("mechanical_reserve_binding")
+    pw_tracking_binding = simulation_conditions.get("pw_tracking_binding")
     control_regularization_weight = simulation_conditions.get(
         "control_regularization_weight", 0.0
     )
@@ -1435,7 +1437,9 @@ def prepare_nmpc(
     formulation = simulation_conditions.get("formulation", "dynamic")
     if formulation not in ("dynamic", "isokinetic"):
         raise ValueError("formulation must be 'dynamic' or 'isokinetic'.")
-    isokinetic_kinematics = simulation_conditions.get("isokinetic_kinematics", "states")
+    isokinetic_kinematics = simulation_conditions.get("isokinetic_kinematics", "auto")
+    if isokinetic_kinematics == "auto":
+        isokinetic_kinematics = "prescribed" if formulation == "isokinetic" else "states"
     if isokinetic_kinematics not in ("states", "prescribed"):
         raise ValueError("isokinetic_kinematics must be 'states' or 'prescribed'.")
     if isokinetic_kinematics == "prescribed" and (
@@ -1908,6 +1912,7 @@ def prepare_nmpc(
         fatigue_objective_duration_s=window_cycle_duration,
         terminal_reserve_weight=terminal_reserve_weight,
         terminal_reserve_temperature=terminal_reserve_temperature,
+        fatigue_balance_weight=fatigue_balance_weight,
         endurance_rollout_binding=rollout_binding,
         muscle_horizon_binding=muscle_horizon_binding,
         fatigue_weight_binding=fatigue_weight_binding,
@@ -1915,6 +1920,7 @@ def prepare_nmpc(
         task_reserve_binding=task_reserve_binding,
         max_pw_work_binding=max_pw_work_binding,
         mechanical_reserve_binding=mechanical_reserve_binding,
+        pw_tracking_binding=pw_tracking_binding,
         control_regularization_weight=control_regularization_weight,
         control_regularization_target=control_regularization_target,
         wheel_qdot_regularization_weight=wheel_qdot_regularization_weight,
@@ -1982,7 +1988,7 @@ def prepare_nmpc(
     parameter_bindings = tuple(
         binding for binding in (rollout_binding, muscle_horizon_binding, fatigue_weight_binding,
                                 control_weight_binding, mechanical_reserve_binding, task_reserve_binding,
-                                max_pw_work_binding)
+                                max_pw_work_binding, pw_tracking_binding)
         if binding is not None
     )
     task_reserve_with_fatigue = (
@@ -1991,7 +1997,9 @@ def prepare_nmpc(
     )
     max_pw_with_fatigue = (max_pw_work_binding is not None and fatigue_weight_binding is not None
                           and len(parameter_bindings) == 2)
-    if len(parameter_bindings) > 1 and not (task_reserve_with_fatigue or max_pw_with_fatigue):
+    pw_tracking_with_fatigue = (pw_tracking_binding is not None and fatigue_weight_binding is not None
+                                and len(parameter_bindings) == 2)
+    if len(parameter_bindings) > 1 and not (task_reserve_with_fatigue or max_pw_with_fatigue or pw_tracking_with_fatigue):
         raise ValueError(
             "Only one fixed-parameter binding is supported per NMPC, except for the explicit "
             "experimental task-reserve + fatigue-weight pair; other parameter-list merges are unvalidated."
@@ -2004,6 +2012,10 @@ def prepare_nmpc(
         nmpc_options.update(task_reserve_parameter_options(
             task_reserve_binding, fatigue_weight_binding=fatigue_weight_binding, use_sx=use_sx,
         ))
+    elif pw_tracking_binding is not None:
+        from cocofest.optimization.parametric_pw_tracking import pw_tracking_parameter_options
+        nmpc_options.update(pw_tracking_parameter_options(
+            pw_tracking_binding, fatigue_weight_binding=fatigue_weight_binding, use_sx=use_sx))
     elif fatigue_weight_binding is not None:
         nmpc_options.update(fatigue_weight_binding.parameter_options(use_sx=use_sx))
     elif control_weight_binding is not None:
@@ -2033,6 +2045,9 @@ def prepare_nmpc(
     if task_reserve_binding is not None:
         task_reserve_binding.attach(nmpc)
         nmpc.task_reserve_binding = task_reserve_binding
+    if pw_tracking_binding is not None:
+        pw_tracking_binding.attach(nmpc)
+        nmpc.pw_tracking_binding = pw_tracking_binding
     if max_pw_work_binding is not None:
         max_pw_work_binding.attach(nmpc)
         nmpc.max_pw_work_binding = max_pw_work_binding
@@ -3436,6 +3451,7 @@ def set_objective_functions(
     fatigue_objective_duration_s: float = 1.0,
     terminal_reserve_weight: float = 0.0,
     terminal_reserve_temperature: float = DEFAULT_SMOOTH_MIN_TEMPERATURE,
+    fatigue_balance_weight: float = 0.0,
     control_regularization_weight: float = 0.0,
     control_regularization_target: float | None = None,
     wheel_qdot_regularization_weight: float = 0.0,
@@ -3452,6 +3468,7 @@ def set_objective_functions(
     fatigue_weight_binding=None,
     control_weight_binding=None,
     mechanical_reserve_binding=None,
+    pw_tracking_binding=None,
     task_reserve_binding=None,
     max_pw_work_binding=None,
 ):
@@ -3470,6 +3487,12 @@ def set_objective_functions(
         or terminal_reserve_temperature <= 0.0
     ):
         raise ValueError("terminal_reserve_temperature must be finite and positive.")
+    try:
+        fatigue_balance_weight = float(fatigue_balance_weight)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("fatigue_balance_weight must be finite and non-negative.") from exc
+    if not np.isfinite(fatigue_balance_weight) or fatigue_balance_weight < 0.0:
+        raise ValueError("fatigue_balance_weight must be finite and non-negative.")
     fatigue_objective_variant = validate_fatigue_objective_variant(
         fatigue_objective_variant,
         minimize_fatigue=minimize_fatigue,
@@ -3477,6 +3500,15 @@ def set_objective_functions(
     )
 
     objective_functions = ObjectiveList()
+    if pw_tracking_binding is not None:
+        objective_functions.add(
+            CustomObjective.minimize_parameterized_pulse_width_tracking,
+            custom_type=ObjectiveFcn.Lagrange,
+            node=Node.ALL_SHOOTING,
+            weight=1.0,
+            quadratic=False,
+            binding=pw_tracking_binding,
+        )
     if max_pw_work_binding is not None:
         objective_functions.add(CustomObjective.minimize_terminal_max_pw_work_capacity,
                                 custom_type=ObjectiveFcn.Mayer, node=Node.END,
@@ -3571,6 +3603,15 @@ def set_objective_functions(
             node=Node.ALL,
             weight=10000 * cost_fun_weight[2],
             quadratic=is_quadratic,
+        )
+
+    if fatigue_balance_weight > 0.0:
+        objective_functions.add(
+            CustomObjective.minimize_terminal_fatigue_imbalance,
+            custom_type=ObjectiveFcn.Mayer,
+            node=Node.END,
+            weight=10000 * fatigue_balance_weight,
+            quadratic=False,
         )
 
     if terminal_reserve_weight > 0.0:

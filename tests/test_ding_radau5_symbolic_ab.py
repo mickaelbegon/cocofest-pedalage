@@ -3,7 +3,10 @@ import casadi as ca
 import numpy as np
 import pytest
 
-from scripts.benchmark_ding_radau5_symbolic_ab import eliminate_affine_stages
+from scripts.benchmark_ding_radau5_symbolic_ab import (
+    _experimental_solver_configuration,
+    eliminate_affine_stages,
+)
 from scripts.validate_ding_radau5_condensation import radau5_tableau
 
 
@@ -52,3 +55,21 @@ def test_rejects_nonlinear_or_incomplete_elimination():
     with pytest.raises(ValueError, match="affine Radau rows"):
         eliminate_affine_stages({"x": x, "f": x[0], "g": g}, range(1, 6),
                                 {"lbg": np.zeros(5), "ubg": np.zeros(5)})
+
+
+def test_worhp_experimental_configuration_drops_ipopt_private_options():
+    plugin, options = _experimental_solver_configuration(
+        "worhp", {"ipopt": {"tol": 1e-8}, "ipopt.max_iter": 800}
+    )
+    assert plugin == "worhp"
+    assert "ipopt" not in options
+    assert options["worhp"]["MaxIter"] == 800
+    assert options["worhp"]["TolFeas"] == pytest.approx(1e-8)
+    assert options["worhp"]["TolOpti"] == pytest.approx(1e-8)
+
+
+def test_ipopt_experimental_configuration_is_unchanged():
+    original = {"ipopt": {"tol": 1e-8}}
+    plugin, options = _experimental_solver_configuration("ipopt", original)
+    assert plugin == "ipopt"
+    assert options is original

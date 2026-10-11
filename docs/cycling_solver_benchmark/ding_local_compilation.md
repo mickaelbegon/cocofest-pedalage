@@ -76,3 +76,59 @@ sortie et latence de la paire parallèle doivent être mesurés séparément.
 - Le minimum local et le nombre d'itérations peuvent varier au niveau des
   arrondis. Rapporter les certificats et la faisabilité originale reste
   indispensable; aucun gain ne se déduit du seul nombre de variables.
+
+## Benchmark réel prescrit du 4 octobre 2026
+
+Cas unilatéral à quatre muscles, fatigue unitaire, vitesse prescrite
+`−2π rad/s`, couple équivalent `0.2 Nm`, assistance/résistance bornée à
+`[−3,3] Nm`, 30 Hz, Radau-5, SX, IPOPT/MA57, tolérance NLP `1e-6`, seuil
+de faisabilité `1e-5`, sortie compacte et un thread numérique. Les appels
+complets proviennent du baseline de `paired100` et sont gelés à l'identique.
+La Hessienne seule est compilée; le problème réduit comprend 1750 variables,
+1651 contraintes et 2172 offsets runtime.
+
+Le smoke compilé valide 3/3 fenêtres, puis le benchmark valide 100/100 NLP.
+Sur les 100 appels, les sorties candidates `x`, `g`, multiplicateurs et
+objectifs sont **strictement identiques** aux sorties locales interprétées
+archivées; tous les nombres d'itérations sont identiques. Le certificat maximal
+vaut `8.00e-15` et la violation maximale du NLP original `7.39e-7`.
+
+| Mesure chaude (première fenêtre exclue), CPU 12 | Local interprété | Local + Hessienne C |
+|---|---:|---:|
+| Médiane IPOPT | 0.08288 s | 0.07460 s |
+| p90 IPOPT | 0.09336 s | 0.08508 s |
+| Médiane itération complète du banc d'essai | 0.17636 s | 0.17076 s |
+| p90 itération complète | 0.18643 s | 0.18074 s |
+| Médiane cumul évaluations Hessienne/appel | 0.008388 s | 0.000450 s |
+| Médiane itérations IPOPT | 36 | 36 |
+
+Le gain marginal de compilation est donc modeste : `−10.0 %` au solveur,
+`−3.2 %` sur l'itération complète de ce banc d'essai, après le gain beaucoup
+plus important apporté par la réduction elle-même. La compilation à froid et
+le rechargement demandent 4.50 s; un réemploi du cache demande 0.116 s, en plus
+de la préparation interprétée (0.200 s). Sur seulement 100 cycles, compiler à
+froid n'est pas amorti par les ~0.8 s gagnées au solveur. Un cache déjà préparé
+change ce bilan.
+
+Les deux runs du tableau sont épinglés au CPU 12. Le premier run interprété
+`paired100/local`, dont l'affinité n'était pas enregistrée dans ce rapport,
+donnait 0.07850 s au solveur et 0.17463 s à l'itération : sa comparaison au run
+compilé donne plutôt `−5.0 %` et `−2.2 %`. La variabilité inter-run est donc de
+plusieurs millisecondes. Il faut distinguer la réduction, dont le bénéfice est
+net, de l'ampleur exacte du petit gain supplémentaire de compilation. Toutes
+les solutions candidates des deux références interprétées restent strictement
+identiques à celles du compilé.
+
+Artefacts :
+
+- `local-results/prescribed-ding-local-ab-20261004/local-hessian-smoke-v2` ;
+- `local-results/prescribed-ding-local-ab-20261004/local-hessian-100` ;
+- `local-results/prescribed-ding-local-ab-20261004/local-hessian-comparison.json` ;
+- `local-results/prescribed-ding-local-ab-20261004/local-hessian-comparison-cpu12.json` ;
+- `local-results/prescribed-ding-local-ab-20261004/local-interpreted-cpu12-100`.
+
+Le temps d'itération rapporté inclut les opérations du banc d'essai, dont les
+audits et le rejeu. Le contrôleur extérieur reçoit la trajectoire baseline
+enregistrée : ce résultat valide la résolution numérique gelée, pas encore
+l'endurance d'un RHO compilé propageant ses propres solutions. Le registre de
+capacités de production reste inchangé.

@@ -7,6 +7,8 @@ process-local and leaves the production Bioptim and Cocofest sources intact.
 from __future__ import annotations
 
 import json
+import ctypes
+import os
 from pathlib import Path
 import runpy
 import sys
@@ -21,6 +23,58 @@ from scipy.sparse.linalg import splu
 
 def flat(value):
     return np.asarray(value, dtype=float).reshape(-1)
+
+
+# Keep the dynamically loaded shared object alive for the life of an
+# experimental run.  This is deliberately opt-in: the production CasADi
+# installation ships no compatible WorHP 1.16 interface on this host.
+_EXTERNAL_NLPSOL_PLUGIN = None
+
+
+def _load_external_nlpsol_plugin(plugin: str) -> None:
+    """Register an externally built CasADi NLP plugin in this process.
+
+    The adapter uses it only for controlled A/B experiments.  Loading through
+    ``ctypes`` avoids replacing CasADi or biorbd_casadi in the conda
+    environment, which would otherwise make the existing IPOPT path unsafe.
+    """
+    global _EXTERNAL_NLPSOL_PLUGIN
+    path = os.environ.get("DING_EXTERNAL_NLPSOL_PLUGIN")
+    if not path:
+        raise ValueError(
+            f"{plugin} requires DING_EXTERNAL_NLPSOL_PLUGIN to name its CasADi plugin shared library"
+        )
+    library = Path(path).expanduser().resolve(strict=True)
+    handle = ctypes.CDLL(str(library), mode=ctypes.RTLD_GLOBAL)
+    loader = getattr(handle, f"casadi_load_nlpsol_{plugin}", None)
+    if loader is None:
+        raise ValueError(f"{library} does not export casadi_load_nlpsol_{plugin}")
+    loader()
+    if not ca.has_nlpsol(plugin):
+        raise RuntimeError(f"CasADi did not register external NLP plugin {plugin!r}")
+    _EXTERNAL_NLPSOL_PLUGIN = handle
+
+
+def _experimental_solver_configuration(plugin: str, options: dict) -> tuple[str, dict]:
+    """Return only backend-neutral options for a controlled local A/B run."""
+    if plugin == "ipopt":
+        return plugin, options
+    if plugin != "worhp":
+        raise ValueError("DING_NLPSOL_PLUGIN must be 'ipopt' or 'worhp'")
+    # Do not pass IPOPT's private options to WorHP.  The tolerances and
+    # iteration cap match the local IPOPT reference protocol as closely as
+    # both solvers' termination definitions permit.
+    return plugin, {
+        "print_time": False,
+        "worhp": {
+            "MaxIter": 800,
+            "TolFeas": 1e-8,
+            "TolOpti": 1e-8,
+            "AcceptTolFeas": 1e-8,
+            "AcceptTolOpti": 1e-8,
+            "NLPprint": 0,
+        },
+    }
 
 
 def eliminate_affine_stages(nlp, eliminated, limits):
@@ -192,6 +246,10 @@ def main():
     args = sys.argv[2:]
     if args and args[0] == "--":
         args = args[1:]
+    requested_plugin = os.environ.get("DING_NLPSOL_PLUGIN", "ipopt").strip().lower()
+    if requested_plugin != "ipopt":
+        _load_external_nlpsol_plugin(requested_plugin)
+
     import bioptim.interfaces.interface_utils as iu
     import bioptim.interfaces.ipopt_interface as ii
 
@@ -211,7 +269,7 @@ def main():
         nonlocal solver_count
         interface = active["interface"]
         if plugin != "ipopt":
-            raise ValueError("This experimental adapter only supports IPOPT")
+            raise ValueError(f"Unexpected Bioptim backend {plugin!r}; expected IPOPT before A/B substitution")
         if mode == "inspect":
             print("SYMBOLIC_NLP", nlp["x"].shape, nlp["g"].shape, type(nlp["x"]), flush=True)
             for phase in interface.ocp.nlp:
@@ -220,7 +278,18 @@ def main():
                 print("X_SYMBOLS", phase.X_scaled[0], flush=True)
             print("VECTOR", nlp["x"][:10], flush=True)
             raise RuntimeError("Inspection complete")
-        result = AuditedSolver(original_nlpsol, name, plugin, nlp, options, interface, mode, output, solver_count)
+        selected_plugin, selected_options = _experimental_solver_configuration(requested_plugin, options)
+        result = AuditedSolver(
+            original_nlpsol,
+            name,
+            selected_plugin,
+            nlp,
+            selected_options,
+            interface,
+            mode,
+            output,
+            solver_count,
+        )
         solver_count += 1
         return result
 

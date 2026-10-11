@@ -392,7 +392,160 @@ def patch_bioptim_acados_interface() -> None:
 
     original_export_model = AcadosInterface._AcadosInterface__acados_export_model
     original_set_constraints = AcadosInterface._AcadosInterface__set_constraints
+    original_set_costs = AcadosInterface._AcadosInterface__set_costs
     original_update_solver = AcadosInterface._AcadosInterface__update_solver
+
+    def _is_isokinetic_torque_penalty(penalty):
+        functions = getattr(penalty, "function", ()) or ()
+        for function in functions:
+            name = getattr(function, "name", None)
+            if name is not None and name() == "reduced_isokinetic_load_torque_constraint":
+                return True
+        return False
+
+    def _acados_local_fatigue_residual(controller, x_symbol, p_symbol):
+        """Build the same per-muscle normalized fatigue residual at one stage."""
+        from casadi import sqrt, vertcat
+        from cocofest.optimization.parametric_fatigue_weights import FATIGUE_WEIGHT_PARAMETER_KEY
+
+        nlp = controller.nlp[0]
+        parameter_indices = np.asarray(
+            nlp.parameters[FATIGUE_WEIGHT_PARAMETER_KEY].index, dtype=int
+        ).reshape(-1)
+        parameter_scaling = np.asarray(
+            nlp.parameters[FATIGUE_WEIGHT_PARAMETER_KEY].scaling.scaling,
+            dtype=float,
+        ).reshape(-1)
+        muscles = nlp.model.muscles_dynamics_model
+        if parameter_indices.size != len(muscles) or parameter_scaling.size != len(muscles):
+            raise ValueError("ACADOS fatigue-weight and muscle dimensions do not match.")
+        residuals = []
+        for index, muscle in enumerate(muscles):
+            state = nlp.states[f"A_{muscle.muscle_name}"]
+            state_index = int(np.asarray(state.index, dtype=int).reshape(-1)[0])
+            state_scale = float(
+                np.asarray(nlp.x_scaling[f"A_{muscle.muscle_name}"].scaling, dtype=float)
+                .reshape(-1)[0]
+            )
+            weight = p_symbol[parameter_indices[index]] * parameter_scaling[index]
+            fatigue = 1.0 - x_symbol[state_index] * state_scale / float(muscle.a_scale)
+            residuals.append(sqrt(weight) * fatigue)
+        return vertcat(*residuals)
+
+    def patched_set_costs(self, ocp):
+        """Replace only the aggregate custom fatigue callback with its local form.
+
+        Bioptim's Node.ALL fatigue callback accepts every state node at once;
+        ACADOS needs one stage-local residual.  The expression is mathematically
+        identical at a node, and ACADOS applies its usual quadrature over stages.
+        """
+        from casadi import Function, SX
+        from cocofest.optimization.parametric_fatigue_weights import FATIGUE_WEIGHT_PARAMETER_KEY
+
+        nlp = ocp.nlp[0]
+        changed = []
+        if FATIGUE_WEIGHT_PARAMETER_KEY in nlp.parameters:
+            for objective in nlp.J:
+                functions = getattr(objective, "function", None)
+                if not functions:
+                    continue
+                first = functions[0]
+                if getattr(first, "name", lambda: "")() != "minimize_parameterized_overall_muscle_fatigue":
+                    continue
+                symbols = {}
+                for key in ("t", "dt", "x", "u", "p", "a", "d"):
+                    rows, cols = first.size_in(key)
+                    if key == "x":
+                        rows, cols = nlp.states.shape, 1
+                    symbols[key] = SX.sym(f"rho_acados_{key}_{id(objective)}", rows, cols)
+                residual = _acados_local_fatigue_residual(
+                    SimpleNamespace(nlp=ocp.nlp), symbols["x"], symbols["p"]
+                )
+                local_function = Function(
+                    f"rho_acados_stage_fatigue_{id(objective)}",
+                    [symbols[key] for key in ("t", "dt", "x", "u", "p", "a", "d")],
+                    [residual],
+                    ["t", "dt", "x", "u", "p", "a", "d"],
+                    ["fatigue_residual"],
+                )
+                changed.append((objective, functions))
+                objective.function = [local_function]
+        try:
+            original_set_costs(self, ocp)
+        finally:
+            for objective, functions in changed:
+                objective.function = functions
+
+    def _append_acados_isokinetic_torque_constraint(self, ocp):
+        """Install the analytical isokinetic load bound as a local ACADOS h(x)."""
+        from casadi import DM, vertcat
+        from bioptim import Node
+
+        nlp = ocp.nlp[0]
+        reduced_model = getattr(nlp.model, "bio_model", nlp.model)
+        if not getattr(reduced_model, "isokinetic", False):
+            return
+        state_scaling = np.ones(nlp.states.shape)
+        for key in nlp.states.keys():
+            state_scaling[nlp.states[key].index] = np.asarray(
+                nlp.x_scaling[key].scaling[:, 0], dtype=float
+            )
+        augmented_state = self.acados_model.x
+        x_scaled = augmented_state[self.nparams : self.nparams + nlp.states.shape]
+        x_physical = x_scaled * DM(state_scaling)
+        muscle_forces = vertcat(*(
+            x_physical[int(np.asarray(nlp.states[f"F_{muscle.muscle_name}"].index).reshape(-1)[0])]
+            for muscle in reduced_model.muscles_dynamics_model
+        ))
+        if reduced_model.uses_prescribed_kinematics:
+            # periodic_node exports absolute local time as the final numerical
+            # data component, matching the exact phase used by the dynamics.
+            if self.acados_model.p.numel() == 0:
+                raise RuntimeError("Prescribed ACADOS kinematics require periodic-node time data.")
+            theta, omega = reduced_model.prescribed_kinematics(self.acados_model.p[-1])
+        else:
+            theta_index = int(np.asarray(nlp.states["theta"].index).reshape(-1)[0])
+            theta = x_physical[theta_index]
+            omega = (
+                reduced_model.isokinetic_omega
+                if reduced_model.isokinetic
+                else x_physical[int(np.asarray(nlp.states["omega"].index).reshape(-1)[0])]
+            )
+        load_torque = reduced_model.required_load_torque(theta, omega, muscle_forces)
+
+        torque_penalties = [g for g in nlp.g if _is_isokinetic_torque_penalty(g)]
+        shooting_penalty = next((g for g in torque_penalties if g.node[0] == Node.ALL_SHOOTING), None)
+        terminal_penalty = next((g for g in torque_penalties if g.node[0] == Node.END), None)
+        if shooting_penalty is None or terminal_penalty is None:
+            raise RuntimeError("Expected shooting-node and terminal isokinetic torque bounds.")
+
+        def append_expression(name, value):
+            previous = getattr(self.acados_model, name)
+            setattr(self.acados_model, name, vertcat(previous, value))
+
+        append_expression("con_h_expr_0", load_torque)
+        append_expression("con_h_expr", load_torque)
+        append_expression("con_h_expr_e", load_torque)
+        if (shooting_penalty.bounds.min.shape[0] != 1
+                or terminal_penalty.bounds.min.shape[0] != 1):
+            raise RuntimeError("Expected one scalar isokinetic load-torque bound.")
+        # Bioptim's runtime updater writes bounds from these accumulators (not
+        # directly from AcadosOcp.constraints), so extend them as well.
+        self.all_g_bounds.concatenate(shooting_penalty.bounds)
+        self.end_g_bounds.concatenate(terminal_penalty.bounds)
+        self.acados_ocp.constraints.lh_0 = np.concatenate(
+            (self.start_g_bounds.min[:, 0], self.all_g_bounds.min[:, 0])
+        )
+        self.acados_ocp.constraints.uh_0 = np.concatenate(
+            (self.start_g_bounds.max[:, 0], self.all_g_bounds.max[:, 0])
+        )
+        self.acados_ocp.constraints.lh = np.asarray(self.all_g_bounds.min[:, 0])
+        self.acados_ocp.constraints.uh = np.asarray(self.all_g_bounds.max[:, 0])
+        self.acados_ocp.constraints.lh_e = np.asarray(self.end_g_bounds.min[:, 0])
+        self.acados_ocp.constraints.uh_e = np.asarray(self.end_g_bounds.max[:, 0])
+        self.acados_ocp.dims.nh_0 = int(self.acados_model.con_h_expr_0.numel())
+        self.acados_ocp.dims.nh = int(self.acados_model.con_h_expr.numel())
+        self.acados_ocp.dims.nh_e = int(self.acados_model.con_h_expr_e.numel())
 
     def patched_export_model(self, ocp):
         original_export_model(self, ocp)
@@ -489,7 +642,15 @@ def patch_bioptim_acados_interface() -> None:
         return lower, upper
 
     def patched_set_constraints(self, ocp):
-        original_set_constraints(self, ocp)
+        nlp = ocp.nlp[0]
+        original_constraints = nlp.g
+        torque_penalties = [g for g in original_constraints if _is_isokinetic_torque_penalty(g)]
+        if torque_penalties:
+            nlp.g = [g for g in original_constraints if not _is_isokinetic_torque_penalty(g)]
+        try:
+            original_set_constraints(self, ocp)
+        finally:
+            nlp.g = original_constraints
         reduced_model = getattr(ocp.nlp[0].model, "bio_model", ocp.nlp[0].model)
         if getattr(reduced_model, "uses_prescribed_kinematics", False):
             # ACADOS path constraints do not accept a free CasADi time input.
@@ -509,9 +670,45 @@ def patch_bioptim_acados_interface() -> None:
         lower, upper = scaled_control_bounds(self)
         self.acados_ocp.constraints.lbu = lower.reshape((-1, 1))
         self.acados_ocp.constraints.ubu = upper.reshape((-1, 1))
+        if torque_penalties:
+            self._cocofest_isokinetic_torque_penalties = torque_penalties
+            _append_acados_isokinetic_torque_constraint(self, ocp)
 
     def patched_update_solver(self):
-        original_update_solver(self)
+        # IPOPT's degree-5 collocation seed contains six columns per shooting
+        # interval (181 columns for a 30-interval RHO), whereas ACADOS accepts
+        # only shooting-node guesses (31 columns). Transfer the shared mesh
+        # endpoints temporarily; keep the richer source guess intact for the
+        # IPOPT recovery OCP and for later diagnostics.
+        nlp = self.ocp.nlp[0]
+        expected_state_columns = int(nlp.ns) + 1
+        from bioptim.limits.path_conditions import PathCondition
+
+        dense_state_guesses = {}
+        for key in nlp.states.keys():
+            initial_guess = nlp.x_init[key].init
+            values = np.asarray(initial_guess, dtype=float)
+            if values.ndim != 2 or values.shape[1] <= expected_state_columns:
+                continue
+            intervals = expected_state_columns - 1
+            dense_intervals = values.shape[1] - 1
+            if intervals < 1 or dense_intervals % intervals:
+                raise ValueError(
+                    "ACADOS cannot map dense IPOPT state guesses to shooting nodes: "
+                    f"state={key}, columns={values.shape[1]}, expected={expected_state_columns}."
+                )
+            stride = dense_intervals // intervals
+            if stride < 2:
+                continue
+            dense_state_guesses[key] = initial_guess
+            nlp.x_init[key].init = PathCondition(
+                values[:, ::stride].copy(), interpolation=initial_guess.type
+            )
+        try:
+            original_update_solver(self)
+        finally:
+            for key, initial_guess in dense_state_guesses.items():
+                nlp.x_init[key].init = initial_guess
         if self.ocp_solver is None:
             return
         self.ocp._cocofest_wheel_cycle_boundary_summary = (
@@ -546,11 +743,18 @@ def patch_bioptim_acados_interface() -> None:
         terminal_x = np.empty((self.ocp.nlp[0].states.shape))
         for key in self.ocp.nlp[0].states.keys():
             index = self.ocp.nlp[0].states[key].index
-            self.ocp.nlp[0].x_init[key].check_and_adjust_dimensions(
-                self.ocp.nlp[0].states[key].shape, self.ocp.nlp[0].ns
-            )
+            dense_guess = dense_state_guesses.get(key)
+            if dense_guess is None:
+                self.ocp.nlp[0].x_init[key].check_and_adjust_dimensions(
+                    self.ocp.nlp[0].states[key].shape, self.ocp.nlp[0].ns
+                )
+                terminal_guess = self.ocp.nlp[0].x_init[key].init.evaluate_at(terminal_node)
+            else:
+                # Dense IPOPT collocation guesses retain all within-interval
+                # nodes; their final column is the same terminal shooting state.
+                terminal_guess = np.asarray(dense_guess, dtype=float)[:, -1]
             terminal_x[index] = (
-                self.ocp.nlp[0].x_init[key].init.evaluate_at(terminal_node)
+                terminal_guess
                 / self.ocp.nlp[0].x_scaling[key].scaling[:, 0]
             )
         self.ocp_solver.set(
@@ -583,6 +787,7 @@ def patch_bioptim_acados_interface() -> None:
                 self.ocp_solver.constraints_set(stage, "ubu", stage_upper)
 
     AcadosInterface._AcadosInterface__acados_export_model = patched_export_model
+    AcadosInterface._AcadosInterface__set_costs = patched_set_costs
     AcadosInterface._AcadosInterface__set_constraints = patched_set_constraints
     AcadosInterface._AcadosInterface__update_solver = patched_update_solver
     AcadosInterface._cocofest_interface_patch = True
@@ -1237,9 +1442,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--isokinetic-kinematics",
-        choices=("states", "prescribed"),
-        default="states",
-        help="Keep theta/omega as NLP states or prescribe their exact isokinetic trajectory.",
+        choices=("auto", "states", "prescribed"),
+        default="auto",
+        help="auto prescribes theta/omega for isokinetic runs; states remains available explicitly.",
     )
     parser.add_argument(
         "--reduced-dynamic-residual",
@@ -1358,6 +1563,16 @@ def build_argument_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_SMOOTH_MIN_TEMPERATURE,
         help="Dimensionless smooth-min temperature for the terminal reserve proxy.",
+    )
+    parser.add_argument(
+        "--fatigue-balance-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Optional dimensionless Mayer weight on terminal variance of normalized "
+            "muscle fatigue; effective objective weight is 10000 times this value. "
+            "Zero preserves the existing objective graph."
+        ),
     )
     parser.add_argument("--experimental-max-pw-work-weight", type=float, default=0.,
                         help="Experimental normalized terminal positive-work capacity multiplier (direct scale).")
@@ -4102,6 +4317,7 @@ def _warmup_cache_signature(
         "objective_shape": args.objective_shape,
         "terminal_reserve_weight": args.terminal_reserve_weight,
         "terminal_reserve_temperature": args.terminal_reserve_temperature,
+        "fatigue_balance_weight": args.fatigue_balance_weight,
         "terminal_wheel_regularization_weight": (
             _terminal_wheel_objective_weight(args)
         ),
@@ -10701,6 +10917,8 @@ def build_window_summary(
     absolute_cycle_reference: float | None = None,
     absolute_cycle_tolerance: float | None = None,
     prescribed_model=None,
+    compact_final_validation: bool = False,
+    capacity_scales: dict[str, float] | None = None,
 ) -> dict:
     (
         merged_solution,
@@ -10710,16 +10928,70 @@ def build_window_summary(
     accounting = _window_accounting(
         source_window_solutions, exported_cycle_solutions, cycles_per_window
     )
-    wheel_trace = _wheel_trace_from_exported_cycles(
-        merged_solution, exported_cycle_solutions, prescribed_model
+    if (
+        compact_final_validation
+        and prescribed_model is not None
+        and getattr(prescribed_model, "uses_prescribed_kinematics", False)
+        and exported_cycle_solutions
+    ):
+        # Prescribed isokinetic angle is identical on every one-cycle window
+        # except for its known cycle offset. Decode only the first window, then
+        # reproduce the exact theta trace algebraically instead of asking
+        # Bioptim for ~1,000 state dictionaries.
+        first_states = _merged_compact_states_with_prescribed_kinematics(
+            exported_cycle_solutions[0], prescribed_model, cycle_index=0
+        )
+        first_theta = np.asarray(first_states["theta"], dtype=float)[0]
+        wheel_trace = np.concatenate(
+            [
+                first_theta[:-1] + cycle_index * expected_cycle_shift
+                for cycle_index in range(len(exported_cycle_solutions) - 1)
+            ]
+            + [
+                first_theta
+                + max(0, len(exported_cycle_solutions) - 1) * expected_cycle_shift
+            ]
+        )
+    else:
+        wheel_trace = _wheel_trace_from_exported_cycles(
+            merged_solution, exported_cycle_solutions, prescribed_model
+        )
+    if compact_final_validation:
+        # The full state/control trace reconstruction across ~1,000 one-cycle
+        # windows dominated the final report build (840 s in a recent run).
+        # Keep the complete per-window feasibility and isokinetic audits, but
+        # materialize only terminal fatigue capacities for this final-only
+        # compact report.
+        control_traces = {}
+        terminal_solution = exported_cycle_solutions[-1] if exported_cycle_solutions else merged_solution
+        terminal_states = (
+            _merged_compact_states_with_prescribed_kinematics(
+                terminal_solution, prescribed_model,
+                cycle_index=max(0, len(exported_cycle_solutions) - 1),
+            )
+            if prescribed_model is not None and not hasattr(terminal_solution, "ocp")
+            else _solution_states_with_prescribed_kinematics(terminal_solution)
+        )
+        state_traces = {
+            key: np.asarray(terminal_states[key], dtype=float).reshape(-1)[-1:]
+            for key in (capacity_scales or {})
+            if key in terminal_states
+        }
+    else:
+        control_traces = _control_traces_from_exported_cycles(
+            merged_solution, exported_cycle_solutions
+        )
+        state_traces = _state_traces_from_exported_cycles(
+            merged_solution, exported_cycle_solutions, prescribed_model
+        )
+    # Boundary jumps are a diagnostic only; the compact final certificate keeps
+    # the solver feasibility and exact isokinetic/mechanical gates below, so it
+    # need not decode every state at every cycle boundary a second time.
+    state_boundary_jumps = (
+        {"available": False, "reason": "omitted_by_compact_final_validation"}
+        if compact_final_validation
+        else _state_boundary_jump_summary(exported_cycle_solutions)
     )
-    control_traces = _control_traces_from_exported_cycles(
-        merged_solution, exported_cycle_solutions
-    )
-    state_traces = _state_traces_from_exported_cycles(
-        merged_solution, exported_cycle_solutions, prescribed_model
-    )
-    state_boundary_jumps = _state_boundary_jump_summary(exported_cycle_solutions)
     window_objectives = _window_objective_values(source_window_solutions)
     finite_objectives = [value for value in window_objectives if value is not None]
     objective = float(sum(finite_objectives)) if finite_objectives else float("nan")
@@ -10786,6 +11058,87 @@ def build_window_summary(
         "cycle_solutions": exported_cycle_solutions,
         "diagnostics": diagnostics,
         "success": success,
+        "compact_final_validation": bool(compact_final_validation),
+        "compact_final_validation_omissions": (
+            ["full_state_traces", "full_control_traces"]
+            if compact_final_validation else []
+        ),
+    }
+
+
+def build_deferred_rho_journal_summary(
+    sol,
+    requested_windows: int,
+    cycles_per_window: int,
+    capacity_scales: dict[str, float] | None = None,
+    prescribed_model=None,
+) -> dict:
+    """Return only causal completion metadata; detailed certification is offline.
+
+    This intentionally does not decode state/control traces, assess the
+    physical crank trajectory, or attach a DOP853 replay. It is for a
+    performance-run journal whose solver archives are finalized by a separate
+    process. Therefore no field in this result can certify physiological or
+    mechanical feasibility.
+    """
+    merged, source_windows, exported_cycles = _split_receding_solution(sol)
+    accounting = _window_accounting(source_windows, exported_cycles, cycles_per_window)
+    objectives = _window_objective_values(source_windows)
+    finite_objectives = [value for value in objectives if value is not None]
+    # A deliberately lightweight, explicitly non-certifying tie-break for BO
+    # screening. Read only terminal A from the final exported RHO window; do
+    # not build full trajectories, run high-accuracy rollouts, or perform the
+    # isokinetic/mechanical audits used by the final validation.
+    terminal_capacity_ratios = {}
+    terminal_capacity_error = None
+    if capacity_scales:
+        terminal_solution = exported_cycles[-1] if exported_cycles else merged
+        try:
+            terminal_states = (
+                _merged_compact_states_with_prescribed_kinematics(terminal_solution, prescribed_model)
+                if prescribed_model is not None and not hasattr(terminal_solution, "ocp")
+                else _solution_states_with_prescribed_kinematics(terminal_solution)
+            )
+            for key, scale in capacity_scales.items():
+                values = np.asarray(terminal_states[key], dtype=float).reshape(-1)
+                if values.size and np.isfinite(values[-1]) and float(scale) > 0:
+                    terminal_capacity_ratios[key] = float(values[-1] / float(scale))
+        except (KeyError, TypeError, ValueError, IndexError, AttributeError) as error:
+            terminal_capacity_error = f"{type(error).__name__}: {error}"
+            terminal_capacity_ratios = {}
+    terminal_min_capacity_ratio = (
+        min(terminal_capacity_ratios.values()) if terminal_capacity_ratios else None
+    )
+    return {
+        "mode": "rho_deferred_summary",
+        "status": merged.status,
+        "objective": float(sum(finite_objectives)) if finite_objectives else float("nan"),
+        "solver_time_s": merged.solver_time_to_optimize,
+        "wall_time_s": merged.real_time_to_optimize,
+        "requested_windows": requested_windows,
+        "achieved_windows": accounting["attempted_windows"],
+        "attempted_windows": accounting["attempted_windows"],
+        "successful_windows": accounting["successful_windows"],
+        "failed_windows": accounting["failed_windows"],
+        "exported_cycles": accounting["exported_cycles"],
+        "covered_cycles": accounting["covered_cycles"],
+        "fatigue_capacity_scales": dict(capacity_scales or {}),
+        "bo_screen_cycles_unvalidated": accounting["covered_cycles"],
+        "bo_screen_terminal_capacity_ratios_unvalidated": terminal_capacity_ratios,
+        "bo_screen_terminal_min_capacity_ratio_unvalidated": terminal_min_capacity_ratio,
+        "bo_screen_terminal_capacity_error": terminal_capacity_error,
+        "window_statuses": accounting["window_statuses"],
+        "window_iterations": [getattr(window, "iterations", None) for window in source_windows],
+        "window_objectives": objectives,
+        "window_feasibility": [],
+        "solver_success": False,
+        "physical_success": False,
+        "success": False,
+        "deferred_post_solve_summary": True,
+        "deferred_summary_reason": (
+            "Only causal solver completion was retained. Run the offline summary and "
+            "mechanical/DOP853 audits before making a feasibility or endurance claim."
+        ),
     }
 
 
@@ -19764,7 +20117,11 @@ def solve_case(
     args.formulation = getattr(args, "formulation", "dynamic")
     if args.formulation not in ("dynamic", "isokinetic"):
         raise ValueError("formulation must be 'dynamic' or 'isokinetic'.")
-    args.isokinetic_kinematics = getattr(args, "isokinetic_kinematics", "states")
+    args.isokinetic_kinematics = getattr(args, "isokinetic_kinematics", "auto")
+    if args.isokinetic_kinematics == "auto":
+        args.isokinetic_kinematics = (
+            "prescribed" if args.formulation == "isokinetic" else "states"
+        )
     if args.isokinetic_kinematics not in ("states", "prescribed"):
         raise ValueError("--isokinetic-kinematics must be states or prescribed.")
     if args.isokinetic_kinematics == "prescribed" and (
@@ -19912,8 +20269,10 @@ def solve_case(
     args.terminal_wheel_q_reference_mode = "absolute_initial"
     objectives = parse_objectives(args.objective)
     if getattr(args, "parametric_fatigue_weights", False):
-        if args.solver not in NLP_SOLVER_NAMES:
-            raise ValueError("--parametric-fatigue-weights is available only with CasADi NLP solvers.")
+        if args.solver not in (*NLP_SOLVER_NAMES, "acados"):
+            raise ValueError(
+                "--parametric-fatigue-weights requires a CasADi NLP solver or ACADOS."
+            )
         if "fatigue" not in objectives:
             raise ValueError("--parametric-fatigue-weights requires the fatigue objective.")
         if args._endurance_rollout_options is not None or args._muscle_horizon_options is not None:
@@ -19942,6 +20301,9 @@ def solve_case(
         args.terminal_reserve_weight,
         args.terminal_reserve_temperature,
     )
+    if not np.isfinite(args.fatigue_balance_weight) or args.fatigue_balance_weight < 0.0:
+        raise ValueError("--fatigue-balance-weight must be finite and non-negative.")
+    args.fatigue_balance_effective_weight = float(10000.0 * args.fatigue_balance_weight)
     args.terminal_reserve_effective_weight = float(
         10000.0 * args.terminal_reserve_weight
     )
@@ -21051,6 +21413,16 @@ def solve_case(
             requested_fatigue_weights if requested_fatigue_weights is not None else [1.0] * len(muscle_models),
             allow_zero=requested_fatigue_weights is not None,
         )
+    pw_tracking_binding = None
+    pw_tracking = getattr(args, "experimental_pw_tracking_config", None)
+    if pw_tracking is not None:
+        from cocofest.optimization.parametric_pw_tracking import ParametricPulseWidthTrackingBinding
+        if not isinstance(pw_tracking, dict) or set(pw_tracking) - {"scale_s"}:
+            raise ValueError("experimental_pw_tracking_config accepts only scale_s")
+        pw_tracking_binding = ParametricPulseWidthTrackingBinding(
+            [m.muscle_name for m in muscle_models], args.stimulations_per_cycle,
+            scale_s=float(pw_tracking.get("scale_s", 1e-4)),
+        )
     control_weight_binding = None
     if getattr(args, "parametric_control_weights", False):
         from cocofest.optimization.parametric_control_weights import ParametricControlWeightBinding
@@ -21285,6 +21657,8 @@ def solve_case(
         "fatigue_objective_variant": getattr(args, "fatigue_objective_variant", "legacy"),
         **({"fatigue_weight_binding": fatigue_weight_binding}
            if fatigue_weight_binding is not None else {}),
+        **({"pw_tracking_binding": pw_tracking_binding}
+           if pw_tracking_binding is not None else {}),
         **({"control_weight_binding": control_weight_binding}
            if control_weight_binding is not None else {}),
         **({"mechanical_reserve_binding": mechanical_reserve_binding}
@@ -21448,6 +21822,16 @@ def solve_case(
         },
     )
     nmpc = problem_context.nmpc
+    # Re-read capacities from the instantiated NMPC model. The initial source
+    # model can omit muscles in the prescribed/reduced setup, which leaves the
+    # deferred BO screen without the terminal-reserve tie-break.
+    screen_capacity_scales = fatigue_capacity_scales
+    if not screen_capacity_scales:
+        active_muscles = getattr(nmpc.nlp[0].model, "muscles_dynamics_model", [])
+        screen_capacity_scales = {
+            f"A_{muscle.muscle_name}": float(muscle.a_scale)
+            for muscle in active_muscles
+        }
     nmpc.preserve_warmup_pulse_width_seed = bool(
         getattr(args, "preserve_warmup_pulse_width_seed", False)
     )
@@ -25818,6 +26202,9 @@ def solve_case(
             raise
         if echo:
             print(f"solve_error: {type(exc).__name__}: {exc}")
+            cause = exc.__cause__
+            if cause is not None:
+                print(f"solve_error_cause: {type(cause).__name__}: {cause}")
         summary = build_failed_solve_summary(
             nmpc,
             args,
@@ -26033,18 +26420,40 @@ def solve_case(
         if args.solver == "acados" and args.acados_diagnostics:
             if not acados_window_diagnostics:
                 print_acados_diagnostics("merged", collect_acados_diagnostics(sol[0]))
+    deferred_post_solve_summary = os.environ.get(
+        "COCOFEST_DEFERRED_RHO_SUMMARY", "0"
+    ) in {"1", "true", "True"}
     summary_build_start = perf_counter()
-    summary = build_window_summary(
-        sol,
-        requested_windows=args.n_windows,
-        cycles_per_window=args.cycles_per_window,
-        feasibility_tolerance=window_feasibility_tolerance,
-        cycle_progress_tolerance=wheel_cycle_progress_tolerance,
-        absolute_cycle_reference=absolute_wheel_q_reference,
-        absolute_cycle_tolerance=wheel_absolute_cycle_tolerance,
-        prescribed_model=getattr(nmpc.nlp[0].model, "bio_model", nmpc.nlp[0].model),
-    )
-    if isokinetic_config is not None:
+    if deferred_post_solve_summary:
+        if args.receding_horizon_solution_output is not None or args.validate_integrator_maps:
+            raise ValueError(
+                "Deferred RHO summary is incompatible with in-process trajectory export or DOP853 audit. "
+                "Run those operations in the offline finalizer."
+            )
+        summary = build_deferred_rho_journal_summary(
+            sol,
+            requested_windows=args.n_windows,
+            cycles_per_window=args.cycles_per_window,
+            capacity_scales=screen_capacity_scales,
+            prescribed_model=getattr(nmpc.nlp[0].model, "bio_model", nmpc.nlp[0].model),
+        )
+    else:
+        compact_final_validation = os.environ.get(
+            "COCOFEST_COMPACT_FINAL_SUMMARY", "0"
+        ) in {"1", "true", "True"}
+        summary = build_window_summary(
+            sol,
+            requested_windows=args.n_windows,
+            cycles_per_window=args.cycles_per_window,
+            feasibility_tolerance=window_feasibility_tolerance,
+            cycle_progress_tolerance=wheel_cycle_progress_tolerance,
+            absolute_cycle_reference=absolute_wheel_q_reference,
+            absolute_cycle_tolerance=wheel_absolute_cycle_tolerance,
+            prescribed_model=getattr(nmpc.nlp[0].model, "bio_model", nmpc.nlp[0].model),
+            compact_final_validation=compact_final_validation,
+            capacity_scales=fatigue_capacity_scales,
+        )
+    if isokinetic_config is not None and not deferred_post_solve_summary:
         attach_isokinetic_audits(
             summary,
             isokinetic_config,
@@ -26053,6 +26462,17 @@ def solve_case(
             fatigue_capacity_scales,
         )
     summary_build_wall_time_s = perf_counter() - summary_build_start
+    if deferred_post_solve_summary:
+        summary["args"] = args
+        summary["execution_timing"] = {
+            "pre_solve_setup_wall_time_s": pre_solve_setup_wall_time_s,
+            "rho_solve_loop_wall_time_s": rho_solve_loop_wall_time_s,
+            "rho_complete_iteration_wall_time_samples_s": rho_complete_iteration_wall_time_samples_s,
+            "post_solve_wall_time_s": perf_counter() - post_solve_start,
+            "summary_build_wall_time_s": summary_build_wall_time_s,
+            "offline_finalizer_required": True,
+        }
+        return summary
     if raw_solver_attempt_summary is not None:
         summary["solver_attempt_accounting"] = raw_solver_attempt_summary
     if args.solver == "acados" and args.acados_diagnostics:
@@ -26415,6 +26835,9 @@ def solve_case(
         "post_solve_wall_time_s": perf_counter() - post_solve_start,
         "certified_trace_filter_wall_time_s": certified_trace_filter_wall_time_s,
         "summary_build_wall_time_s": summary_build_wall_time_s,
+        "compact_final_validation": bool(
+            summary.get("compact_final_validation", False)
+        ),
         "exact_initial_audits_wall_time_s": exact_initial_audits_wall_time_s,
         "mechanical_audit_wall_time_s": mechanical_audit_wall_time_s,
         "high_accuracy_trace_rollout_wall_time_s": (

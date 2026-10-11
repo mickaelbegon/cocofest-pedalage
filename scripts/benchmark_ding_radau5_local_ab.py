@@ -25,6 +25,21 @@ except ModuleNotFoundError:
 flat = base.flat
 
 
+def append_local_parameters(nlp, objective, constraints, reconstruction_offsets):
+    """Keep original NLP parameters and append adapter reconstruction offsets."""
+    original_parameter = nlp.get("p", ca.SX.zeros(0))
+    original_count = original_parameter.numel()
+    combined = ca.SX.sym(
+        "local_parameters", original_count + reconstruction_offsets.numel(),
+    )
+    if original_count:
+        objective = ca.substitute(objective, original_parameter, combined[:original_count])
+        constraints = ca.substitute(constraints, original_parameter, combined[:original_count])
+    objective = ca.substitute(objective, reconstruction_offsets, combined[original_count:])
+    constraints = ca.substitute(constraints, reconstruction_offsets, combined[original_count:])
+    return combined, objective, constraints, original_count
+
+
 def frozen_limits(original, archive_dir, nlp_index, call, offset=0):
     """Replace an OCP call's incoming data by a recorded original-space call.
 
@@ -122,6 +137,7 @@ def reconstruct_bound_duals_vectorized(lx, r, z, target, coefficient, offsets,
 
 def build_local_map(nlp, interface):
     x, g = nlp["x"], nlp["g"]
+    original_parameter = nlp.get("p", ca.SX.zeros(0))
     if not isinstance(x, ca.SX):
         raise ValueError("Local adapter requires SX")
     names = {x[i].name(): i for i in range(x.numel())}
@@ -170,11 +186,16 @@ def build_local_map(nlp, interface):
     factor = splu(operator)
     constant = flat(ca.Function("linear_constant", [x], [g[linear_rows.tolist()]])(np.zeros(x.numel())))
     kept = np.setdiff1d(np.arange(g.numel()), removed)
-    y, p = ca.SX.sym("local_states", len(r)), ca.SX.sym("radau_offsets", len(z))
+    y = ca.SX.sym("local_states", len(r))
+    p = ca.SX.sym("radau_offsets", len(z))
     full = ca.SX.zeros(x.numel()); full[r.tolist()] = y
     full[z.tolist()] = ca.DM(coefficient) * y[target.tolist()] + p
-    reduced = {"x": y, "p": p, "f": ca.substitute(nlp["f"], x, full),
-               "g": ca.substitute(g[kept.tolist()], x, full)}
+    f_reduced = ca.substitute(nlp["f"], x, full)
+    g_reduced = ca.substitute(g[kept.tolist()], x, full)
+    combined_parameter, f_reduced, g_reduced, original_parameter_count = append_local_parameters(
+        nlp, f_reduced, g_reduced, p,
+    )
+    reduced = {"x": y, "p": combined_parameter, "f": f_reduced, "g": g_reduced}
     # Prove that dropped dynamics are implied by retained A dynamics. Their
     # residuals need not vanish at an infeasible IPOPT iterate: G_z = B G_A.
     projection = ca.Function("local_projection", [], [ca.jacobian(full, y)])()["o0"].sparse()
@@ -213,10 +234,11 @@ def build_local_map(nlp, interface):
                     [zpositions[int(i)] for i in initial_z])), shape=(len(initial_z), len(z)))
     dual_factor = splu(vstack([jz, bz]).tocsc())
     lm = ca.SX.sym("remaining_duals", len(kept))
-    stationarity = ca.Function("z_stationarity", [x, lm],
+    stationarity = ca.Function("z_stationarity", [x, lm, original_parameter],
         [ca.gradient(nlp["f"] + ca.dot(lm, g[kept.tolist()]), x)[z.tolist()]])
     return dict(nlp=reduced, r=r, z=z, target=target, coefficient=coefficient, initial=initial,
                 removed=removed, kept=kept, factor=factor, constant=constant,
+                original_parameter_count=original_parameter_count,
                 zpos=np.array([positions[int(i)] for i in z]),
                 apos=np.array([positions[int(i)] for i in a_index]),
                 reconstruct=ca.Function("local_full", [y, p], [full]),
@@ -237,13 +259,22 @@ class LocalSolver:
             hessian=ca.hessian(effective["f"] + ca.dot(lm, effective["g"]), effective["x"])[0].nnz())
         tic = time.perf_counter(); self.native = factory(name, plugin, effective, options)
         self.build_s = time.perf_counter() - tic
-        self.fg = ca.Function("original_audit", [nlp["x"]], [nlp["f"], nlp["g"]])
+        original_parameter = nlp.get("p", ca.SX.zeros(0))
+        self.original_parameter_count = original_parameter.numel()
+        self.fg = ca.Function(
+            "original_audit", [nlp["x"], original_parameter], [nlp["f"], nlp["g"]],
+        )
         self.metrics, self.calls = [], 0
         frozen = os.environ.get("DING_FROZEN_INPUT_DIR")
         self.frozen_input_dir = Path(frozen).resolve() if frozen else None
         self.frozen_input_offset = int(os.environ.get("DING_FROZEN_CALL_OFFSET", "0"))
         self.frozen_return_recorded = os.environ.get("DING_FROZEN_RETURN_RECORDED") == "1"
         self.vectorized = os.environ.get("DING_LOCAL_VECTORIZED", "1") != "0"
+        self.online_journal = os.environ.get("DING_ONLINE_JOURNAL", "0") in {"1", "true", "True"}
+        self.save_inputs = os.environ.get("DING_LOCAL_SAVE_INPUTS", "1") not in {"0", "false", "False"}
+        self.journal_path = self.output / f"nlp{self.index}_metrics.jsonl"
+        if self.online_journal and self.journal_path.exists():
+            raise FileExistsError(f"Refusing to append to an existing online journal: {self.journal_path}")
         print("DING_LOCAL_BUILD", self.mode, self.nnz, flush=True)
 
     def stats(self):
@@ -262,7 +293,12 @@ class LocalSolver:
                 raise ValueError("All incoming linear Ding states must be fixed")
             zero_force = m["factor"].solve(np.r_[-m["constant"], lo[m["initial"]]])
             offsets = zero_force[m["zpos"]] - c * zero_force[m["apos"]]
-            limits["p"] = offsets
+            original_parameters = flat(original.get("p", np.zeros(0)))
+            if len(original_parameters) != m["original_parameter_count"]:
+                raise ValueError(
+                    "The incoming IPOPT parameter vector does not match the original NLP parameter layout"
+                )
+            limits["p"] = np.r_[original_parameters, offsets]
             limits["x0"] = flat(original["x0"])[r]
             certificate_error = np.max(np.abs(flat(m["certificate"](
                 m["reconstruct"](limits["x0"], offsets)))), initial=0)
@@ -300,13 +336,15 @@ class LocalSolver:
                         bound = lo[z[q]] if (direction == "lbx") == (c[q] > 0) else hi[z[q]]
                         if abs((bound - offsets[q]) / c[q] - limits[direction][i]) < 1e-9:
                             lx[z[q]], lx[r[i]] = lx[r[i]] / c[q], 0.; break
-            rhs = -flat(m["stationarity"](full, lg[kept])) - lx[z]
+            original_parameters = flat(original.get("p", np.zeros(0)))
+            rhs = -flat(m["stationarity"](full, lg[kept], original_parameters)) - lx[z]
             dual = m["dual_factor"].solve(rhs, trans="T")
             lg[m["removed"]] = dual[:len(m["removed"])]; lx[m["initial_z"]] += dual[len(m["removed"]):]
             sol.update(x=full, lam_x=ca.DM(lx), lam_g=ca.DM(lg))
         reconstruction = time.perf_counter() - tic
         tic = time.perf_counter()
-        f, g = self.fg(sol["x"]); sol["g"] = g
+        f, g = self.fg(sol["x"], flat(original.get("p", np.zeros(0))))
+        sol["g"] = g
         violation = max(np.max(np.maximum(flat(original[lo]) - flat(value), 0), initial=0)
             for value, lo in ((sol["x"], "lbx"), (g, "lbg")))
         violation = max(violation, *(np.max(np.maximum(flat(value) - flat(original[hi]), 0), initial=0)
@@ -316,6 +354,8 @@ class LocalSolver:
         metric = dict(mode=self.mode, call=self.calls, original_nx=self.original["x"].numel(),
             original_ng=self.original["g"].numel(), solver_nx=len(flat(limits["x0"])),
             solver_ng=len(flat(limits["lbg"])), nnz=self.nnz, mapping_s=self.mapping_s,
+            original_parameter_count=self.original_parameter_count,
+            solver_parameter_count=len(flat(limits.get("p", np.zeros(0)))),
             solver_build_s=self.build_s, input_mapping_s=preparation, call_wall_s=wall,
             reconstruction_s=reconstruction, original_audit_s=audit, vectorized=self.vectorized,
             original_max_bound_constraint_violation=violation, objective=float(f),
@@ -325,13 +365,24 @@ class LocalSolver:
             iterations=stats.get("iter_count"), timings={k:v for k,v in stats.items()
                 if k.startswith(("t_wall_", "t_proc_", "n_call_"))})
         self.output.mkdir(parents=True, exist_ok=True)
-        tic = time.perf_counter()
-        np.savez(self.output / f"nlp{self.index}_call{self.calls}.npz", x=flat(sol["x"]), g=flat(g),
-                 lam_x=flat(sol["lam_x"]), lam_g=flat(sol["lam_g"]),
-                 **{k:flat(v) for k,v in original.items() if k in ("x0", "lbx", "ubx", "lbg", "ubg", "lam_x0", "lam_g0")})
-        metric["archive_npz_s"] = time.perf_counter() - tic
-        self.metrics.append(metric)
-        (self.output / f"nlp{self.index}_metrics.json").write_text(json.dumps(self.metrics, indent=2)+"\n")
+        if self.save_inputs:
+            tic = time.perf_counter()
+            np.savez(self.output / f"nlp{self.index}_call{self.calls}.npz", x=flat(sol["x"]), g=flat(g),
+                     lam_x=flat(sol["lam_x"]), lam_g=flat(sol["lam_g"]),
+                     **{k:flat(v) for k,v in original.items() if k in ("x0", "lbx", "ubx", "lbg", "ubg", "lam_x0", "lam_g0")})
+            metric["archive_npz_s"] = time.perf_counter() - tic
+        else:
+            metric["archive_npz_s"] = 0.0
+        if self.online_journal:
+            # A complete JSON object per line leaves an inspectable prefix if a
+            # campaign is interrupted. Materialization into the legacy JSON
+            # array is deliberately an offline operation.
+            with self.journal_path.open("a", encoding="utf-8") as journal:
+                journal.write(json.dumps(metric, allow_nan=False, sort_keys=True) + "\n")
+                journal.flush()
+        else:
+            self.metrics.append(metric)
+            (self.output / f"nlp{self.index}_metrics.json").write_text(json.dumps(self.metrics, indent=2)+"\n")
         print("DING_LOCAL_RESULT " + json.dumps(metric), flush=True)
         self.calls += 1
         if frozen_path and self.frozen_return_recorded:

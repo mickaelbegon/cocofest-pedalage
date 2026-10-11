@@ -79,7 +79,7 @@ def test_isokinetic_mode_adds_energy_state_and_eliminates_load_control(monkeypat
         "configure_new_variable",
         staticmethod(record_variable),
     )
-    model = _model(isokinetic=True)
+    model = _model(isokinetic=True, isokinetic_kinematics="states")
     for configure in model.state_configuration_functions:
         configure(None, None)
     state_names = [entry[0] for entry in configured]
@@ -143,7 +143,9 @@ def test_default_mode_retains_legacy_dimensions_configuration_and_acceleration(
 def test_isokinetic_dynamics_has_prescribed_speed_and_exact_inverse_work_rate(
     monkeypatch,
 ):
-    model = _fake_dynamics_model(isokinetic=True, isokinetic_omega=-6.0)
+    model = _fake_dynamics_model(
+        isokinetic=True, isokinetic_kinematics="states", isokinetic_omega=-6.0
+    )
 
     # The omega state is retained for backward-compatible state layouts, but
     # the prescribed speed must govern every mechanical expression.
@@ -153,6 +155,12 @@ def test_isokinetic_dynamics_has_prescribed_speed_and_exact_inverse_work_rate(
     expected_power = -required_torque * 0.25 * -6.0
 
     np.testing.assert_allclose(result[-3:], np.array([-6.0, 0.0, expected_power]))
+
+
+def test_isokinetic_model_defaults_to_prescribed_kinematics():
+    model = _model(isokinetic=True)
+    assert model.uses_prescribed_kinematics
+    assert model.nb_state == 21
 
 
 def test_mechanical_equilibrium_residual_is_acceleration_numerator():
@@ -217,7 +225,7 @@ def test_prescribed_kinematics_removes_only_mechanical_states_and_roundtrips(mon
 
 
 @pytest.mark.parametrize("kwargs,match", [
-    ({"isokinetic_kinematics": "unknown"}, "must be 'states' or 'prescribed'"),
+    ({"isokinetic_kinematics": "unknown"}, "must be 'auto', 'states' or 'prescribed'"),
     ({"isokinetic_kinematics": "prescribed"}, "requires isokinetic=True"),
     ({"isokinetic_theta0": np.nan}, "must be finite"),
     ({"isokinetic_time_origin": np.inf}, "must be finite"),
