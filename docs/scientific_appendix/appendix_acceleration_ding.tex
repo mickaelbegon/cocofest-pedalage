@@ -251,6 +251,14 @@ Each formulation propagated its own solution for 100 cycles; no reference input 
 
 Two persistent copies of K6-I1-DL on CPU 12 and CPU 13 also certified 100/100 cycles each. Their paired NLP-to-audit median latency was 0.0920 s (P90 0.1047 s), with a 0.563 ms median barrier skew. The copies used identical muscle parameters, so this establishes process contention, cache reuse, and synchronization only; it is not a bilateral physiological-asymmetry experiment. Dense DOP853 checks include calcium, force, capacity, work, and bounds. No solver outcome is interpreted here as an endurance or physiological-failure certificate.
 
+\subsubsection{Cached numeric layout and interpolation-index dispatch}
+
+The fixed-structure RHO rebuilds numerical vectors of bounds and initial guesses at every window. A numeric-dispatch cache now retains only immutable geometry: variable indices, node blocks and interpolation-point indices. It rereads the live bound, initial-guess and scaling values for every call. Consequently, a new initial state, terminal bound or workload cannot be hidden by the cache. The vectorised path supports constant, first/interior/last, linear, frame-wise and all-point conditions; spline and custom conditions retain the scalar implementation.
+
+In a strict sequential 10-window A/B on the prescribed K6-I1-DL condition, the cached and scalar paths produced bit-identical archived primal variables, constraints and bound/constraint multipliers at every window. The median complete hot RHO iteration changed from 0.1802 to 0.1124~s ($-37.6\%$). IPOPT time itself did not decrease (0.0983 versus 0.0989~s median), as expected: the change removes Python dispatch overhead rather than modifying the NLP, Hessian, MA57 factorisation or stopping rule.
+
+A separate 100-window cached confirmation on CPU~13 certified 100/100 windows. The hot complete-iteration median/P90 was 0.1086/0.1223~s, while the IPOPT-only median/P90 was 0.0841/0.0976~s. The solver loop took 12.40~s for 100 windows. The full process took 100.94~s because the final scientific summary alone took 83.43~s and the post-solve mechanical audit 4.16~s; neither operation delays the next RHO decision. This is a validated online-overhead result for this prescribed condition, not evidence of a further physiological or endurance improvement. The scalar/cached 100-window pair remains desirable to characterize run-to-run timing variability, but is not required for the exactness claim established by the archived 10-window A/B.
+
 \subsection{Radau $s=3$ at 50 Hz versus Radau $s=5$ at 30 Hz}
 
 This comparison is deliberately \emph{not factorial}. The 50 Hz case is the historical full-mechanics, MX, finite-history Ding baseline; K5 at 30 Hz uses reduced mechanics, periodic-node Ding calcium, and SX. It answers whether the historical configuration remains dynamically viable at its native 50 Hz setting, not the isolated effect of changing collocation order.
